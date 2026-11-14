@@ -1,0 +1,41 @@
+{
+  "api_credentials_forwarded": false,
+  "authentication": "chatgpt",
+  "cancellation": {
+    "interrupt_acknowledged": true,
+    "interrupt_sent": true,
+    "status": "interrupted",
+    "turn_id": "01a1d5ac-1307-77a1-8427-4d5ca36123a5"
+  },
+  "gate": "M0-A",
+  "model": "gpt-6.1-sol",
+  "raw_protocol_logged": false,
+  "recovered_from_runtime_history": true,
+  "rejected_server_requests": 0,
+  "restart_resume_observed": true,
+  "runtime": "codex-cli 0.169.0",
+  "thread_id": "01a1d5a8-b6ca-78f3-ad67-886ca82c333e",
+  "turns": [
+    {
+      "answer": {
+        "value": 42
+      },
+      "status": "completed",
+      "turn_id": "01a1d5a8-b6d8-7c43-91cd-3c1265a41c2b"
+    },
+    {
+      "answer": {
+        "value": 51
+      },
+      "status": "completed",
+      "turn_id": "01a1d5a8-c689-7ea2-9fb4-c30278702288"
+    },
+    {
+      "answer": {
+        "value": 102
+      },
+      "status": "completed",
+      "turn_id": "01a1d5a8-cf24-7020-9030-de4f52fda75b"
+    }
+  ]
+}

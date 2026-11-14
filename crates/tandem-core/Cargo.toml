@@ -1,0 +1,22 @@
+[package]
+name = "tandem-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+tempfile = "3"
+ignore = "0.4"
+rusqlite = { version = "=0.42.0", default-features = false, features = ["bundled", "backup"] }
+similar = "2.7"
+libc.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
+toml = "0.8"
+semver = "1"
+schemars = "1.2.3"
+unicode-normalization = "0.1"

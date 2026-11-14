@@ -1,0 +1,103 @@
+{
+  "authentication": "signed_out",
+  "checks": [
+    {
+      "check": "companion reads selected input",
+      "exit_code": 0,
+      "expected_allowed": true,
+      "passed": true
+    },
+    {
+      "check": "companion denies outside read",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "companion denies symlink escape",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "companion denies parent traversal",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "subprocess cannot read outside input",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "companion denies source write",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "signed-out validation writes declared artifact",
+      "exit_code": 0,
+      "expected_allowed": true,
+      "passed": true
+    },
+    {
+      "check": "validation denies source write",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "takeover writes selected source file",
+      "exit_code": 0,
+      "expected_allowed": true,
+      "passed": true
+    },
+    {
+      "check": "takeover denies ungranted context write",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "takeover denies original outside write",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "takeover denies write through outward symlink",
+      "exit_code": 1,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "validation denies reachable loopback network",
+      "exit_code": 7,
+      "expected_allowed": false,
+      "passed": true
+    },
+    {
+      "check": "real Cargo build script and test obey artifact boundary",
+      "exit_code": 0,
+      "expected_allowed": true,
+      "passed": true
+    },
+    {
+      "check": "streaming command cancellation reaps spawned child",
+      "exit_code": 137,
+      "passed": true
+    }
+  ],
+  "fixture_root": "$HOME/Library/Caches/Tandem/m0-boundaries/1794586539495",
+  "gate": "M0-C partial",
+  "outside_sentinel_unchanged": true,
+  "remaining": [
+    "model-originated tool paths",
+    "configuration/instruction isolation",
+    "crash recovery"
+  ],
+  "runtime": "codex-cli 0.169.0"
+}

@@ -1,0 +1,280 @@
+{
+  "milestone": "M3",
+  "status": "implemented and verified on the development Mac",
+  "recorded_at_utc": "2026-11-14T07:44:36.372493+00:00",
+  "versions": {
+    "codex": "0.169.0",
+    "rust": "1.100.0",
+    "pyright": "1.1.414",
+    "python": "3.14.6",
+    "node": "24.22.1",
+    "sqlite_schema": 3
+  },
+  "automated": {
+    "workspace_tests_passed": 53,
+    "intentionally_ignored_entries": 2,
+    "ignored_entry_explanation": [
+      "The editor crash helper is invoked explicitly by its parent test.",
+      "The real Codex transport-loss test is run explicitly and passed; it starts no model turn."
+    ],
+    "strict_clippy": "passed",
+    "format_check": "passed",
+    "development_build": "passed",
+    "ad_hoc_signature_verification": "passed",
+    "followup_checks": [
+      "cargo test --workspace",
+      "cargo test -p tandem-companion",
+      "cargo test -p tandem-companion real_transport_loss_before_turn -- --ignored",
+      "cargo clippy --workspace --all-targets -- -D warnings",
+      "cargo fmt --all --check",
+      "cargo build -p tandem",
+      "codesign --verify --strict .tandem-local/m3/Tandem.app"
+    ]
+  },
+  "subscription": {
+    "authentication": "Codex-managed ChatGPT",
+    "api_key_fallback": false,
+    "included_usage_gate": "Requires ordinaryUsageAllowed=true; unknown/blocked prevents model turns",
+    "included_usage_observed": "available",
+    "real_structured_turn": "completed",
+    "real_new_process_resume": "Completed",
+    "resume_retained_prior_context": true,
+    "memory_generation_and_use": false
+  },
+  "real_companion_journeys": {
+    "fixture_turns": 10,
+    "languages": [
+      "rust",
+      "python"
+    ],
+    "valid_alternatives_accepted": true,
+    "incorrect_implementations_received_blocking_feedback": true,
+    "explicit_solutions_returned": 2,
+    "originals_unchanged": true,
+    "observed_tool_items": 0
+  },
+  "real_language": {
+    "rust_unsaved_multifile": "passed",
+    "python_unsaved_multifile": "passed",
+    "python_versioned_diagnostics": "passed",
+    "stale_results": "passed",
+    "rust_formatting_and_restart": "passed"
+  },
+  "real_validation": {
+    "rust_pass_fail_cancel_missing_dependency": "passed",
+    "python_pass_and_fail": "passed",
+    "project_venv_symlinks": "passed",
+    "project_venv_copied_interpreter": "passed",
+    "original_source_access_denied": true,
+    "loopback_network_denied": true,
+    "source_cache_hardlink_write_checks": "passed",
+    "artifact_writes_allowed": true,
+    "python_permission_grant_separate_from_dependency_evidence_identity": true
+  },
+  "native_ui": {
+    "profile": ".tandem-local/m3/qa-state",
+    "bundle_id": "dev.tandem.m3qa",
+    "run_statuses": [
+      {
+        "action": "Analyze",
+        "status": "Completed",
+        "received_bytes": 2155,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Guide",
+        "status": "Completed",
+        "received_bytes": 1839,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Review",
+        "status": "Completed",
+        "received_bytes": 730,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Reveal",
+        "status": "Completed",
+        "received_bytes": 1975,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Reveal",
+        "status": "Completed",
+        "received_bytes": 1746,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Guide",
+        "status": "Quarantined",
+        "received_bytes": 1422,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Guide",
+        "status": "Cancelled",
+        "received_bytes": 955,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Guide",
+        "status": "Interrupted",
+        "received_bytes": 782,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Ask",
+        "status": "Completed",
+        "received_bytes": 409,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Ask",
+        "status": "Failed",
+        "received_bytes": 0,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Reveal",
+        "status": "Completed",
+        "received_bytes": 1928,
+        "observed_tool_items": 0
+      },
+      {
+        "action": "Guide",
+        "status": "Failed",
+        "received_bytes": 0,
+        "observed_tool_items": 0
+      }
+    ],
+    "observed": [
+      "Rust/Python guidance preferences and provenance",
+      "structured analysis",
+      "proposal goal edited before acceptance",
+      "accepted step activated",
+      "hidden detailed guidance",
+      "unsaved alternative typed into source buffer",
+      "captured Cargo test passed",
+      "alternative accepted by model with evidence",
+      "review marked historical immediately after edit",
+      "solution displayed separately",
+      "solution preview rejected typing",
+      "collapse removed solution content from accessibility output",
+      "guidance change during generation quarantined content",
+      "active model turn cancelled",
+      "forced M3 process termination recovered accepted task/preferences/draft and interrupted run without replay",
+      "Python tool trust and current unsaved type diagnostics",
+      "corrected Python diagnostic removed",
+      "captured Python unittest passes unsaved alternative",
+      "direct question without plan acceptance",
+      "automatic preview excludes and preserves unsent question text",
+      "Rust preview hidden when Python guidance selected",
+      "temporary override expires at manual completion",
+      "single saved task reachable after New Task",
+      "actionable transport-failure message with preserved request",
+      "editing and undo during connection loss",
+      "explicit reconnect does not replay failed request",
+      "final packaged native recovery and task navigation"
+    ],
+    "original_rust_disk_still_stub": true,
+    "original_python_disk_still_stub": true,
+    "retained_drafts": 1,
+    "retained_tasks": 1,
+    "spoken_voiceover_reverified": false,
+    "remaining": [],
+    "access_blocker": "Resolved on continuation: the window was accessible. Original cause was not established; no rendering-architecture change was needed.",
+    "followup": {
+      "automatic_previews_completed": 1,
+      "unsent_draft_transmitted": false,
+      "completed_task_steps": 1,
+      "temporary_overrides_remaining": 0,
+      "python_check_id": "3d0c5cbf-ce40-4457-b6ab-260f94e40478",
+      "failure_before_model_turn_confirmed": true,
+      "final_native_bundle_verified": true
+    }
+  },
+  "package": {
+    "binary_sha256": "35876c541d9707bbc4956576b2e1aa15d856d91a8f40c625eeb25fd351e3bdea",
+    "development_build": true,
+    "signature": "ad-hoc",
+    "notarized": false
+  },
+  "bundle": ".tandem-local/m3/Tandem.app",
+  "source_sha256": {
+    "Cargo.lock": "ae4c2670f094f5432a72ce9d2675641fb26d584f8fb0a8ddee604301e3a2c1fc",
+    "Cargo.toml": "b84a3f8a4b4351af85a0808da9f2c6db06fd3f89706ea034b7c75a068d292704",
+    "crates/tandem/Cargo.toml": "1270536feb5274bd38b00e3022d9c7238c69de9a8ace4d5ffdeb8b4adcec297e",
+    "crates/tandem/src/main.rs": "513d46e5d14c033defaa9371f68335bc9431775088069c05706033c01357d3d6",
+    "crates/tandem/src/workspace/companion.rs": "218b36921eb45fb8a7e5991c091714a2f79d5ba95e2d157c05309f1d76372b07",
+    "crates/tandem/src/workspace/companion_view.rs": "48433348cba543fa7491436c8eb00b3efddb191bbb0204a6999182015021ed7f",
+    "crates/tandem/src/workspace/panels.rs": "006d14b9e53905eb3cb6798fac28b19f9780f7a70ec611a836464dfcc8433222",
+    "crates/tandem/src/workspace/provider.rs": "55adb71cc92158418fde966447e5ea362c993f825498ad0af4987c905a8c0c7a",
+    "crates/tandem/src/workspace/tools.rs": "50b63dda3d5b755938b8904c89a2985a8142f98d9a1dfd262c1f53572ea7699b",
+    "crates/tandem/src/workspace/view.rs": "830b262f4519ce2a6fab4fa9de13d10617750b65416726848409bafecd998010",
+    "crates/tandem/src/workspace.rs": "cfaabc073edc03d1667864217c685bd35fcc8cbb4b730bd54e01fdaf80623fb1",
+    "crates/tandem-checks/Cargo.toml": "1bee074eaca57b90fe5320676481d77526e28af6275e40cab74df9f14c3b7047",
+    "crates/tandem-checks/examples/integration.rs": "a4357299df8b47ca1243fa4bfaca7ef58455fd9b8127698cfd346fd0d04c8a00",
+    "crates/tandem-checks/examples/python.rs": "fb7e1db347ed367720f3cdb1278cbf2a2610d4a743bb1384464e7dad8541ba6a",
+    "crates/tandem-checks/src/lib.rs": "2b7be05b2b81c6ff01cea37875be31672b91b81bd867fac8f9589867e490f312",
+    "crates/tandem-checks/src/runner.rs": "37d42c8b5470c7397c4fd0794aadbfd1110fe30f9b64498aae2503180c013054",
+    "crates/tandem-checks/src/snapshot.rs": "97164471642723396991f7813917bc952c78f5139f009a54aacf71125d5abb55",
+    "crates/tandem-codex/Cargo.toml": "f11b4b668eb3653a02c831a7529adf672dfca4feecb723b8f0e5986ea3fe92fe",
+    "crates/tandem-codex/src/lib.rs": "32e0e94cc82f1242f6b95a4e14362b82cc036f3d4c15dd914cd5db5a4a90a628",
+    "crates/tandem-companion/Cargo.toml": "e7006662ad3d345abe21d420bb511d2f2def2bd1f6161036f8925f7a773b1ea6",
+    "crates/tandem-companion/examples/journeys.rs": "b12fa72dcede3f10453c8329a46b3aac932e75a422a4b005637cd6e526d61fe3",
+    "crates/tandem-companion/examples/smoke.rs": "462dbe6dc68b805d80864803034bfac289026786b2d5ebbad5c95c4795316811",
+    "crates/tandem-companion/src/context.rs": "d23b82453e438c9100a787ad5e0e515c64ce6bca28a8ed23fca07bd51e1f453a",
+    "crates/tandem-companion/src/lib.rs": "113d46da46749e349d36977f9abd7ed529e24943635033139e37cdcc9cfd7a1c",
+    "crates/tandem-companion/src/runtime.rs": "c96180eca41e3e229c76cb645bc89dbf3ab653550af4a5f28518f6fd3b4fa898",
+    "crates/tandem-core/Cargo.toml": "80d85c2f4f869a86b0f3c659466b41a17e827e2a0b6c6a66683e30b242d402ee",
+    "crates/tandem-core/src/companion.rs": "0de49db7a2c1ae5b4b7dffa9783a7a8f7fea13a4299e13dde9226cc76775541a",
+    "crates/tandem-core/src/guidance.rs": "a973efa0ce82de2baf597e5a815cbd5bbc5343c208057d19e015562de9125ec5",
+    "crates/tandem-core/src/lib.rs": "bec57589668b616cd3d6a88dc8526c92fba8b5dbfa1d2b78a41f6ac8e6b2c9c6",
+    "crates/tandem-core/src/storage.rs": "c08f228b6df345e0e163e53222a89351cd90e28e8fa67432f02f7655995bd55f",
+    "crates/tandem-core/src/task.rs": "964a57f8c6042a1891a3c43361e70b027bf70bf36927a1a5c3edce75c0e06fc2",
+    "crates/tandem-core/src/tools.rs": "a640e86ed1057dad818c4b880045b353a9e7d81884f408b20ce2b2f2e71c2a4e",
+    "crates/tandem-core/tests/m2.rs": "a3401dd39997583f7e33f698796db1fd0d587065f8193f88bb8a5127604ecf3a",
+    "crates/tandem-core/tests/m3.rs": "888586c0ccd0b5f1b861f88ab9e58f119b7fa8186f55b314959d9fc6779e0246",
+    "crates/tandem-core/tests/workspace.rs": "1fa929c5ec964017292fcfdcd76206f8dcb25b6eeb22e0d0c42486b5aa592aa7",
+    "crates/tandem-editor-probe/Cargo.toml": "b17b224ea8c9c845fe3fa4d9fc4654fb7f63563cb6dea359f958eff3c2440c6f",
+    "crates/tandem-editor-probe/src/editor_check.rs": "d9786d75c0a51c2dc8243a5a2fcee865091ef2f8c1cec5e32b5c98cf12b8f083",
+    "crates/tandem-editor-probe/src/language.rs": "e072378e817b346894b70c0d81a1488c64709130933d42f7d6eea985da810439",
+    "crates/tandem-editor-probe/src/main.rs": "f69d55b7474af8c308000ffa53aef64ed0735bc7b5b1568b33f572db7acd12b8",
+    "crates/tandem-editor-probe/src/terminal.rs": "e48373c490f089233299b88dbbb5b70d8ee78c3ddcde24472c7e4ab49dfd2387",
+    "crates/tandem-lsp/Cargo.toml": "45c99453f9091aedb1c55e2b0be025d69a34079a2b119a216259a9075d63ea7f",
+    "crates/tandem-lsp/examples/integration.rs": "3128ee3ce3e45f8e52b166afa2693d95d1e808d36d13427ad9fa8b1283a6a07c",
+    "crates/tandem-lsp/examples/python.rs": "e4d1f8d71cb2d6752c662a5fc90182163b8c1b8c761062c833ad094ca8058204",
+    "crates/tandem-lsp/src/legacy.rs": "c5e356a08ab443961fd071ea9c3b54baa600230dd20cd8b6c64fad10e2bb07cc",
+    "crates/tandem-lsp/src/lib.rs": "4c1e1aeceb962c75aba460c217aa9674d073842df2ab2b248045e7a24b0cdb89",
+    "crates/tandem-lsp/src/project.rs": "06907839e817b2178556dd1301fecf15df38a262f280b39abc03c61fbc70591a",
+    "crates/tandem-lsp/tests/supervision.rs": "b4267eeb4dd7d51233c44f0390221501242be7b08ac3057ed71967a8ffbca2c4",
+    "crates/tandem-probe/Cargo.toml": "bbe5b6ede5500a4ef2ab4e11966c20fca411ab7d57c1dc7af0671cf7b24a3c3e",
+    "crates/tandem-probe/src/boundaries.rs": "b627b5aa846872a57b2b8229a3e3891e8920d42a0a593d475cb80ad86431ee21",
+    "crates/tandem-probe/src/main.rs": "b38fc03898c4abbf4b8713ab49feb7a9928281e2cc43d616b358e43a2f63aa31",
+    "crates/tandem-terminal/Cargo.toml": "3e46f1729da648874717ee26c256c58a1d59ff31c8939b7b902baf22c04ebcfe",
+    "crates/tandem-terminal/src/lib.rs": "346a5235aa860d101c7e71d4530103c770ff951a25575cdfa58757bd5a8c9e09",
+    "crates/tandem-terminal/src/tests.rs": "45244d91f9d3359a268c4aec99cf04dc8f33728af6cee48d710f1b73d642957a",
+    "scripts/package-macos-dev.py": "6fd38cb5d859f9ab6d224c5a4a5a2533132b372eeb5c73d143c2ce1ac09b8506"
+  },
+  "private_evidence": [
+    ".tandem-local/m3/tests-final.log",
+    ".tandem-local/m3/clippy-final.log",
+    ".tandem-local/m3/journey-receipt.json",
+    ".tandem-local/m3/companion-smoke/receipt.json",
+    ".tandem-local/m3/companion-smoke/resume-receipt.json",
+    ".tandem-local/m3/transport-failure.log",
+    ".tandem-local/m3/python-language/receipt.json",
+    ".tandem-local/m3/python-checks/receipt.json",
+    ".tandem-local/m3/python-checks/venv-receipt.json",
+    ".tandem-local/m3/python-checks/venv-copies-receipt.json",
+    ".tandem-local/m3/qa-state/workspace.sqlite",
+    ".tandem-local/m3/window-health.txt",
+    ".tandem-local/m3/finish-workspace-tests.log",
+    ".tandem-local/m3/finish-tests.log",
+    ".tandem-local/m3/finish-transport.log",
+    ".tandem-local/m3/finish-clippy.log",
+    ".tandem-local/m3/finish-build.log"
+  ],
+  "completed_at_utc": "2026-11-14T20:30:31.072536+00:00"
+}

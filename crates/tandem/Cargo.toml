@@ -1,0 +1,24 @@
+[package]
+name = "tandem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-toml", "tree-sitter-markdown", "tree-sitter-diff"] }
+tandem-codex = { path = "../tandem-codex" }
+tandem-core = { path = "../tandem-core" }
+tandem-terminal = { path = "../tandem-terminal" }
+tandem-lsp = { path = "../tandem-lsp" }
+tandem-checks = { path = "../tandem-checks" }
+tandem-agent = { path = "../tandem-agent" }
+tandem-companion = { path = "../tandem-companion" }
+lsp-types = "0.97.0"
+smol = "2.0"
+notify = "8.2"
+
+[dev-dependencies]
+tempfile = "3"

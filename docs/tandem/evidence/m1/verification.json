@@ -1,0 +1,86 @@
+{
+  "milestone": "M1",
+  "recorded_at_utc": "2026-11-13T19:29:58.267419+00:00",
+  "platform": {
+    "architecture": "arm64",
+    "macos": "27.0.1"
+  },
+  "automated": {
+    "command": "cargo test --workspace",
+    "passed": 26,
+    "failed": 0,
+    "ignored": 1,
+    "ignored_reason": "One crash-writer fixture is launched explicitly by the forced-termination test."
+  },
+  "native_ui": {
+    "actor": "assistant using native UI automation",
+    "fixture_session_start_utc": "2026-11-13T17:40:44.597022+00:00",
+    "session_span_minutes": 105.3,
+    "timing_note": "Interleaved editing, implementation, builds, restarts, and verification; not an uninterrupted typing or latency benchmark.",
+    "observed": [
+      "multi-file editing and independent contents",
+      "save then undo",
+      "search includes an unsaved buffer",
+      "external edit blocks save and both versions are visible",
+      "two checkpointed drafts recovered after forced process termination",
+      "explicit disk-version selection is undoable",
+      "native find/replace and replacement undo",
+      "new file creation and save",
+      "read-only save failure retains draft",
+      "native Save Copy preserves protected original",
+      "native folder dialog switches project",
+      "Recent restores the previous project and drafts",
+      "same-project selection retains the live draft",
+      "terminal starts on request in project directory",
+      "Cargo is discoverable in the terminal",
+      "terminal scrollback and return to latest output",
+      "foreground command interruption and terminal close"
+    ],
+    "build_note": "UI checks were performed across incremental M1 builds. The latest build also includes final project-switch, focus, and idle-refresh safeguards. The current test window was not reset after possible concurrent user activity.",
+    "user_feedback": "No M1-specific usability endorsement is inferred from earlier M0 feedback."
+  },
+  "filesystem_assertions": {
+    "protected_original_unchanged": true,
+    "draft_copy_contains_expected_text": true
+  },
+  "source_sha256": {
+    "crates/tandem/src/main.rs": "2769fcf93050d6dbd3897c2c64a85bb822877e5c31dcb101c23903b1d5a442da",
+    "crates/tandem/src/workspace/view.rs": "7fe12feaadb29da79cdccb5d75800a352dad2f7330d1f59832975d3827c19b20",
+    "crates/tandem/src/workspace.rs": "cba96b8b176358e6dc6f5fe8f7512ca945df9cfb612c7809f36e6118fdfe4c60",
+    "crates/tandem-codex/src/lib.rs": "f4024d67fb0736fbb2b0b40e56ba083d5b4c262d85271392445bb7a1a1724f9d",
+    "crates/tandem-core/src/lib.rs": "eec40c8a6737518565476e9bf90614dd1b6edd5d307d871acee904533dc49bae",
+    "crates/tandem-core/src/storage.rs": "9a320f75cf72e70602e77306dbad77a26984e3be7b8e4d825c6f280d897480e4",
+    "crates/tandem-core/tests/workspace.rs": "1fa929c5ec964017292fcfdcd76206f8dcb25b6eeb22e0d0c42486b5aa592aa7",
+    "crates/tandem-editor-probe/src/editor_check.rs": "d9786d75c0a51c2dc8243a5a2fcee865091ef2f8c1cec5e32b5c98cf12b8f083",
+    "crates/tandem-editor-probe/src/language.rs": "e072378e817b346894b70c0d81a1488c64709130933d42f7d6eea985da810439",
+    "crates/tandem-editor-probe/src/main.rs": "f69d55b7474af8c308000ffa53aef64ed0735bc7b5b1568b33f572db7acd12b8",
+    "crates/tandem-editor-probe/src/terminal.rs": "e48373c490f089233299b88dbbb5b70d8ee78c3ddcde24472c7e4ab49dfd2387",
+    "crates/tandem-lsp/src/lib.rs": "5ff096bfb39661347bdc2cc2048b71a397659cd8c454b142d3d5d987e3d8c0fb",
+    "crates/tandem-probe/src/boundaries.rs": "b627b5aa846872a57b2b8229a3e3891e8920d42a0a593d475cb80ad86431ee21",
+    "crates/tandem-probe/src/main.rs": "b38fc03898c4abbf4b8713ab49feb7a9928281e2cc43d616b358e43a2f63aa31",
+    "crates/tandem-terminal/src/lib.rs": "346a5235aa860d101c7e71d4530103c770ff951a25575cdfa58757bd5a8c9e09",
+    "crates/tandem-terminal/src/tests.rs": "45244d91f9d3359a268c4aec99cf04dc8f33728af6cee48d710f1b73d642957a"
+  },
+  "lockfile_sha256": "57f78f2fca5067f9f5390bd30f63e5c6e4c1c6cf4d96a376f31401696fb2f716",
+  "distribution": {
+    "development_bundle": ".tandem-local/m1/Tandem.app",
+    "ad_hoc_signed": true,
+    "notarized": false,
+    "binary_sha256": "6377651aa07acd1126c2a4c7827a9638defb6e96ace7eb019e4da038b603e978",
+    "signature_verification": "passed"
+  },
+  "limits": [
+    "UTF-8 and 2 MiB disk-file limit",
+    "32 tabs and bounded indexing/search",
+    "checkpointed recovery, not zero-loss recovery of unacknowledged typing",
+    "atomic saves are per-file, not multi-file transactions",
+    "cursor/scroll and cross-session undo are not restored",
+    "monochrome terminal with basic copy/scrollback; no full selection or terminal IME",
+    "language-server management and AI workflows remain later milestones"
+  ],
+  "build_checks": {
+    "cargo_build_tandem": "passed",
+    "cargo_fmt_check": "passed",
+    "cargo_clippy_workspace_all_targets_deny_warnings": "passed"
+  }
+}

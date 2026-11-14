@@ -1,0 +1,22 @@
+{
+  "schema-stable": {
+    "files": 329,
+    "sha256": "080b8fe20296d9b78121d7f292f8752aab8814a07412122e88509af7a7a1107d"
+  },
+  "schema-experimental": {
+    "files": 479,
+    "sha256": "ee1e7609507070aea2b2a4a73ad3a7b41e73962d122adcb380c7433180e13d99"
+  },
+  "runtime_version": "codex-cli 0.169.0",
+  "runtime_sha256": "739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002",
+  "config_schema_sha256": "f515f420927460250181097af8dc72b80a6be4f01f4324a0efef816e46cc9c86",
+  "global_config_unchanged": true,
+  "tandem_plaintext_auth_file_present": false,
+  "captured_at_utc": "2026-11-13T17:08:41.338917+00:00",
+  "cargo_lock_sha256": "1cf63580c007fb70ed99a1396573ceaa2b7c74b7b226d692e721a2250adc0c15",
+  "hardware": {
+    "cpu": "Apple M5 Pro",
+    "memory_bytes": 51539607552,
+    "model": "Mac17,8"
+  }
+}

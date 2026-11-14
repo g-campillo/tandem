@@ -1,0 +1,276 @@
+{
+  "milestone": "M5",
+  "status": "implemented and verified for local macOS use",
+  "recorded_at_utc": "2026-11-14T23:37:16.621771+00:00",
+  "release": {
+    "release_id": "0.1.0-m5.1",
+    "installed_path": "/Users/gabriel.campillo/Applications/Tandem Releases/0.1.0-m5.1/Tandem.app",
+    "launcher": "/Users/gabriel.campillo/Applications/Tandem.app",
+    "previous_release": "/Users/gabriel.campillo/Applications/Tandem Releases/0.1.0-m5/Tandem.app",
+    "source_binary_sha256": "bf4cdbdd38d3551c8ed583f9546f42035bde0718c21864af0f80dd49c0a99cf0",
+    "signed_app_sha256": "8a58ccfa136cb6f1d4ead3f842c2977dbc0d22dd71ee81cc0730f56aba937af8",
+    "signature": "ad-hoc verified including nested code",
+    "minimal_path_runtime": "codex-cli 0.169.0 \u00b7 bundled \u00b7 /Users/gabriel.campillo/Applications/Tandem Releases/0.1.0-m5.1/Tandem.app/Contents/Resources/codex/bin/codex",
+    "qa_drafts_preserved": true,
+    "qa_processes_closed": true,
+    "recorded_at_utc": "2026-11-14T23:34:12.074292+00:00"
+  },
+  "versions": {
+    "rust": "1.100.0",
+    "codex": "0.169.0",
+    "gpui_kit": "0.9.1",
+    "python": "3.14.6",
+    "pyright": "1.1.414",
+    "sqlite_schema": 4
+  },
+  "automated": {
+    "rust_workspace_passed": 69,
+    "rust_workspace_failed": 0,
+    "ignored_entries": 2,
+    "ignored_explanation": [
+      "Crash helper is invoked by its parent test.",
+      "Real transport-loss test passed in M3; unchanged transport was not retested against that separate scenario."
+    ],
+    "python_installer_harness_passed": 7,
+    "strict_clippy": "passed",
+    "format": "passed",
+    "optimized_build": "passed",
+    "installed_binary_matches_fresh_build": true
+  },
+  "native": {
+    "finder_launch": true,
+    "final_minimal_environment_gui_launch": true,
+    "rust_edit_undo_redo_save_format_symbols_and_tests": true,
+    "python_edit_symbols_search_tests": true,
+    "human_terminal_cargo_test": true,
+    "real_subscription_model_actions": [
+      {
+        "action": "Review",
+        "status": "Completed",
+        "tool_items": 0
+      },
+      {
+        "action": "Delegate",
+        "status": "Completed",
+        "tool_items": 0
+      },
+      {
+        "action": "Delegate",
+        "status": "Completed",
+        "tool_items": 0
+      }
+    ],
+    "agent_outcomes": [
+      "Failed",
+      "ReadyForReview"
+    ],
+    "stale_import_preview_required_fresh_confirmation": true,
+    "forced_termination_recovered_three_drafts_and_import_journal": true,
+    "recovered_unsaved_snapshot_validated": true,
+    "undo_preserved_user_notes": true,
+    "nested_draft_without_parent_then_explicit_save": true,
+    "project_import_benchmark_measured": true,
+    "running_unsaved_test_cancelled": true,
+    "import_journal_final_states": [
+      "Undone"
+    ],
+    "check_outcomes": [
+      {
+        "recipe": "cargo-test",
+        "status": "Passed"
+      },
+      {
+        "recipe": "cargo-test",
+        "status": "Passed"
+      },
+      {
+        "recipe": "python-unittest",
+        "status": "Passed"
+      },
+      {
+        "recipe": "cargo-test",
+        "status": "Passed"
+      },
+      {
+        "recipe": "cargo-test",
+        "status": "Passed"
+      },
+      {
+        "recipe": "python-benchmark",
+        "status": "Unvalidated"
+      },
+      {
+        "recipe": "python-benchmark",
+        "status": "Passed"
+      },
+      {
+        "recipe": "python-unittest",
+        "status": "Cancelled"
+      }
+    ],
+    "missing_runtime_edit_save_and_rust_navigation": true,
+    "qa_process_cleanup": true,
+    "new_spoken_voiceover_test": false,
+    "user_typing_feedback_this_milestone": false
+  },
+  "coding_session": {
+    "started_at_utc": "2026-11-14T21:54:47+00:00",
+    "first_native_observation": "2026-11-14T21:58:00+00:00 (approximate; initial UI capture took 157 seconds)",
+    "operator": "Codex UI automation; not user feedback",
+    "milestones": [
+      {
+        "at_utc": "2026-11-14T22:07:10.262279+00:00",
+        "observed": [
+          "bundled runtime hash verified in native App panel",
+          "manual Rust edit, undo/redo, save",
+          "Rust tools enabled and symbol navigation returned new triple/test functions",
+          "formatting applied and saved",
+          "Cargo tests passed through bundled runtime",
+          "initial connection returned sanitized -32603; explicit retry and minimal-PATH probe succeeded",
+          "real companion review accepted value+value using actual test evidence"
+        ]
+      },
+      {
+        "at_utc": "2026-11-14T22:14:06.627125+00:00",
+        "observed": [
+          "saved new Rust triple helper and edge-case unit tests; Cargo tests passed",
+          "added Python count_matches helper and edge-case tests through editor",
+          "Pyright symbol navigation found new helper",
+          "project search opened Python caller/test file",
+          "Python unittest recipe passed two tests via bundled runtime",
+          "human terminal cargo test --offline passed; terminal explicitly stopped",
+          "earlier AI review labeled historical after source changes"
+        ]
+      },
+      {
+        "at_utc": "2026-11-14T22:17:20.485204+00:00",
+        "observed": [
+          "preview quit flushed unsaved session note without creating source file",
+          "preview app and bundled app-server exited; no matching child processes remain",
+          "optimized release candidate packaged, signature verified and installed in versioned user Applications directory"
+        ]
+      },
+      {
+        "at_utc": "2026-11-14T22:49:05.470712+00:00",
+        "observed": [
+          "Finder launched installed RC1 with normal empty profile",
+          "installed QA profile recovered unsaved session note and prior task/review state",
+          "new manual accepted plan for checked_double and boundary tests",
+          "scoped model edits retained in staging; check intent hit strict journal version guard",
+          "live source and unrelated manual features remained unchanged"
+        ],
+        "interruption": "Finder getApp automation stalled 1313.1382 seconds; excluded from coding-session duration"
+      },
+      {
+        "at_utc": "2026-11-14T23:06:08.502762+00:00",
+        "observed": [
+          "RC2 real takeover staged checked_double and two boundary tests; approved Cargo test passed",
+          "changed a live buffer after preview; import required refreshed confirmation",
+          "import kept both independent user notes and existing triple helper/tests",
+          "forced termination recovered 3 drafts and import journal",
+          "post-recovery check passed the combined unsaved snapshot",
+          "group undo removed only agent changes and retained user notes",
+          "missing-runtime fixture rejected connection without fallback; editor saved offline-note.md and Rust navigation worked"
+        ],
+        "automation_stall_seconds": 321.0758
+      },
+      {
+        "at_utc": "2026-11-14T23:16:31.773363+00:00",
+        "observed": [
+          "native New File originally required an existing parent; nested draft creation fixed and tested",
+          "benchmark draft checkpointed while parent directory was absent; explicit Save created folders and file",
+          "benchmark using real project logic import returned Unvalidated (ModuleNotFoundError); harness now adds only the readonly captured project root",
+          "unit checks cover captured-module imports, unequal output rejection and bounded case iteration"
+        ]
+      },
+      {
+        "at_utc": "2026-11-14T23:27:21.563050+00:00",
+        "observed": [
+          "corrected native benchmark imported real project logic, passed output equivalence and displayed measured receipts",
+          "changed harness fingerprint required renewed recipe authorization",
+          "native slow unsaved Python test reached Running then Cancelled (exit 137)",
+          "editor undo restored the slow-test draft without modifying disk",
+          "all final Rust/workspace, Python harness/installer, format and strict Clippy gates passed"
+        ]
+      }
+    ],
+    "note": "Session remains in progress. Do not infer sustained usability from elapsed time alone.",
+    "ended_at_utc": "2026-11-14T23:37:16.621771+00:00",
+    "elapsed_seconds": 6149.621771,
+    "excluded_automation_stalls_seconds": [
+      157.3565,
+      1313.1382,
+      321.0758
+    ],
+    "elapsed_excluding_stalls_seconds": 4358.051271,
+    "duration_gate": "over 60 minutes excluding three blocked automation calls",
+    "interpretation": "Structured local coding, runtime validation and release-engineering session with repeated native interactions; not continuous human typing, exclusive use of Tandem for its implementation, or user feedback."
+  },
+  "distribution": {
+    "notice_entries": 1490,
+    "metadata_and_standard_terms_entries": [
+      {
+        "name": "debugserver-types",
+        "version": "0.5.0"
+      },
+      {
+        "name": "eventsource-stream",
+        "version": "0.2.3"
+      },
+      {
+        "name": "fax",
+        "version": "0.2.6"
+      },
+      {
+        "name": "fax_derive",
+        "version": "0.2.0"
+      },
+      {
+        "name": "fxhash",
+        "version": "0.2.1"
+      },
+      {
+        "name": "io_tee",
+        "version": "0.1.1"
+      },
+      {
+        "name": "mac",
+        "version": "0.1.1"
+      },
+      {
+        "name": "pathfinder_geometry",
+        "version": "0.5.1"
+      },
+      {
+        "name": "seahash",
+        "version": "4.1.0"
+      },
+      {
+        "name": "simd_helpers",
+        "version": "0.1.0"
+      }
+    ],
+    "notice_inventory_basis": "macOS cargo dependency closure; normal/build edges; conservative workspace feature superset",
+    "notarized": false,
+    "other_mac_tested": false,
+    "windows_supported": false,
+    "system_dynamic_dependencies_only": true,
+    "rollback_retains_versions_and_data": true,
+    "future_schema_database_refused_unchanged": true
+  },
+  "resolved_issues": [
+    "Strict check-intent sequence guard; fixed before final successful native takeover.",
+    "Signature resource manifest self-reference; generated seal excluded and verified by codesign.",
+    "Canonical installer receipt paths and idempotent rollback preservation.",
+    "Nested new-file draft creation and safe parent creation on explicit save.",
+    "Benchmark snapshot project imports and bounded case iteration.",
+    "Visible connection retry and stop control for both AI modes."
+  ],
+  "remaining_limits": [
+    "Transient first -32603 connection cause unconfirmed; explicit retry and subsequent real turns succeeded.",
+    "No notarized or clean second-Mac distribution claim.",
+    "No persistent buffer undo/cursor/scroll or unsent forms; operational draft/task/import journals persist.",
+    "Manual cache cleanup; retained staged work may still be needed.",
+    "M6 self-development and larger-project daily use remain separate."
+  ]
+}

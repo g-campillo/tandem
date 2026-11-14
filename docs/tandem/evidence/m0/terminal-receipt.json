@@ -1,0 +1,13 @@
+{
+  "gate": "M0-B terminal slice",
+  "pty": "portable-pty 0.9.0",
+  "engine": "alacritty_terminal 0.26.0",
+  "unicode_and_ansi": true,
+  "resize": true,
+  "ctrl_c": true,
+  "child_reaped": true,
+  "limitations": [
+    "probe renderer uses plain monochrome cells",
+    "selection/scrollback UI and terminal IME are not implemented"
+  ]
+}

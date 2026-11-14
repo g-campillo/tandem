@@ -1,0 +1,164 @@
+{
+  "milestone": "M2",
+  "recorded_at_utc": "2026-11-14T04:04:07.684588+00:00",
+  "scope": "Rust language tools, local isolated validation, durable manual task state; no model turns in M2",
+  "versions": {
+    "rust": "1.100.0",
+    "rust_analyzer": "1.100.0 (0ef1bc386 2026-11-09)",
+    "codex": "0.169.0",
+    "gpui_kit": "0.9.1",
+    "sqlite_schema": 2
+  },
+  "automated": {
+    "workspace_tests_passed": 38,
+    "intentionally_ignored_subprocess_fixture": 1,
+    "commands": [
+      "cargo test --workspace",
+      "cargo test -p tandem-checks",
+      "cargo test -p tandem-lsp",
+      "cargo clippy --workspace --all-targets -- -D warnings",
+      "cargo fmt --all --check",
+      "cargo build -p tandem",
+      "codesign --verify --strict .tandem-local/m2/Tandem.app"
+    ],
+    "targeted_reruns": "Snapshot and language tests rerun after final boundary/stale-request changes; strict Clippy and real integrations passed afterward."
+  },
+  "real_language": {
+    "cross_file_unsaved_definition": true,
+    "cross_file_references": 2,
+    "unsaved_diagnostics": 1,
+    "completion": true,
+    "formatting": true,
+    "stale_rejected": true,
+    "restart_resynchronized": true,
+    "originals_unchanged": true
+  },
+  "real_checks": [
+    {
+      "status": "Passed",
+      "exit_code": 0,
+      "snapshot_id": "31a08cc71a8434bb87e0d0e91d338c46f54a9bac1a1c7576a36bfa5eeaa1f9bb",
+      "snapshot_unchanged": true,
+      "cancel_requested": false
+    },
+    {
+      "status": "Failed",
+      "exit_code": 101,
+      "snapshot_id": "060dd77fa1ab1850c80420b72f81a4a63f06ee9aa4e7e9bc52a1a62202aeed76",
+      "snapshot_unchanged": true,
+      "cancel_requested": false
+    },
+    {
+      "status": "Cancelled",
+      "exit_code": 137,
+      "snapshot_id": "e6a704d0bff0568e4428bc20497f0b008a0a3d6a089ee6b651b36a67ec3af244",
+      "snapshot_unchanged": true,
+      "cancel_requested": true
+    },
+    {
+      "status": "Unvalidated",
+      "exit_code": 101,
+      "snapshot_id": "8dff66aff6f6ffae0e0571a21009984d65103ab44fc55d9e6040b1a81b2873d9",
+      "snapshot_unchanged": true,
+      "cancel_requested": false
+    }
+  ],
+  "enforced_boundary_fixture": {
+    "original_read_denied": true,
+    "original_write_denied": true,
+    "source_and_cache_hardlink_write_denied": true,
+    "tool_loopback_network_denied": true,
+    "artifact_write_allowed": true,
+    "authentication": "No model sign-in; isolated ephemeral Codex home"
+  },
+  "native_ui": {
+    "separate_bundle_id": "dev.tandem.m2qa",
+    "profile": ".tandem-local/m2/qa-state",
+    "observed": [
+      "explicit tool trust",
+      "formatting and undo",
+      "specific diagnostic on unsaved incorrect Rust",
+      "old diagnostic removed after fix",
+      "symbol navigation",
+      "unchanged recipe grant reused",
+      "unsaved alternative implementation passes tests",
+      "running check cancelled",
+      "close guard during a check",
+      "forced test-process termination and restart",
+      "unfinished receipt interrupted without replay",
+      "task progress and unsaved draft recovered",
+      "manual step completion links evidence",
+      "editing and undo with tools and AI off",
+      "native accessibility labels exposed",
+      "final packaged binary executes a real check successfully"
+    ],
+    "original_source_unchanged": true,
+    "final_check_id": "01bc6e17-2aed-41bc-9699-761a68679687",
+    "final_check_status": "Passed",
+    "final_check_duration_ms": 1762,
+    "saved_tasks": 1,
+    "completed_steps": 2,
+    "pre_fix_attempt": "The first GUI attempt stalled on inherited SIGCHLD masking; its older Cancelled label is historical and is not used as evidence of successful cancellation. New unknown outcomes are Interrupted.",
+    "spoken_voiceover_reverified": false,
+    "long_term_daily_usability_claimed": false
+  },
+  "package": {
+    "binary_sha256": "a1c1dfe08c9b74a797143833619e7bc656ec9f2309d7673234d7b0eff417db07",
+    "development_build": true,
+    "signature": "ad-hoc",
+    "notarized": false,
+    "bundle": ".tandem-local/m2/Tandem.app"
+  },
+  "source_sha256": {
+    "Cargo.lock": "16d8a50158b39416d23b5f1d6a2628e5f55c036497835742670b68bd77f0940b",
+    "Cargo.toml": "36c7120246209e5450921bce4d9148fa4d7e89cf24311f581dc8984c976d6466",
+    "crates/tandem/Cargo.toml": "657bf6c8f179733b7bca1961ee99d6dc066882ba48277f2efefdd5f79693dc4c",
+    "crates/tandem/src/main.rs": "3ab69b1fafa4822556a00f951fc9a85630a3d7129b56a7f9f7eaea811a26a633",
+    "crates/tandem/src/workspace/panels.rs": "30d13d8006f9ef2b8de73b269b8dad70fad3cd2f00d46265c716de84fbe8ce27",
+    "crates/tandem/src/workspace/provider.rs": "55adb71cc92158418fde966447e5ea362c993f825498ad0af4987c905a8c0c7a",
+    "crates/tandem/src/workspace/tools.rs": "e5ddae74709a8d88c150995948c51f963e3905a0c9006781c85e7eea9154e026",
+    "crates/tandem/src/workspace/view.rs": "32745e902a084e0e65b6b655cead34c8b1d13af4ae9c17bb071f4eaf40e821ff",
+    "crates/tandem/src/workspace.rs": "3b6abaeca8f8f2843364df5f3be3bba0a4f6542e79beab189474ccf79d31a859",
+    "crates/tandem-checks/Cargo.toml": "1bee074eaca57b90fe5320676481d77526e28af6275e40cab74df9f14c3b7047",
+    "crates/tandem-checks/examples/integration.rs": "a4357299df8b47ca1243fa4bfaca7ef58455fd9b8127698cfd346fd0d04c8a00",
+    "crates/tandem-checks/src/lib.rs": "2b7be05b2b81c6ff01cea37875be31672b91b81bd867fac8f9589867e490f312",
+    "crates/tandem-checks/src/runner.rs": "790364a85454b0bdc54747ce16ee3e05d7086cba42dfd2ec37928df5729d3140",
+    "crates/tandem-checks/src/snapshot.rs": "97164471642723396991f7813917bc952c78f5139f009a54aacf71125d5abb55",
+    "crates/tandem-codex/Cargo.toml": "f11b4b668eb3653a02c831a7529adf672dfca4feecb723b8f0e5986ea3fe92fe",
+    "crates/tandem-codex/src/lib.rs": "b6787c08efd4f213e9e544be3df185a213e643cc5aac013ededbb609d865b853",
+    "crates/tandem-core/Cargo.toml": "c147f84a096925f2c55a806e68de211fb9d09eb8fdbfbdd509f51d9c07669b13",
+    "crates/tandem-core/src/lib.rs": "5adeb73be575a5a850373d01f10087aead9d473c908c74226c0402bcb948bc8a",
+    "crates/tandem-core/src/storage.rs": "36df894fcc4ce058c518139cd149912c7684f86d1fb43b74b1255646bfaa59f3",
+    "crates/tandem-core/src/task.rs": "e418b9b98861f407416d12752934527132a8770d32d51c28f3cdb6d14c3c91c6",
+    "crates/tandem-core/src/tools.rs": "8bc63a341be9e8dd1658eaa5500555e836b788f7802f29a35f239e5fc63b13a5",
+    "crates/tandem-core/tests/m2.rs": "a3401dd39997583f7e33f698796db1fd0d587065f8193f88bb8a5127604ecf3a",
+    "crates/tandem-core/tests/workspace.rs": "1fa929c5ec964017292fcfdcd76206f8dcb25b6eeb22e0d0c42486b5aa592aa7",
+    "crates/tandem-editor-probe/Cargo.toml": "b17b224ea8c9c845fe3fa4d9fc4654fb7f63563cb6dea359f958eff3c2440c6f",
+    "crates/tandem-editor-probe/src/editor_check.rs": "d9786d75c0a51c2dc8243a5a2fcee865091ef2f8c1cec5e32b5c98cf12b8f083",
+    "crates/tandem-editor-probe/src/language.rs": "e072378e817b346894b70c0d81a1488c64709130933d42f7d6eea985da810439",
+    "crates/tandem-editor-probe/src/main.rs": "f69d55b7474af8c308000ffa53aef64ed0735bc7b5b1568b33f572db7acd12b8",
+    "crates/tandem-editor-probe/src/terminal.rs": "e48373c490f089233299b88dbbb5b70d8ee78c3ddcde24472c7e4ab49dfd2387",
+    "crates/tandem-lsp/Cargo.toml": "45c99453f9091aedb1c55e2b0be025d69a34079a2b119a216259a9075d63ea7f",
+    "crates/tandem-lsp/examples/integration.rs": "7a5df52b0bf663f57b504fe711082fbe1ad7405ca3bfb4e6c13db962968d9468",
+    "crates/tandem-lsp/src/legacy.rs": "c5e356a08ab443961fd071ea9c3b54baa600230dd20cd8b6c64fad10e2bb07cc",
+    "crates/tandem-lsp/src/lib.rs": "4c1e1aeceb962c75aba460c217aa9674d073842df2ab2b248045e7a24b0cdb89",
+    "crates/tandem-lsp/src/project.rs": "01fc809a22745323f23297ed1ceb9cff0cce8414ba8f01142847a09f87d676cd",
+    "crates/tandem-lsp/tests/supervision.rs": "d3e33f1e383a6de176beb2f3b866bcf0a0ca93284d45f1cea076c07c129a4d76",
+    "crates/tandem-probe/Cargo.toml": "bbe5b6ede5500a4ef2ab4e11966c20fca411ab7d57c1dc7af0671cf7b24a3c3e",
+    "crates/tandem-probe/src/boundaries.rs": "b627b5aa846872a57b2b8229a3e3891e8920d42a0a593d475cb80ad86431ee21",
+    "crates/tandem-probe/src/main.rs": "b38fc03898c4abbf4b8713ab49feb7a9928281e2cc43d616b358e43a2f63aa31",
+    "crates/tandem-terminal/Cargo.toml": "3e46f1729da648874717ee26c256c58a1d59ff31c8939b7b902baf22c04ebcfe",
+    "crates/tandem-terminal/src/lib.rs": "346a5235aa860d101c7e71d4530103c770ff951a25575cdfa58757bd5a8c9e09",
+    "crates/tandem-terminal/src/tests.rs": "45244d91f9d3359a268c4aec99cf04dc8f33728af6cee48d710f1b73d642957a",
+    "scripts/package-macos-dev.py": "4722e3ecc2ada6b8329f27a9f82a070c80c20cd1bafea6f3e1f05f7eb54031ef"
+  },
+  "private_receipts": [
+    ".tandem-local/m2/lsp-integration/receipt.json",
+    ".tandem-local/m2/check-integration.json",
+    ".tandem-local/m2/tests-final.log",
+    ".tandem-local/m2/lsp-tests-final.log",
+    ".tandem-local/m2/snapshot-final.log",
+    ".tandem-local/m2/clippy-final.log",
+    ".tandem-local/m2/qa-state/workspace.sqlite"
+  ]
+}

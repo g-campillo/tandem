@@ -1,0 +1,22 @@
+{
+  "gate": "M0-B editor measurement",
+  "lines": 20000,
+  "bytes": 1068890,
+  "samples": 40,
+  "measurement": "programmatic EditorState insertion through next native frame callback",
+  "p95_ms": 3.331625,
+  "maximum_ms": 5.409459,
+  "unicode_crlf_snapshot_roundtrip": true,
+  "target_p95_ms": 50,
+  "target_maximum_ms": 250,
+  "target_met_for_this_measurement": true,
+  "excludes": [
+    "physical keyboard event delivery",
+    "compositor/pixel presentation",
+    "IME sessions",
+    "concurrent real model streaming"
+  ],
+  "build": "debug",
+  "rust": "1.100.0",
+  "gpui_kit": "0.9.1"
+}

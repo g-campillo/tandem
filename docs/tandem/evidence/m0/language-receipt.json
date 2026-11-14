@@ -1,0 +1,10 @@
+{
+  "gate": "M0-B language slice",
+  "completion_count": 2,
+  "expected_symbol_found": true,
+  "definition_target_line": 0,
+  "unsaved_diagnostic_count": 2,
+  "disk_unchanged": true,
+  "position_encoding": "utf-16",
+  "toolchain": "1.100.0"
+}

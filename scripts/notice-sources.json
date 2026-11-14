@@ -1,0 +1,222 @@
+{
+  "purpose": "Pinned additional upstream notices omitted from published crate packages. Other notices come from package sources and cargo_vcs_info revisions.",
+  "entries": [
+    {
+      "packages": [
+        [
+          "allocative",
+          "0.3.6"
+        ],
+        [
+          "allocative_derive",
+          "0.3.6"
+        ]
+      ],
+      "revision": "c256f0bb074252ded51614aaa73a9a41cb38a2a4",
+      "files": [
+        {
+          "path": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/facebookexperimental/allocative/c256f0bb074252ded51614aaa73a9a41cb38a2a4/LICENSE-APACHE",
+          "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/facebookexperimental/allocative/c256f0bb074252ded51614aaa73a9a41cb38a2a4/LICENSE-MIT",
+          "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+        }
+      ]
+    },
+    {
+      "packages": [
+        [
+          "difflib",
+          "0.4.0"
+        ]
+      ],
+      "revision": "f035fb8e656f27119e23eca9d5b996df14f3885e",
+      "files": [
+        {
+          "path": "LICENSE",
+          "url": "https://raw.githubusercontent.com/DimaKudosh/difflib/f035fb8e656f27119e23eca9d5b996df14f3885e/LICENSE",
+          "sha256": "6725d1437fc6c77301f2ff0e7d52914cf4f9509213e1078dc77d9356dbe6eac5"
+        }
+      ]
+    },
+    {
+      "packages": [
+        [
+          "display_container",
+          "0.9.0"
+        ]
+      ],
+      "revision": "7c9c7304a1dbd451e9e448749228e88de1c193ce",
+      "files": [
+        {
+          "path": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/facebookincubator/gazebo/7c9c7304a1dbd451e9e448749228e88de1c193ce/LICENSE-APACHE",
+          "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/facebookincubator/gazebo/7c9c7304a1dbd451e9e448749228e88de1c193ce/LICENSE-MIT",
+          "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+        }
+      ]
+    },
+    {
+      "packages": [
+        [
+          "intl_pluralrules",
+          "7.0.2"
+        ]
+      ],
+      "revision": "d0715d5b7cca72e228d6e6c4de154bd30dfdd06a",
+      "files": [
+        {
+          "path": "intl_pluralrules/LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/zbraniecki/pluralrules/d0715d5b7cca72e228d6e6c4de154bd30dfdd06a/intl_pluralrules/LICENSE-APACHE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "path": "intl_pluralrules/LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/zbraniecki/pluralrules/d0715d5b7cca72e228d6e6c4de154bd30dfdd06a/intl_pluralrules/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "packages": [
+        [
+          "lock_free_hashtable",
+          "0.1.4"
+        ],
+        [
+          "static_interner",
+          "0.1.2"
+        ],
+        [
+          "strong_hash",
+          "0.1.0"
+        ],
+        [
+          "strong_hash_derive",
+          "0.1.0"
+        ]
+      ],
+      "revision": "560c92af07b3c5d9ba8ae24cb9b895dae887474c",
+      "files": [
+        {
+          "path": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/LICENSE-APACHE",
+          "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/LICENSE-MIT",
+          "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+        },
+        {
+          "path": "NOTICE",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/NOTICE",
+          "sha256": "b3355ad324483539ba40a8ad85bcaa5c03c19b6b54831e3f7f3b67f56ac4982e"
+        },
+        {
+          "path": "app/buck2_error_derive/LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/app/buck2_error_derive/LICENSE-APACHE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+        },
+        {
+          "path": "app/buck2_error_derive/LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/app/buck2_error_derive/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        },
+        {
+          "path": "prelude/oss/LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/prelude/oss/LICENSE-APACHE",
+          "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+        },
+        {
+          "path": "prelude/oss/LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/prelude/oss/LICENSE-MIT",
+          "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+        },
+        {
+          "path": "shed/completion_verify/src/runtime/LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/shed/completion_verify/src/runtime/LICENSE-APACHE",
+          "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+        },
+        {
+          "path": "shed/completion_verify/src/runtime/LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/shed/completion_verify/src/runtime/LICENSE-MIT",
+          "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+        },
+        {
+          "path": "shed/completion_verify/src/runtime/NOTICE",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/shed/completion_verify/src/runtime/NOTICE",
+          "sha256": "00bf57b216a3e864539dc1fc66ac508d52b77546f8521039735bf85ea077f6b8"
+        },
+        {
+          "path": "shed/setsketch/src/LICENSE-APACHE.txt",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/shed/setsketch/src/LICENSE-APACHE.txt",
+          "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+        },
+        {
+          "path": "shed/setsketch/src/LICENSE-MIT.txt",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/shed/setsketch/src/LICENSE-MIT.txt",
+          "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
+        },
+        {
+          "path": "shed/setsketch/src/NOTICE.md",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/shed/setsketch/src/NOTICE.md",
+          "sha256": "696dbac5ff85e4b9b54341bbfade2cdbc7b7da6ede8114c1599f74e9170c96ab"
+        },
+        {
+          "path": "shim/LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/shim/LICENSE-APACHE",
+          "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+        },
+        {
+          "path": "shim/LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/shim/LICENSE-MIT",
+          "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+        },
+        {
+          "path": "starlark-rust/starlark_syntax/testcases/parse/license.star",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/starlark-rust/starlark_syntax/testcases/parse/license.star",
+          "sha256": "a6d5ae5183a5681f86648588fa84ec7fef84f2d7709b0d644a14d0fd8d68a1e9"
+        },
+        {
+          "path": "superconsole/oss/LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/superconsole/oss/LICENSE-APACHE",
+          "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+        },
+        {
+          "path": "superconsole/oss/LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/facebook/buck2/560c92af07b3c5d9ba8ae24cb9b895dae887474c/superconsole/oss/LICENSE-MIT",
+          "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+        }
+      ]
+    },
+    {
+      "packages": [
+        [
+          "pagable_derive",
+          "0.4.1"
+        ]
+      ],
+      "revision": "8978f3cd91b2908e1e61f6b58f84293097abf8f1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "url": "https://raw.githubusercontent.com/facebook/starlark-rust/8978f3cd91b2908e1e61f6b58f84293097abf8f1/LICENSE",
+          "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+        },
+        {
+          "path": "starlark_syntax/testcases/parse/license.star",
+          "url": "https://raw.githubusercontent.com/facebook/starlark-rust/8978f3cd91b2908e1e61f6b58f84293097abf8f1/starlark_syntax/testcases/parse/license.star",
+          "sha256": "a6d5ae5183a5681f86648588fa84ec7fef84f2d7709b0d644a14d0fd8d68a1e9"
+        }
+      ]
+    }
+  ]
+}

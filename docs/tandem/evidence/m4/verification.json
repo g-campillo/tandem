@@ -1,0 +1,185 @@
+{
+  "milestone": "M4",
+  "status": "implemented and verified on the development Mac",
+  "recorded_at_utc": "2026-11-14T21:35:41.186680+00:00",
+  "versions": {
+    "rust": "1.100.0",
+    "codex": "0.169.0",
+    "python": "3.14.6",
+    "gpui_kit": "0.9.1",
+    "sqlite_schema": 4,
+    "unicode_normalization": "0.1.26"
+  },
+  "automated": {
+    "workspace_tests_passed": 64,
+    "workspace_tests_failed": 0,
+    "ignored_entries": 2,
+    "ignored_explanation": [
+      "Crash-writer helper is invoked by its parent test.",
+      "Real transport-loss test passed in M3 and was not repeated; transport did not change."
+    ],
+    "strict_clippy": "passed",
+    "format_check": "passed",
+    "build": "passed",
+    "ad_hoc_signature": "verified",
+    "binary_sha256": "b976a081929e6b1c892801b38f294ac93a0f2bcdba34202a0853bbddc409ccd1"
+  },
+  "subscription": {
+    "authentication": "existing Codex-managed ChatGPT sign-in",
+    "real_delegation": "three Rust files implemented; approved Cargo test passed; no live source writes",
+    "model_os_edit_tools": false,
+    "api_billing_fallback": false,
+    "structured_balanced_proposal": "Completed",
+    "real_keep_current_proposal": "KeepCurrent",
+    "improvement_model_tool_items": 0
+  },
+  "native": {
+    "agent_status": "Cancelled",
+    "check_status": "Cancelled",
+    "cancel_requested": true,
+    "snapshot_unchanged": true,
+    "source_unchanged": true,
+    "staged_files_retained": 3,
+    "import_undo_restart": "observed through native UI",
+    "original_and_later_user_notes_preserved": true,
+    "schema": 4,
+    "measured_proposal_display": "observed; language/policy gate, historical-context label, theory and receipt separated",
+    "preexisting_dirty_note_preserved": true,
+    "user_edits_before_and_after_import_preserved": true,
+    "restart_restored_three_drafts_and_undo_journal": true,
+    "source_files_saved_by_import": false
+  },
+  "benchmark": {
+    "passed": "Passed",
+    "mismatched_outputs": "Failed",
+    "cancelled": "Cancelled",
+    "measurement": {
+      "cases": [
+        {
+          "baseline_ns": [
+            625,
+            500,
+            500,
+            625,
+            709,
+            458,
+            459
+          ],
+          "candidate_ns": [
+            416,
+            250,
+            291,
+            208,
+            375,
+            208,
+            208
+          ],
+          "label": "empty"
+        },
+        {
+          "baseline_ns": [
+            1708,
+            1750,
+            1666,
+            1708,
+            1625,
+            1667,
+            1625
+          ],
+          "candidate_ns": [
+            666,
+            625,
+            500,
+            500,
+            583,
+            500,
+            500
+          ],
+          "label": "duplicates-first-index"
+        },
+        {
+          "baseline_ns": [
+            45000,
+            45208,
+            44542,
+            44542,
+            49125,
+            44584,
+            50167
+          ],
+          "candidate_ns": [
+            9666,
+            9625,
+            9417,
+            9500,
+            9334,
+            9333,
+            9583
+          ],
+          "label": "sorted-n=32; 128 queries; sorting excluded"
+        },
+        {
+          "baseline_ns": [
+            778667,
+            848458,
+            942333,
+            1197125,
+            931292,
+            928917,
+            934917
+          ],
+          "candidate_ns": [
+            14250,
+            13334,
+            17583,
+            15500,
+            17792,
+            15750,
+            16083
+          ],
+          "label": "sorted-n=1024; 128 queries; sorting excluded"
+        },
+        {
+          "baseline_ns": [
+            13280791,
+            14931125,
+            17063875,
+            16448458,
+            16998042,
+            14668542,
+            14219875
+          ],
+          "candidate_ns": [
+            21375,
+            22167,
+            24667,
+            22125,
+            26459,
+            20792,
+            24125
+          ],
+          "label": "sorted-n=16384; 128 queries; sorting excluded"
+        }
+      ],
+      "method": "perf_counter_ns; alternating order; deepcopy/setup excluded",
+      "samples": 7,
+      "warmups": 2
+    },
+    "source_unchanged": true,
+    "timing_scope": "supplied callbacks only; setup/deepcopy excluded; sorting excluded in these cases",
+    "equivalence_scope": "sampled returned outputs, not all possible inputs"
+  },
+  "resolved_issues": [
+    "Same-position insertion correctly refused; subsequent non-overlapping fixture passed without weakening merge.",
+    "Nested unsaved draft recovery/undo handles missing parent without weakening path checks.",
+    "Staging under validation cache rejected; sibling staging fixed native command dispatch."
+  ],
+  "limits": [
+    "macOS Apple Silicon development build, not notarized or clean-Mac tested",
+    "text create/modify only; one agent, <=16 paths, 256 KiB, <=4 rounds",
+    "line-based merge conservatively blocks overlaps",
+    "Python-only fixed benchmark recipe; callbacks are trusted like tests",
+    "M5 daily-use session, license inventory, bundled runtime discovery and cache retention pending",
+    "No new spoken VoiceOver/user typing assessment claimed"
+  ]
+}
