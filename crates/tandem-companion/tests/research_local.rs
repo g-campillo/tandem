@@ -135,6 +135,174 @@ fn request_path(path: &str) -> Result<ResearchRequest> {
 }
 
 #[test]
+fn nested_whitelists_preserve_current_files_and_unsaved_research_expansion() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    for (path, text) in [
+        (".gitignore", "*.rs\n"),
+        ("src/.gitignore", "!nested.rs\n!saved.rs\n"),
+        ("src/saved.rs", "needle saved\n"),
+        ("src/nested.rs", "disk source\n"),
+        ("ignored.rs", "needle ignored root\n"),
+        ("src/ignored.rs", "needle ignored nested\n"),
+    ] {
+        std::fs::write(root.join(path), text).unwrap();
+    }
+    let project = Project::open(&root).unwrap();
+    let mut overlays = Vec::new();
+    for (path, text) in [
+        ("src/nested.rs", "needle unsaved\n"),
+        ("src/drafts/deep/nested.rs", "needle new nested draft\n"),
+        ("src/ignored.rs", "needle ignored unsaved\n"),
+        (
+            "src/drafts/deep/ignored.rs",
+            "needle ignored nested draft\n",
+        ),
+        ("ignored-draft.rs", "needle ignored root draft\n"),
+    ] {
+        let mut document = project.open_document(path, true).unwrap();
+        document.snapshot(text.into());
+        overlays.push(document);
+    }
+    assert!(!root.join("src/drafts").exists());
+    let cancel = AtomicBool::new(false);
+    let capture =
+        ResearchSnapshot::capture(&project, &overlays, &fixture.path().join("cache"), &cancel)
+            .unwrap();
+    let mut context = ResearchContext::new(&capture, "session", "operation", None, &[]).unwrap();
+    let mut broker = ResearchBroker::with_executor(FakeExecutor::default());
+    context.begin_round(4).unwrap();
+    let list = broker
+        .execute(
+            request(ResearchRequestKind::ListFiles {
+                prefix: None,
+                limit: 200,
+            }),
+            &mut context,
+            &cancel,
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(list.status, ResearchReceiptStatus::Complete);
+    let listed = list
+        .content
+        .lines()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        listed,
+        std::collections::BTreeSet::from([
+            ".gitignore",
+            "src/.gitignore",
+            "src/saved.rs",
+            "src/nested.rs",
+            "src/drafts/deep/nested.rs",
+        ])
+    );
+    // Reverse both decisions in the live policies. Expansion must still use
+    // the original capture, including its absent-on-disk draft directories.
+    std::fs::write(root.join(".gitignore"), "").unwrap();
+    std::fs::write(root.join("src/.gitignore"), "*\n").unwrap();
+    let search = broker
+        .execute(
+            request(ResearchRequestKind::SearchText {
+                query: "needle".into(),
+                paths: vec![],
+                limit: 200,
+            }),
+            &mut context,
+            &cancel,
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(search.status, ResearchReceiptStatus::Complete);
+    assert_eq!(search.sources.len(), 3);
+    assert!(search.content.contains("needle saved"));
+    assert!(search.content.contains("needle unsaved"));
+    assert!(search.content.contains("needle new nested draft"));
+    assert!(!search.content.contains("ignored"));
+    for (path, expected) in [
+        ("src/nested.rs", "needle unsaved\n"),
+        ("src/drafts/deep/nested.rs", "needle new nested draft\n"),
+    ] {
+        let read = broker
+            .execute(
+                request(ResearchRequestKind::ReadFileRange {
+                    path: path.into(),
+                    start_line: 1,
+                    end_line: 1,
+                }),
+                &mut context,
+                &cancel,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(read.status, ResearchReceiptStatus::Complete, "{path}");
+        assert_eq!(read.content, expected);
+        assert_eq!(read.snapshot_id.as_deref(), Some(capture.id()));
+    }
+    context.begin_round(4).unwrap();
+    for path in [
+        "ignored.rs",
+        "src/ignored.rs",
+        "src/drafts/deep/ignored.rs",
+        "ignored-draft.rs",
+    ] {
+        let read = broker
+            .execute(
+                request(ResearchRequestKind::ReadFileRange {
+                    path: path.into(),
+                    start_line: 1,
+                    end_line: 1,
+                }),
+                &mut context,
+                &cancel,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(read.status, ResearchReceiptStatus::Unavailable, "{path}");
+        assert!(read.content.is_empty());
+    }
+    assert!(capture.unchanged());
+    assert!(!root.join("src/drafts").exists());
+}
+
+#[test]
+fn unsaved_ignore_policy_edits_do_not_reclassify_the_materialized_research_capture() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored*\n").unwrap();
+    std::fs::write(root.join("code.rs"), "ordinary source\n").unwrap();
+    std::fs::write(root.join("ignored.rs"), "ignored source\n").unwrap();
+    let project = Project::open(&root).unwrap();
+    for policy in ["*\n", ""] {
+        let mut overlay = project.open_document(".gitignore", false).unwrap();
+        overlay.snapshot(policy.into());
+        let cancel = AtomicBool::new(false);
+        let capture =
+            ResearchSnapshot::capture(&project, &[overlay], &fixture.path().join("cache"), &cancel)
+                .unwrap();
+        let mut context =
+            ResearchContext::new(&capture, "session", "operation", None, &[]).unwrap();
+        context.begin_round(1).unwrap();
+        let list = ResearchBroker::with_executor(FakeExecutor::default())
+            .execute(
+                request(ResearchRequestKind::ListFiles {
+                    prefix: None,
+                    limit: 200,
+                }),
+                &mut context,
+                &cancel,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(list.status, ResearchReceiptStatus::Complete);
+        assert_eq!(list.content, ".gitignore\ncode.rs\n");
+    }
+}
+
+#[test]
 fn transcript_research_is_current_session_only_and_budgeted() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().join("project");
@@ -410,6 +578,121 @@ fn inspect_history(
             Ok(())
         })
         .unwrap()
+}
+
+#[test]
+fn nested_whitelists_allow_deleted_history_with_sealed_withheld_policies() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    git(&root, &["init", "-q"]);
+    for (path, text) in [
+        (".gitignore", "*.rs\n.gitignore\n"),
+        ("src/.gitignore", "!nested.rs\n!deleted.rs\n"),
+        ("src/nested.rs", "first whitelisted source\n"),
+        ("src/deleted.rs", "deleted whitelisted source\n"),
+        ("ignored.rs", "root ignored source\n"),
+        ("ignored-deleted.rs", "deleted root ignored source\n"),
+        ("src/ignored.rs", "nested ignored source\n"),
+        ("src/ignored-deleted.rs", "deleted nested ignored source\n"),
+    ] {
+        std::fs::write(root.join(path), text).unwrap();
+    }
+    git(&root, &["add", "-f", "."]);
+    git(&root, &["commit", "-qm", "initial leaves"]);
+    let first = git(&root, &["rev-parse", "HEAD"]);
+    for path in [
+        "src/deleted.rs",
+        "ignored-deleted.rs",
+        "src/ignored-deleted.rs",
+    ] {
+        std::fs::remove_file(root.join(path)).unwrap();
+    }
+    std::fs::write(root.join("src/nested.rs"), "second whitelisted source\n").unwrap();
+    git(&root, &["add", "-f", "."]);
+    git(&root, &["commit", "-qm", "changed leaves"]);
+    let second = git(&root, &["rev-parse", "HEAD"]);
+    let project = Project::open(&root).unwrap();
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    // Neither copied ignore files nor later live rules can replace the sealed
+    // policy. Both policies exclude themselves from the materialized files.
+    std::fs::write(root.join(".gitignore"), "").unwrap();
+    std::fs::write(root.join("src/.gitignore"), "*\n").unwrap();
+    let environment = git_environment(fixture.path());
+    for (path, expected) in [
+        ("src/nested.rs", "first whitelisted source\n"),
+        ("src/deleted.rs", "deleted whitelisted source\n"),
+    ] {
+        let show = inspect_history(
+            &capture,
+            &environment,
+            ResearchRequestKind::GitShow {
+                commit: first.clone(),
+                path: Some(path.into()),
+            },
+        );
+        assert_eq!(
+            show.status,
+            ResearchReceiptStatus::Complete,
+            "{path}: {show:?}"
+        );
+        assert_eq!(show.content, expected);
+        assert!(show.command.is_some());
+        for kind in [
+            ResearchRequestKind::GitHistory {
+                path: Some(path.into()),
+                limit: 50,
+            },
+            ResearchRequestKind::GitDiff {
+                base: first.clone(),
+                head: second.clone(),
+                paths: vec![path.into()],
+            },
+        ] {
+            let receipt = inspect_history(&capture, &environment, kind);
+            assert_eq!(
+                receipt.status,
+                ResearchReceiptStatus::Complete,
+                "{path}: {receipt:?}"
+            );
+            assert!(!receipt.content.is_empty());
+            assert_eq!(receipt.snapshot_id.as_deref(), Some(capture.id()));
+        }
+    }
+    for path in [
+        "ignored.rs",
+        "ignored-deleted.rs",
+        "src/ignored.rs",
+        "src/ignored-deleted.rs",
+    ] {
+        for kind in [
+            ResearchRequestKind::GitHistory {
+                path: Some(path.into()),
+                limit: 50,
+            },
+            ResearchRequestKind::GitShow {
+                commit: first.clone(),
+                path: Some(path.into()),
+            },
+            ResearchRequestKind::GitDiff {
+                base: first.clone(),
+                head: second.clone(),
+                paths: vec![path.into()],
+            },
+        ] {
+            let receipt = inspect_history(&capture, &environment, kind);
+            assert_eq!(receipt.status, ResearchReceiptStatus::Unavailable, "{path}");
+            assert!(receipt.content.is_empty());
+            assert!(receipt.command.is_none());
+        }
+    }
+    assert!(capture.unchanged());
 }
 
 fn assert_ambient_policy_withholds_history(source: &str) {

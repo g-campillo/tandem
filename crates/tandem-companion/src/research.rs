@@ -22,7 +22,6 @@ pub struct ResearchSnapshot {
     git: Option<GitSnapshot>,
     git_limitation: Option<String>,
     excluded_paths: BTreeSet<String>,
-    history_policy_gaps: BTreeSet<String>,
 }
 impl ResearchSnapshot {
     pub fn capture(
@@ -37,19 +36,9 @@ impl ResearchSnapshot {
         let mut files = BTreeMap::new();
         let mut eligible = Vec::new();
         let mut excluded_paths = BTreeSet::new();
-        let mut policy_directories = BTreeSet::from([String::new()]);
-        for file in &snapshot.manifest.files {
-            for directory in Path::new(&file.path).parent().unwrap().ancestors() {
-                policy_directories.insert(directory.to_str().unwrap().to_string());
-            }
-        }
-        let ignored: BTreeSet<_> = snapshot
-            .manifest
-            .files
-            .iter()
-            .filter(|file| ignored_new_buffer(&captured, &file.path).unwrap_or(true))
-            .map(|file| file.path.clone())
-            .collect();
+        // Materialization already applied the sealed hierarchical ignore policy
+        // to disk files and overlays. Copied (possibly unsaved) ignore files are
+        // research data and cannot reclassify those decisions.
         for file in &snapshot.manifest.files {
             ensure!(
                 !cancel.load(Ordering::Relaxed),
@@ -57,8 +46,7 @@ impl ResearchSnapshot {
             );
             let (bytes, _) = secure_read(&captured, &file.path)?;
             let text = String::from_utf8(bytes).ok();
-            if !ignored.contains(&file.path)
-                && safe_path_shape(&file.path)
+            if safe_path_shape(&file.path)
                 && text
                     .as_ref()
                     .is_some_and(|s| !s.contains('\0') && !credential_like(s))
@@ -78,31 +66,6 @@ impl ResearchSnapshot {
             }
         }
         snapshot.manifest.files = eligible;
-        // A policy may ignore itself or be filtered as sensitive. Its absence
-        // from the capture must never turn a deleted ignored leaf into an
-        // eligible history path. Record only the gap, never the policy's bytes.
-        let history_policy_gaps: BTreeSet<_> = policy_directories
-            .into_iter()
-            .filter(|directory| {
-                [".gitignore", ".ignore"].iter().any(|name| {
-                    let policy = Path::new(directory).join(name);
-                    match std::fs::symlink_metadata(project.root.join(&policy)) {
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                        _ => !files.contains_key(policy.to_str().unwrap()),
-                    }
-                })
-            })
-            .collect();
-        if !history_policy_gaps.is_empty() {
-            snapshot.manifest.id = content_hash(
-                format!(
-                    "{}:{}",
-                    snapshot.manifest.id,
-                    serde_json::to_string(&history_policy_gaps)?
-                )
-                .as_bytes(),
-            );
-        }
         let (git, git_limitation) = match capture_git(project, &directory.join("git"), cancel) {
             Ok(Some(git)) => (Some(git), None),
             Ok(None) => (None, Some("Folder has no Git history".into())),
@@ -122,7 +85,6 @@ impl ResearchSnapshot {
             git,
             git_limitation,
             excluded_paths,
-            history_policy_gaps,
         })
     }
     pub fn id(&self) -> &str {
@@ -142,35 +104,15 @@ impl ResearchSnapshot {
         {
             return false;
         }
-        if self.files.contains_key(path) {
-            return true;
-        }
-        // Deleted leaves are supported only under captured directories whose
-        // ancestor ignore policies were retained. Unknown directories fail closed.
-        if !Path::new(path)
-            .parent()
-            .is_some_and(|parent| self.snapshot.input.join(parent).is_dir())
-            || self
-                .history_policy_gaps
-                .iter()
-                .any(|directory| Path::new(path).starts_with(directory))
-        {
-            return false;
-        }
-        // A captured-but-filtered file can never be expanded through history.
-        if self
+        // eligible_path uses only the sealed materializer policy and known
+        // directories, even for deleted leaves or withheld ignore files. Keep
+        // independent link/read exclusions closed to historical expansion too.
+        !self
             .snapshot
             .manifest
             .omitted
             .iter()
             .any(|o| Path::new(path).starts_with(&o.path))
-        {
-            return false;
-        }
-        let Ok(project) = Project::open(&self.snapshot.input) else {
-            return false;
-        };
-        !ignored_new_buffer(&project, path).unwrap_or(true)
     }
 }
 fn safe_path_shape(path: &str) -> bool {
