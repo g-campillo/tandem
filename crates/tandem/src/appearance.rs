@@ -2,7 +2,9 @@
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::{Selectable, Sizable, Theme, ThemeMode, ThemeTokens};
 use gpui_kit::prelude::FluentBuilder;
-use gpui_kit::{App, Hsla, ParentElement, SharedString, Subscription, Window, div, rgb};
+use gpui_kit::{
+    App, Div, Hsla, IntoElement, ParentElement, SharedString, Subscription, Window, div, rgb,
+};
 use gpui_kit::{FontWeight, Styled, px};
 use std::sync::Arc;
 
@@ -72,6 +74,71 @@ pub fn path_button(button: Button, label: impl Into<SharedString>) -> Button {
                 .text_size(px(13.))
                 .child(label),
         )
+}
+
+/// Shared utility-panel typography and spacing. Content stays opaque beneath
+/// the independently tinted navigation header.
+pub fn panel_body(cx: &App) -> Div {
+    let p = palette(Theme::global(cx).mode);
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .gap_3()
+        .text_size(px(14.))
+        .line_height(px(20.))
+        .text_color(p.foreground)
+        .whitespace_normal()
+}
+
+pub fn panel_heading(content: impl IntoElement) -> Div {
+    div()
+        .min_w_0()
+        .text_size(px(16.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(content)
+}
+
+pub fn panel_metadata(content: impl IntoElement, cx: &App) -> Div {
+    div()
+        .min_w_0()
+        .text_size(px(12.))
+        .text_color(palette(Theme::global(cx).mode).secondary_foreground)
+        .child(content)
+}
+
+pub fn panel_warning(content: impl IntoElement, cx: &App) -> Div {
+    let p = palette(Theme::global(cx).mode);
+    solid_section(div(), cx)
+        .min_w_0()
+        .p_3()
+        .bg(p.warning_surface)
+        .text_color(p.warning)
+        .child(content)
+}
+
+pub fn panel_error(content: impl IntoElement, cx: &App) -> Div {
+    let p = palette(Theme::global(cx).mode);
+    solid_section(div(), cx)
+        .min_w_0()
+        .p_3()
+        .bg(p.error_surface)
+        .text_color(p.error)
+        .child(content)
+}
+
+/// Code and paths retain their exact text and can be scrolled horizontally.
+pub fn panel_code<T: Styled>(element: T, cx: &App) -> T {
+    solid_section(element, cx)
+        .bg(palette(Theme::global(cx).mode).content)
+        .min_w_0()
+        .p_3()
+        .font_family("Menlo")
+        .text_size(px(12.))
+        .line_height(px(18.))
+        .text_color(palette(Theme::global(cx).mode).foreground)
 }
 
 #[derive(Clone, Copy, Debug)]

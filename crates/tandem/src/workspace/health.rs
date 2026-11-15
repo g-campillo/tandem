@@ -1,5 +1,6 @@
-use super::panels::note;
+use super::panels::{code_note, note};
 use super::*;
+use crate::appearance::{panel_body, panel_heading, panel_metadata, panel_warning, path_button};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
@@ -56,22 +57,22 @@ impl Workspace {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         let cache = home.join("Library/Caches/Tandem");
         let cache_open = cache.clone();
-        div().v_flex().gap_3().child(note("Application health & recovery"))
-            .child(Button::new("refresh-health").label(if self.health.busy{"Verifying runtime…"}else{"Refresh Application Health"}).disabled(self.health.busy).on_click(cx.listener(|v,_,_,cx|v.refresh_health(cx))))
-            .children(self.health.lines.iter().enumerate().map(|(i,line)|div().id(("health-line",i)).child(note(line.clone()))))
-            .child(note(self.companion.connection.as_ref().map_or_else(||"AI disconnected. Editing is available.".into(),|c|c.detail.clone())))
+        panel_body(cx).child(panel_heading(note("Application health & recovery")))
+            .child(path_button(Button::new("refresh-health"), if self.health.busy{"Verifying runtime…"}else{"Refresh Application Health"}).disabled(self.health.busy).on_click(cx.listener(|v,_,_,cx|v.refresh_health(cx))))
+            .children(self.health.lines.iter().enumerate().map(|(i,line)|div().id(("health-line",i)).min_w_0().overflow_x_scroll().child(note(line.clone()))))
+            .child(div().min_w_0().pt_3().border_t_1().border_color(cx.theme().border).child(note(self.companion.connection.as_ref().map_or_else(||"AI disconnected. Editing is available.".into(),|c|c.detail.clone()))))
             .child(note("ChatGPT subscription only. Included usage limits apply; API-key billing is never selected automatically."))
-            .child(note(format!("Recovery profile: {}",state.display())))
+            .child(code_note("recovery-profile", format!("Recovery profile: {}",state.display()), cx))
             .child(note("Drafts and task/import journals are stored locally. Quitting flushes open drafts; restart restores them without saving project files or replaying agent work. An older build refuses a newer database schema."))
-            .child(Button::new("open-recovery").label("Open Recovery Folder").on_click(cx.listener(move|v,_,_,cx|v.show_local_folder(recovery.clone(),cx))))
-            .child(note(format!("Validation and staged work: {}",cache.display())))
-            .child(Button::new("open-caches").label("Open Local Work Artifacts").on_click(cx.listener(move|v,_,_,cx|v.show_local_folder(cache_open.clone(),cx))))
-            .child(note("Staged work and receipts are retained for inspection. Cache cleanup is manual; staged files may still be needed for import. Managed sign-in credentials are separate and are never shown here."))
-            .when_some(notices,|d,path|d.child(Button::new("open-notices").label("Open Third-Party Notices").on_click(cx.listener(move|v,_,_,cx|v.show_local_folder(path.clone(),cx)))))
-            .child(note(format!("Rust: {}",self.dev.rust.as_ref().map_or_else(||if self.dev.tool_error.is_empty(){"Open a project to inspect installed tools".into()}else{self.dev.tool_error.clone()},|t|format!("{} · {}",t.label,t.cargo.display())))))
-            .child(note(format!("Python: {}",self.dev.python.as_ref().map_or_else(||if self.dev.python_error.is_empty(){"Open a project to inspect installed tools".into()}else{self.dev.python_error.clone()},|t|format!("{} · {}",t.label,t.interpreter.display())))))
+            .child(path_button(Button::new("open-recovery"), "Open Recovery Folder").on_click(cx.listener(move|v,_,_,cx|v.show_local_folder(recovery.clone(),cx))))
+            .child(code_note("work-artifacts", format!("Validation and staged work: {}",cache.display()), cx))
+            .child(path_button(Button::new("open-caches"), "Open Local Work Artifacts").on_click(cx.listener(move|v,_,_,cx|v.show_local_folder(cache_open.clone(),cx))))
+            .child(panel_warning(note("Staged work and receipts are retained for inspection. Cache cleanup is manual; staged files may still be needed for import. Managed sign-in credentials are separate and are never shown here."), cx))
+            .when_some(notices,|d,path|d.child(path_button(Button::new("open-notices"), "Open Third-Party Notices").on_click(cx.listener(move|v,_,_,cx|v.show_local_folder(path.clone(),cx)))))
+            .child(div().id("health-rust").min_w_0().overflow_x_scroll().child(note(format!("Rust: {}",self.dev.rust.as_ref().map_or_else(||if self.dev.tool_error.is_empty(){"Open a project to inspect installed tools".into()}else{self.dev.tool_error.clone()},|t|format!("{} · {}",t.label,t.cargo.display()))))))
+            .child(div().id("health-python").min_w_0().overflow_x_scroll().child(note(format!("Python: {}",self.dev.python.as_ref().map_or_else(||if self.dev.python_error.is_empty(){"Open a project to inspect installed tools".into()}else{self.dev.python_error.clone()},|t|format!("{} · {}",t.label,t.interpreter.display()))))))
             .child(note("Language servers and toolchains are external. Configure them in Tools; Tandem does not install dependencies or change your shell settings."))
-            .child(note("Local ad hoc macOS build. Not notarized; other Macs and Windows are untested. UTF-8 files ≤2 MiB; 32 open tabs. Buffer undo is per session. Import undo journals survive restart."))
+            .child(panel_metadata(note("Local ad hoc macOS build. Not notarized; other Macs and Windows are untested. UTF-8 files ≤2 MiB; 32 open tabs. Buffer undo is per session. Import undo journals survive restart."), cx).pt_3().border_t_1().border_color(cx.theme().border))
             .into_any_element()
     }
 }
