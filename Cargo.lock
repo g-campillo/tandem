@@ -6413,6 +6413,7 @@ dependencies = [
  "tandem-codex",
  "tandem-core",
  "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]

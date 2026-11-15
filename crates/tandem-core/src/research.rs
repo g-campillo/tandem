@@ -60,6 +60,11 @@ pub enum ResearchRequestKind {
         commit: String,
         path: Option<String>,
     },
+    GitDiff {
+        base: String,
+        head: String,
+        paths: Vec<String>,
+    },
     DependencyMetadata {
         ecosystem: DependencyEcosystem,
     },
@@ -123,7 +128,7 @@ impl ResearchRequest {
                 if let Some(path) = path {
                     normalized_relative(Path::new(path))?;
                 }
-                bounded_limit(*limit)?;
+                ensure!((1..=50).contains(limit), "Git history permits 1–50 commits");
             }
             ResearchRequestKind::GitShow { commit, path } => {
                 ensure!(
@@ -132,6 +137,22 @@ impl ResearchRequest {
                     "Git show requires an immutable hexadecimal commit ID"
                 );
                 if let Some(path) = path {
+                    normalized_relative(Path::new(path))?;
+                }
+            }
+            ResearchRequestKind::GitDiff { base, head, paths } => {
+                for commit in [base, head] {
+                    ensure!(
+                        (7..=64).contains(&commit.len())
+                            && commit.bytes().all(|c| c.is_ascii_hexdigit()),
+                        "Git diff requires immutable hexadecimal commit IDs"
+                    );
+                }
+                ensure!(
+                    !paths.is_empty() && paths.len() <= 32,
+                    "Git diff needs 1–32 explicit paths"
+                );
+                for path in paths {
                     normalized_relative(Path::new(path))?;
                 }
             }
@@ -145,6 +166,10 @@ impl ResearchRequest {
         }
         bounded_structure(self)
     }
+}
+
+fn valid_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 fn bounded_limit(limit: u32) -> Result<()> {
@@ -221,6 +246,14 @@ pub enum SourceLocator {
         commit: String,
         path: Option<String>,
     },
+    GitHistory {
+        path: Option<String>,
+    },
+    GitDiff {
+        base: String,
+        head: String,
+        paths: Vec<String>,
+    },
     FileListing {
         prefix: Option<String>,
     },
@@ -288,11 +321,28 @@ pub struct ResearchReceiptLimits {
     pub returned_bytes: usize,
 }
 
+/// Observed host execution only. This is never implementation-check evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchCommand {
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub executable_hash: String,
+    pub exit_code: Option<i64>,
+    pub output_truncated: bool,
+    pub cancelled: bool,
+    pub timed_out: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchReceipt {
     pub id: String,
     pub request: ResearchRequest,
+    #[serde(default)]
+    pub snapshot_id: Option<String>,
+    #[serde(default)]
+    pub command: Option<ResearchCommand>,
     pub sources: Vec<ResearchSource>,
     pub status: ResearchReceiptStatus,
     pub content: String,
@@ -313,6 +363,8 @@ impl ResearchReceipt {
         let receipt = Self {
             id: new_id(),
             request,
+            snapshot_id: None,
+            command: None,
             sources,
             status,
             content_hash: content_hash(content.as_bytes()),
@@ -331,6 +383,23 @@ impl ResearchReceipt {
     pub fn validate(&self) -> Result<()> {
         stable_id(&self.id)?;
         self.request.validate()?;
+        if let Some(id) = &self.snapshot_id {
+            ensure!(valid_hash(id), "Invalid research snapshot hash");
+        }
+        if let Some(command) = &self.command {
+            ensure!(
+                !command.argv.is_empty()
+                    && command.argv.len() <= 128
+                    && command
+                        .argv
+                        .iter()
+                        .all(|s| s.len() <= 8192 && !s.contains('\0'))
+                    && command.cwd.len() <= 4096
+                    && !command.cwd.contains('\0')
+                    && valid_hash(&command.executable_hash),
+                "Invalid inspection command provenance"
+            );
+        }
         ensure!(
             self.limits.max_content_bytes <= MAX_RESEARCH_RECEIPT_BYTES
                 && self.content.len() <= self.limits.max_content_bytes

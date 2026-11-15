@@ -184,6 +184,45 @@ fn quote(path: &Path) -> Result<String> {
         path.to_str().context("Non-UTF-8 validation path")?,
     )?)
 }
+// Shared host-only command setup. Neither caller exposes arbitrary commands to a model.
+pub(crate) fn restricted_command_config(
+    profile: &str,
+    reads: &[PathBuf],
+    writes: &Path,
+    denies: &[PathBuf],
+) -> Result<String> {
+    let mut config = format!(
+        "model_provider=\"openai\"\nforced_login_method=\"chatgpt\"\ncli_auth_credentials_store=\"ephemeral\"\napproval_policy=\"never\"\ndefault_permissions=\"{profile}\"\nproject_doc_max_bytes=0\nweb_search=\"disabled\"\n[memories]\ngenerate_memories=false\nuse_memories=false\n[analytics]\nenabled=false\n[features]\nshell_tool=false\nunified_exec=false\napply_patch_freeform=false\napps=false\nplugins=false\nbrowser_use=false\ncomputer_use=false\nremote_control=false\nmemories=false\nmemory_tool=false\nskip_host_skill_discovery=true\n[permissions.{profile}.filesystem]\n\":minimal\"=\"read\"\n"
+    );
+    for root in reads {
+        if root.exists() {
+            config.push_str(&format!("{}=\"read\"\n", quote(root)?));
+        }
+    }
+    config.push_str(&format!("{}=\"write\"\n", quote(writes)?));
+    for root in denies {
+        config.push_str(&format!("{}=\"deny\"\n", quote(root)?));
+    }
+    config.push_str(&format!("[permissions.{profile}.network]\nenabled=false\n"));
+    Ok(config)
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn begin_command(
+    client: &mut Client,
+    argv: &[String],
+    cwd: &Path,
+    profile: &str,
+    process: &str,
+    timeout: u64,
+    cap: usize,
+    env: Value,
+) -> Result<u64> {
+    client.begin_request(
+        "command/exec",
+        json!({"command":argv,"cwd":cwd,"permissionProfile":profile,"processId":process,
+        "streamStdoutStderr":true,"timeoutMs":timeout,"outputBytesCap":cap,"env":env}),
+    )
+}
 fn configure(
     environment: &CheckEnvironment,
     project: &Project,
@@ -345,9 +384,16 @@ pub fn run_check(
         } else {
             json!({"TMPDIR":snapshot.artifacts.join("tmp"),"HOME":snapshot.artifacts,"PYTHONDONTWRITEBYTECODE":"1","PYTEST_DISABLE_PLUGIN_AUTOLOAD":"1","PATH":"/usr/bin:/bin:/usr/sbin:/sbin","TANDEM_ARTIFACTS":snapshot.artifacts})
         };
-        let request=client.begin_request("command/exec",json!({"command":record.command,"cwd":snapshot.input,"permissionProfile":"validation","processId":process,
-            "streamStdoutStderr":true,"timeoutMs":120000,"outputBytesCap":OUTPUT_LIMIT,
-            "env":env}))?;
+        let request = begin_command(
+            &mut client,
+            &record.command,
+            &snapshot.input,
+            "validation",
+            &process,
+            120000,
+            OUTPUT_LIMIT,
+            env,
+        )?;
         record.status = CheckStatus::Running;
         record.detail = "Running captured inputs; original source is denied and selected tool environments are read-only".into();
         record.sequence += 1;
