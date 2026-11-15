@@ -417,8 +417,8 @@ pub struct ConsumedActionTransition {
     pub consumed_at_ms: i64,
 }
 
-/// Commands are instructions for a human or a separately authorized fixed
-/// recipe, never an implementation-script or shell-execution channel.
+/// Validate displayable human command metadata. This grants no execution
+/// authority: automated checks still require a separately authorized recipe.
 pub fn validate_action_command(argv: &[String]) -> Result<()> {
     ensure!(
         !argv.is_empty() && argv.len() <= 64,
@@ -429,11 +429,22 @@ pub fn validate_action_command(argv: &[String]) -> Result<()> {
         .and_then(|s| s.to_str())
         .unwrap_or("");
     ensure!(
-        matches!(
-            executable,
-            "cargo" | "rustc" | "rustfmt" | "python" | "python3" | "pytest" | "git"
-        ),
-        "Unsupported guided command; use a fixed validation tool"
+        !executable.is_empty()
+            && !matches!(
+                executable,
+                "sh" | "bash"
+                    | "zsh"
+                    | "fish"
+                    | "dash"
+                    | "ksh"
+                    | "csh"
+                    | "tcsh"
+                    | "powershell"
+                    | "pwsh"
+                    | "cmd"
+                    | "cmd.exe"
+            ),
+        "Use one ordinary command, not a shell script"
     );
     ensure!(
         argv.iter().all(|arg| arg.len() <= 4096
@@ -442,34 +453,37 @@ pub fn validate_action_command(argv: &[String]) -> Result<()> {
         "Commands cannot contain shell scripts or redirection"
     );
     ensure!(
-        !argv.iter().any(|arg| matches!(
-            arg.as_str(),
-            "-c" | "--command" | "--config" | "--config-file"
-        ) || arg.starts_with("--config=")
-            || arg.starts_with("-c=")),
-        "Inline code and configuration overrides are not guided commands"
+        !argv.iter().any(
+            |arg| matches!(arg.as_str(), "--eval" | "--execute" | "--command")
+                || arg.starts_with("--eval=")
+                || arg.starts_with("--execute=")
+                || arg.starts_with("--command=")
+        ),
+        "Inline code is not guided command metadata"
     );
-    match executable {
-        "python" | "python3" => ensure!(
-            argv.len() >= 3
-                && argv[1] == "-m"
-                && matches!(argv[2].as_str(), "pytest" | "unittest" | "compileall"),
-            "Use a named Python validation module, not a script"
-        ),
-        "cargo" => ensure!(
-            argv.get(1).is_some_and(|s| matches!(
-                s.as_str(),
-                "test" | "check" | "clippy" | "fmt" | "build"
-            )),
-            "Use a Cargo validation command"
-        ),
-        "git" => ensure!(
-            argv.get(1)
-                .is_some_and(|s| matches!(s.as_str(), "status" | "diff")),
-            "Guided Git commands inspect status or diff only"
-        ),
-        _ => {}
-    }
+    let python = executable.starts_with("python") || executable.starts_with("pypy");
+    let evaluator = python
+        || matches!(
+            executable,
+            "node" | "nodejs" | "ruby" | "perl" | "lua" | "luajit" | "php" | "deno" | "bun"
+        );
+    ensure!(
+        !evaluator
+            || !argv.iter().skip(1).any(|arg| {
+                // Interpreters also accept attached/combined switches such as
+                // python -BcCODE or node -eCODE; those still disclose inline code.
+                (python && arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
+                    || arg.starts_with("-e")
+                    || arg.starts_with("-p")
+                    || matches!(arg.as_str(), "eval" | "--print")
+                    || arg.starts_with("--print=")
+            }),
+        "Inline interpreter code is not guided command metadata"
+    );
+    ensure!(
+        !crate::contains_solution_code(&serde_json::to_value(argv)?),
+        "Implementation code is hidden in command metadata"
+    );
     Ok(())
 }
 
@@ -539,7 +553,9 @@ pub struct ActionCommandEvidence {
     pub output: CommandOutput,
     pub started_at_ms: i64,
     pub completed_at_ms: Option<i64>,
-    pub snapshot: SnapshotManifest,
+    /// None retains a check that stopped before capturing inputs. Unknown inputs
+    /// are uncertainty metadata and can never authenticate a successful result.
+    pub snapshot: Option<SnapshotManifest>,
     pub snapshot_unchanged: bool,
     pub status: CheckStatus,
     pub truncated: bool,
@@ -552,8 +568,12 @@ impl ActionCommandEvidence {
         content_hash(&serde_json::to_vec(self).expect("Evidence serializes"))
     }
     pub fn from_local_check(scope: ActionEvidenceScope, check: &CheckRecord) -> Result<Self> {
+        // One execution can have Preparing, Running and terminal versions. Each
+        // captured version has immutable evidence identity; check_id remains the
+        // execution identity authenticated against its durable action origin.
+        let check_hash = content_hash(&serde_json::to_vec(check)?);
         Ok(Self {
-            id: check.id.clone(),
+            id: check_hash.clone(),
             scope,
             argv: check.command.clone(),
             cwd: ".".into(),
@@ -570,10 +590,7 @@ impl ActionCommandEvidence {
             },
             started_at_ms: check.started_at_ms,
             completed_at_ms: check.completed_at_ms,
-            snapshot: check
-                .snapshot
-                .clone()
-                .context("Check has no captured input")?,
+            snapshot: check.snapshot.clone(),
             snapshot_unchanged: check.snapshot_unchanged == Some(true),
             status: check.status.clone(),
             truncated: check.output_truncated || check.output.len() > 64 * 1024,
@@ -581,7 +598,7 @@ impl ActionCommandEvidence {
             recipe_fingerprint: Some(check.recipe_fingerprint.clone()),
             provenance: CommandProvenance::LocalCheck {
                 check_id: check.id.clone(),
-                check_hash: content_hash(&serde_json::to_vec(check)?),
+                check_hash,
                 executable_version: check.executable_version.clone(),
             },
         })
@@ -589,7 +606,9 @@ impl ActionCommandEvidence {
     pub fn validate(&self) -> Result<()> {
         stable_id(&self.id)?;
         ensure!(
-            !self.argv.is_empty()
+            (!self.argv.is_empty()
+                || (matches!(self.provenance, CommandProvenance::LocalCheck { .. })
+                    && self.snapshot.is_none()))
                 && self.argv.len() <= 64
                 && self
                     .argv
@@ -679,6 +698,29 @@ impl ActionReviewInput {
     pub fn scope(&self) -> ActionEvidenceScope {
         self.binding.scope()
     }
+    fn complete_current_command(&self, c: &ActionCommandEvidence) -> bool {
+        c.snapshot
+            .as_ref()
+            .is_some_and(|s| s.id == self.binding.project_fingerprint)
+            && c.snapshot_unchanged
+            && !c.truncated
+            && !matches!(c.output, CommandOutput::Withheld { .. })
+            && c.completed_at_ms
+                .is_some_and(|t| t >= c.started_at_ms && t <= self.context.captured_at_ms)
+            && c.started_at_ms >= 0
+            && (matches!(c.status, CheckStatus::Passed | CheckStatus::Failed)
+                || (matches!(c.provenance, CommandProvenance::UserAttachedOutput)
+                    && c.status == CheckStatus::Unvalidated))
+            && c.exit_code.is_some()
+            && (matches!(c.provenance, CommandProvenance::UserAttachedOutput)
+                || c.recipe_id
+                    .as_ref()
+                    .zip(c.recipe_fingerprint.as_ref())
+                    .is_some_and(|(id, fp)| {
+                        self.context.validation_environments.get(id) == Some(fp)
+                            && fp != "unavailable"
+                    }))
+    }
     pub fn validate(&self, session: &TaskSession) -> Result<()> {
         session.validate_action_binding(&self.binding)?;
         ensure!(
@@ -713,8 +755,21 @@ impl ActionReviewInput {
         }
         for command in &self.commands {
             command.validate()?;
+            let historical_check =
+                matches!(
+                    session.current_action()?.1.kind,
+                    GuidedActionKind::ValidateStep | GuidedActionKind::ValidateTask
+                ) && matches!(command.provenance, CommandProvenance::LocalCheck { .. })
+                    && command.scope.workflow == self.binding.workflow
+                    && session.walkthroughs.iter().any(|walk| {
+                        walk.id == command.scope.walkthrough_id
+                            && walk.actions[..walk.cursor].iter().any(|action| {
+                                action.id == command.scope.action_id
+                                    && action.definition_hash() == command.scope.action_hash
+                            })
+                    });
             ensure!(
-                command.scope == self.scope(),
+                command.scope == self.scope() || historical_check,
                 "Command evidence belongs to another action or generation"
             );
             expected.push(ActionEvidenceBinding {
@@ -783,9 +838,40 @@ impl ActionReviewInput {
         }
         for requirement in &action.required_evidence {
             let candidates = self.commands.iter().filter(|c| match requirement {
-                RequiredActionEvidence::CommandReceipt => matches!(&action.target, ActionTarget::Command { argv, cwd, .. } if argv == &c.argv && cwd == &c.cwd),
+                RequiredActionEvidence::CommandReceipt => matches!(&action.target, ActionTarget::Command { argv, cwd, .. } if (argv == &c.argv && cwd == &c.cwd)
+                    // Preparing can precede both argv resolution and snapshot
+                    // capture. A pending run of the same recipe as an exact
+                    // matching receipt must not disappear behind that pass.
+                    || (c.argv.is_empty() && c.recipe_id.is_some()
+                        && matches!(c.provenance, CommandProvenance::LocalCheck { .. })
+                        && self.commands.iter().any(|known| known.argv == *argv && known.cwd == *cwd
+                            && known.recipe_id == c.recipe_id
+                            && known.recipe_fingerprint == c.recipe_fingerprint))),
                 RequiredActionEvidence::CheckReceipt { recipe_id } => c.recipe_id.as_ref() == Some(recipe_id) && matches!(c.provenance, CommandProvenance::LocalCheck { .. }),
                 _ => false,
+            }).filter(|c| {
+                // A terminal run that never captured inputs is honest history,
+                // not a permanent dead-end. A later successful local rerun of
+                // that same recipe can resolve it. Active checks and failures
+                // on known inputs are never discarded by this rule.
+                !(c.snapshot.is_none()
+                    && !matches!(c.status, CheckStatus::Preparing | CheckStatus::Running)
+                    && c.completed_at_ms.is_some_and(|finished| self.commands.iter().any(|rerun| {
+                        rerun.scope == c.scope
+                            && rerun.recipe_id.is_some()
+                            && rerun.recipe_id == c.recipe_id
+                            && rerun.recipe_fingerprint == c.recipe_fingerprint
+                            && matches!(rerun.provenance, CommandProvenance::LocalCheck { .. })
+                            && rerun.status == CheckStatus::Passed
+                            && rerun.exit_code == Some(0)
+                            && rerun.started_at_ms >= finished
+                            && rerun.completed_at_ms.is_some_and(|t| t > finished)
+                            && match &action.target {
+                                ActionTarget::Command { argv, cwd, .. } => rerun.argv == *argv && rerun.cwd == *cwd,
+                                _ => true,
+                            }
+                            && self.complete_current_command(rerun)
+                    })))
             }).collect::<Vec<_>>();
             if !matches!(
                 requirement,
@@ -795,7 +881,9 @@ impl ActionReviewInput {
                 continue;
             }
             for c in &candidates {
-                if c.snapshot.id == self.binding.project_fingerprint
+                if c.snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.id == self.binding.project_fingerprint)
                     && c.status == CheckStatus::Failed
                 {
                     failed.push("Fix the failing required command and run it again".into());
@@ -804,28 +892,7 @@ impl ActionReviewInput {
             let candidate_count = candidates.len();
             let valid = candidates
                 .into_iter()
-                .filter(|c| {
-                    c.snapshot.id == self.binding.project_fingerprint
-                        && c.snapshot_unchanged
-                        && !c.truncated
-                        && !matches!(c.output, CommandOutput::Withheld { .. })
-                        && c.completed_at_ms.is_some_and(|t| {
-                            t >= c.started_at_ms && t <= self.context.captured_at_ms
-                        })
-                        && c.started_at_ms >= 0
-                        && (matches!(c.status, CheckStatus::Passed | CheckStatus::Failed)
-                            || (matches!(c.provenance, CommandProvenance::UserAttachedOutput)
-                                && c.status == CheckStatus::Unvalidated))
-                        && c.exit_code.is_some()
-                        && (matches!(c.provenance, CommandProvenance::UserAttachedOutput)
-                            || c.recipe_id
-                                .as_ref()
-                                .zip(c.recipe_fingerprint.as_ref())
-                                .is_some_and(|(id, fp)| {
-                                    self.context.validation_environments.get(id) == Some(fp)
-                                        && fp != "unavailable"
-                                }))
-                })
+                .filter(|c| self.complete_current_command(c))
                 .collect::<Vec<_>>();
             if valid.is_empty() || valid.len() != candidate_count {
                 missing.push("Run the exact required command on the current inputs and attach its complete result".into());

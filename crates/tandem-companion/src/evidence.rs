@@ -141,6 +141,11 @@ pub fn collect_action_check_evidence(
                 // Otherwise an older pass could hide a current running check.
                 || (c.snapshot.as_ref().is_some_and(|s| s.id == context.project_fingerprint)
                     && recipes.iter().any(|(id, fingerprint)| c.recipe_id == *id && c.recipe_fingerprint == *fingerprint))
+                // Preparation and infrastructure failures can precede snapshot
+                // capture and argv resolution. Retain uncertainty for a relevant
+                // recipe, without inventing successful input provenance.
+                || (c.snapshot.is_none()
+                    && recipes.iter().any(|(id, fingerprint)| c.recipe_id == *id && c.recipe_fingerprint == *fingerprint))
         })
         .filter_map(|c| {
             let mut receipt = ActionCommandEvidence::from_local_check(scope.clone(), c).ok()?;
@@ -195,7 +200,7 @@ pub fn attach_action_output(
         },
         started_at_ms: attachment.started_at_ms,
         completed_at_ms: Some(attachment.completed_at_ms),
-        snapshot: capture.snapshot.clone(),
+        snapshot: Some(capture.snapshot.clone()),
         snapshot_unchanged: true,
         // This is a user's report, not an authenticated local check verdict.
         status: CheckStatus::Unvalidated,

@@ -88,6 +88,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS task(id TEXT PRIMARY KEY, root TEXT NOT NULL, revision INTEGER NOT NULL, updated INTEGER NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS task_revision(id TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(id,revision));
             CREATE TABLE IF NOT EXISTS check_run(id TEXT PRIMARY KEY, root TEXT NOT NULL, sequence INTEGER NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS check_action_origin(check_id TEXT PRIMARY KEY, scope TEXT, identity TEXT);
+            INSERT OR IGNORE INTO check_action_origin(check_id) SELECT id FROM check_run;
             CREATE TABLE IF NOT EXISTS model_run(id TEXT PRIMARY KEY,root TEXT NOT NULL,sequence INTEGER NOT NULL,data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS companion_thread(root TEXT NOT NULL,name TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(root,name));
             CREATE TABLE IF NOT EXISTS agent_run(id TEXT PRIMARY KEY,root TEXT NOT NULL,sequence INTEGER NOT NULL,data TEXT NOT NULL);
@@ -586,7 +588,83 @@ impl Store {
             .collect()
     }
     pub fn save_check(&mut self, record: &CheckRecord) -> Result<()> {
-        self.connection.execute("INSERT INTO check_run(id,root,sequence,data) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET sequence=excluded.sequence,data=excluded.data WHERE excluded.sequence>=check_run.sequence AND excluded.root=check_run.root", params![record.id,record.project,i64::try_from(record.sequence)?,serde_json::to_string(record)?])?;
+        let transaction = self.connection.transaction()?;
+        let identity = serde_json::to_string(&(
+            &record.project,
+            &record.task_id,
+            &record.step_id,
+            record.plan_revision,
+            &record.recipe_id,
+            record.started_at_ms,
+        ))?;
+        let previous: Option<Option<String>> = transaction
+            .query_row(
+                "SELECT identity FROM check_action_origin WHERE check_id=?1",
+                [&record.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(Some(previous)) = &previous {
+            ensure!(
+                *previous == identity,
+                "Check execution identity is immutable"
+            );
+        }
+        if previous.is_none() {
+            // Capture from durable host state at the first journal entry, before
+            // dispatch. Never infer origin from a later review's supplied scope.
+            let session_data: Option<String> = transaction
+                .query_row(
+                    "SELECT data FROM task_session WHERE task_id=?1 AND root=?2",
+                    params![record.task_id, record.project],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let scope = session_data
+                .map(|data| -> Result<Option<String>> {
+                    let session: TaskSession = serde_json::from_str(&data)?;
+                    let Ok(workflow) = session.authorize(WorkflowAction::ReviewAction) else {
+                        return Ok(None);
+                    };
+                    let Ok((walk, action)) = session.current_action() else {
+                        return Ok(None);
+                    };
+                    if record.step_id.as_ref() != Some(&walk.step_id)
+                        || record.plan_revision != workflow.plan_ref.as_ref().map(|p| p.revision)
+                    {
+                        return Ok(None);
+                    }
+                    let prepared_at: Option<i64> = transaction.query_row(
+                        "SELECT MAX(json_extract(data,'$.created_at_ms')) FROM conversation_event WHERE session_id=?1 AND json_extract(data,'$.payload.type')='WalkthroughPrepared' AND json_extract(data,'$.payload.walkthrough_id')=?2",
+                        params![session.id,walk.id], |r| r.get(0),
+                    )?;
+                    let advanced_at: Option<i64> = transaction.query_row(
+                        "SELECT MAX(json_extract(data,'$.consumed_at_ms')) FROM action_transition WHERE session_id=?1",
+                        [&session.id], |r| r.get(0),
+                    )?;
+                    if prepared_at.is_none_or(|t| record.started_at_ms < t)
+                        || advanced_at.is_some_and(|t| record.started_at_ms < t)
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some(serde_json::to_string(&crate::ActionEvidenceScope {
+                        workflow,
+                        walkthrough_id: walk.id.clone(),
+                        action_id: action.id.clone(),
+                        action_hash: action.definition_hash(),
+                    })?))
+                })
+                .transpose()?
+                .flatten();
+            // An unbound execution stays unbound even if it is updated after
+            // approvals, Start, or a change of the current action.
+            transaction.execute(
+                "INSERT INTO check_action_origin(check_id,scope,identity) VALUES(?1,?2,?3)",
+                params![record.id, scope, identity],
+            )?;
+        }
+        transaction.execute("INSERT INTO check_run(id,root,sequence,data) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET sequence=excluded.sequence,data=excluded.data WHERE excluded.sequence>=check_run.sequence AND excluded.root=check_run.root", params![record.id,record.project,i64::try_from(record.sequence)?,serde_json::to_string(record)?])?;
+        transaction.commit()?;
         Ok(())
     }
     fn reconcile_interrupted_checks(&mut self) -> Result<()> {
@@ -1518,7 +1596,10 @@ fn apply_session_command(
             let mut review = review.clone();
             review.validate_and_gate(session, input)?;
             let prepared_at: i64 = connection.query_row("SELECT MAX(created) FROM (SELECT json_extract(data,'$.created_at_ms') AS created FROM conversation_event WHERE session_id=?1 AND json_extract(data,'$.payload.type')='WalkthroughPrepared' AND json_extract(data,'$.payload.walkthrough_id')=?2)",params![session.id,review.binding.walkthrough_id],|r|r.get::<_,Option<i64>>(0))?.context("Walkthrough preparation event is missing")?;
-            if input.commands.iter().any(|c| c.started_at_ms < prepared_at)
+            if input
+                .commands
+                .iter()
+                .any(|c| c.scope == input.scope() && c.started_at_ms < prepared_at)
                 && review.outcome == ActionReviewOutcome::Passed
             {
                 review.outcome = ActionReviewOutcome::InsufficientEvidence;
@@ -1542,22 +1623,41 @@ fn apply_session_command(
             }
             for command in &input.commands {
                 ensure!(
-                    command.snapshot.project == session.project,
+                    command
+                        .snapshot
+                        .as_ref()
+                        .is_none_or(|s| s.project == session.project),
                     "Command snapshot belongs to another project"
                 );
-                if matches!(command.provenance, CommandProvenance::LocalCheck { .. }) {
+                if let CommandProvenance::LocalCheck { check_id, .. } = &command.provenance {
                     authenticate_local_evidence(connection, command)?;
                     let check: CheckRecord = serde_json::from_str(&connection.query_row(
                         "SELECT data FROM check_run WHERE id=?1",
-                        [&command.id],
+                        [check_id],
                         |r| r.get::<_, String>(0),
                     )?)?;
+                    let origin_walk = session
+                        .walkthroughs
+                        .iter()
+                        .find(|walk| walk.id == command.scope.walkthrough_id)
+                        .context("Check's originating walkthrough is unavailable")?;
                     ensure!(
-                        check.step_id.as_ref() == Some(&review.binding.step_id),
+                        check.step_id.as_ref() == Some(&origin_walk.step_id),
                         "Check belongs to another step"
                     );
                 }
                 let scope = serde_json::to_string(&command.scope)?;
+                let original_scope: Option<String> = connection
+                    .query_row(
+                        "SELECT scope FROM action_evidence WHERE session_id=?1 AND id=?2 LIMIT 1",
+                        params![session.id, command.id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                ensure!(
+                    original_scope.is_none_or(|original| original == scope),
+                    "Evidence identity belongs to its original action; attach a new receipt"
+                );
                 let data = serde_json::to_string(command)?;
                 let previous: Option<String> = connection.query_row("SELECT data FROM action_evidence WHERE session_id=?1 AND scope=?2 AND id=?3",params![session.id,scope,command.id],|r|r.get(0)).optional()?;
                 if let Some(old) = previous {
@@ -1633,6 +1733,9 @@ fn apply_session_command(
                 latest == *review_id,
                 "A newer review supersedes this result"
             );
+            for command in &input.commands {
+                authenticate_local_evidence(connection, command)?;
+            }
             review.validate_and_gate(session, &input)?;
             ensure!(
                 review.outcome == ActionReviewOutcome::Passed,
@@ -1769,6 +1872,18 @@ fn authenticate_local_evidence(
         .optional()?
         .context("Local check evidence has no authenticated receipt")?;
     let check: CheckRecord = serde_json::from_str(&data)?;
+    let origin: Option<String> = connection
+        .query_row(
+            "SELECT scope FROM check_action_origin WHERE check_id=?1",
+            [check_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    ensure!(
+        origin.as_deref() == Some(serde_json::to_string(&evidence.scope)?.as_str()),
+        "Local check execution belongs to another action or has no authenticated action origin"
+    );
     let mut expected = ActionCommandEvidence::from_local_check(evidence.scope.clone(), &check)?;
     if let crate::CommandOutput::Withheld { hash, .. } = &evidence.output {
         ensure!(

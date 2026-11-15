@@ -252,7 +252,7 @@ fn required_command_receipt_must_match_argv_cwd_inputs_completion_and_exit() {
         match problem {
             "argv" => receipt.argv.push("different-test".into()),
             "cwd" => receipt.cwd = "nested".into(),
-            "snapshot" => receipt.snapshot.id.push('x'),
+            "snapshot" => receipt.snapshot.as_mut().unwrap().id.push('x'),
             "running" => receipt.status = CheckStatus::Running,
             "interrupted" => receipt.status = CheckStatus::Interrupted,
             "truncated" => receipt.truncated = true,
@@ -419,5 +419,128 @@ fn a_known_required_failure_cannot_disappear_behind_the_legacy_six_receipt_summa
     assert_eq!(
         claimed_pass(&s, &input(&s, &c, receipts)).outcome,
         ActionReviewOutcome::InsufficientEvidence
+    );
+}
+
+#[test]
+fn required_checks_without_captured_inputs_cannot_disappear_behind_an_older_pass() {
+    let (temp, p) = fixture();
+    let s = session(&p, GuidedActionKind::Command, "greeting.rs");
+    let mut c = capture(&temp, &s, &p, &[]);
+    c.context
+        .validation_environments
+        .insert("rust-test".into(), "recipe".into());
+    let i = input(&s, &c, vec![]);
+    let mut passed = CheckRecord::pending(p.key().into(), "rust-test".into(), "recipe".into());
+    passed.command = vec!["cargo".into(), "test".into()];
+    passed.snapshot = Some(c.snapshot.clone());
+    passed.snapshot_unchanged = Some(true);
+    passed.started_at_ms = 0;
+    passed.completed_at_ms = Some(1);
+    passed.exit_code = Some(0);
+    passed.status = CheckStatus::Passed;
+    let mut pending = CheckRecord::pending(p.key().into(), "rust-test".into(), "recipe".into());
+    pending.started_at_ms = 1;
+    for status in [
+        CheckStatus::Preparing,
+        CheckStatus::Running,
+        CheckStatus::Interrupted,
+        CheckStatus::Unvalidated,
+        CheckStatus::Cancelled,
+    ] {
+        pending.status = status.clone();
+        pending.completed_at_ms = if matches!(status, CheckStatus::Preparing | CheckStatus::Running)
+        {
+            None
+        } else {
+            Some(2)
+        };
+        let receipts = collect_action_check_evidence(
+            i.scope(),
+            &c.context,
+            &[passed.clone(), pending.clone()],
+            &[("rust-test".into(), "recipe".into())],
+        );
+        assert_eq!(
+            receipts.len(),
+            2,
+            "{status:?}: uncertainty metadata must be retained"
+        );
+        assert_eq!(
+            claimed_pass(&s, &input(&s, &c, receipts)).outcome,
+            ActionReviewOutcome::InsufficientEvidence,
+            "{status:?}"
+        );
+        // Retain the old uncertainty as history, but allow a genuinely later
+        // authenticated rerun to resolve a terminal preparation failure.
+        let mut rerun = passed.clone();
+        rerun.id = new_id();
+        rerun.started_at_ms = 3;
+        rerun.completed_at_ms = Some(4);
+        let receipts = collect_action_check_evidence(
+            i.scope(),
+            &c.context,
+            &[passed.clone(), pending.clone(), rerun],
+            &[("rust-test".into(), "recipe".into())],
+        );
+        assert_eq!(receipts.len(), 3);
+        assert_eq!(
+            claimed_pass(&s, &input(&s, &c, receipts)).outcome,
+            if matches!(status, CheckStatus::Preparing | CheckStatus::Running) {
+                ActionReviewOutcome::InsufficientEvidence
+            } else {
+                ActionReviewOutcome::Passed
+            },
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_manual_command_can_use_a_deliberate_unvalidated_attachment() {
+    let (temp, p) = fixture();
+    let mut s = session(&p, GuidedActionKind::Command, "greeting.rs");
+    let argv = vec!["mkdir".into(), "src".into()];
+    s.walkthroughs[0].actions[0].target = ActionTarget::Command {
+        argv: argv.clone(),
+        cwd: ".".into(),
+        expected_exit_codes: vec![0],
+    };
+    s.walkthroughs[0]
+        .validate(s.spec.as_ref().unwrap(), s.plan.as_ref().unwrap())
+        .unwrap();
+    let c = capture(&temp, &s, &p, &[]);
+    let empty = input(&s, &c, vec![]);
+    assert_eq!(
+        claimed_pass(&s, &empty).outcome,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    let receipt = attach_action_output(
+        empty.scope(),
+        &c,
+        UserCommandAttachment {
+            argv,
+            cwd: ".".into(),
+            exit_code: 0,
+            stdout: "".into(),
+            stderr: "".into(),
+            started_at_ms: 0,
+            completed_at_ms: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(receipt.status, CheckStatus::Unvalidated);
+    assert!(matches!(
+        receipt.provenance,
+        CommandProvenance::UserAttachedOutput
+    ));
+    assert!(receipt.recipe_id.is_none());
+    assert_eq!(
+        claimed_pass(&s, &input(&s, &c, vec![receipt])).outcome,
+        ActionReviewOutcome::Passed
+    );
+    assert!(
+        !p.root.join("src").exists(),
+        "metadata and attachment collection never execute a command"
     );
 }

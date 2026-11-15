@@ -77,6 +77,77 @@ fn atomic_actions_require_their_own_evidence_and_cannot_carry_implementation_scr
     );
 }
 
+#[test]
+fn manual_command_metadata_and_existing_recipe_shapes_do_not_grant_execution_authority() {
+    let (spec, plan) = documents();
+    for argv in [
+        vec!["mkdir", "src"],
+        vec!["touch", "src/greeting.rs"],
+        vec!["cargo", "init", "--lib"],
+        vec!["npm", "test"],
+        vec!["cc", "-c", "greeting.c"],
+        vec!["rg", "-e", "greeting", "src"],
+        vec![
+            "/usr/bin/python3",
+            "-I",
+            "-B",
+            "-m",
+            "pytest",
+            "-q",
+            "-o",
+            "cache_dir={artifacts}/pytest-cache",
+        ],
+        vec![
+            "python3", "-I", "-B", "-m", "unittest", "discover", "-s", ".", "-t", ".", "-v",
+        ],
+        vec!["python3", "-I", "-B", "/checks/codex-home/benchmark.py"],
+        vec![
+            "/toolchain/bin/cargo",
+            "check",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--offline",
+            "--message-format=json",
+        ],
+        vec![
+            "/toolchain/bin/cargo",
+            "test",
+            "--workspace",
+            "--locked",
+            "--offline",
+            "--message-format=json",
+        ],
+    ] {
+        let mut action = command();
+        action.target = ActionTarget::Command {
+            argv: argv.iter().map(|s| (*s).into()).collect(),
+            cwd: "project/subdir".into(),
+            expected_exit_codes: vec![0],
+        };
+        action
+            .validate(&spec, &plan)
+            .unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+    }
+    for argv in [
+        vec!["sh", "solution.sh"],
+        vec!["python3", "-c", "write_solution()"],
+        vec!["python3", "-cwrite_solution()"],
+        vec!["node", "--eval", "writeSolution()"],
+        vec!["node", "-ewriteSolution()"],
+        vec!["touch", "file; cargo test"],
+        vec!["printf", "fn greet() { solution() }"],
+    ] {
+        let mut action = command();
+        action.target = ActionTarget::Command {
+            argv: argv.iter().map(|s| (*s).into()).collect(),
+            cwd: ".".into(),
+            expected_exit_codes: vec![0],
+        };
+        assert!(action.validate(&spec, &plan).is_err(), "{argv:?}");
+    }
+}
+
 fn apply(store: &mut Store, session: &TaskSession, command: SessionCommand) -> TaskSession {
     store
         .apply_session_transition(
@@ -788,6 +859,216 @@ fn persisted_local_checks_cannot_be_forged_and_user_attachments_remain_immutable
         CommandProvenance::UserAttachedOutput
     ));
     assert_eq!(persisted.binding, attached_input.binding);
+}
+
+#[test]
+fn local_execution_is_bound_at_journaling_and_cannot_be_reused_for_the_next_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path()).unwrap();
+    let mut s = started(&mut store, false);
+    let mut second = command();
+    second.id = "test-again".into();
+    let mut walk = walkthrough(&s, vec![command(), second]);
+    walk.actions
+        .last_mut()
+        .unwrap()
+        .required_evidence
+        .push(RequiredActionEvidence::CheckReceipt {
+            recipe_id: "rust-test".into(),
+        });
+    s = apply(
+        &mut store,
+        &s,
+        SessionCommand::SaveWalkthrough { walkthrough: walk },
+    );
+    let first = input(&s, "v1");
+    let check = check_record(&s, &first);
+    store.save_check(&check).unwrap();
+    let receipt = ActionCommandEvidence::from_local_check(first.scope(), &check).unwrap();
+    let first = with_commands(&s, &first, vec![receipt.clone()]);
+    let r = review(&s, &first);
+    store.record_action_review(&s.id, &r, &first, None).unwrap();
+    // Retrying the same immutable review is harmless.
+    store.record_action_review(&s.id, &r, &first, None).unwrap();
+    s = store
+        .advance_action(&s.id, "test", &r.id, &first.binding)
+        .unwrap();
+    let sequence = s.sequence;
+    s = store
+        .advance_action(&s.id, "test", &r.id, &first.binding)
+        .unwrap();
+    assert_eq!(s.sequence, sequence);
+    drop(store);
+    let mut store = Store::open(temp.path()).unwrap();
+    s = store.load_session(&s.id).unwrap().unwrap();
+    let next = input(&s, "v1");
+    let rebound = ActionCommandEvidence::from_local_check(next.scope(), &check).unwrap();
+    let forged = with_commands(&s, &next, vec![rebound]);
+    let claimed = review(&s, &forged);
+    assert!(
+        store
+            .record_action_review(&s.id, &claimed, &forged, None)
+            .is_err(),
+        "one local execution cannot be relabelled as a second command execution"
+    );
+
+    let rerun = check_record(&s, &next);
+    store.save_check(&rerun).unwrap();
+    let rerun_receipt = ActionCommandEvidence::from_local_check(next.scope(), &rerun).unwrap();
+    s = consume(
+        &mut store,
+        &s,
+        &with_commands(&s, &next, vec![rerun_receipt]),
+    );
+    // Cumulative assessment can cite the first execution under its original scope.
+    let cumulative = input(&s, "v1");
+    let cumulative = with_commands(&s, &cumulative, vec![receipt]);
+    let r = review(&s, &cumulative);
+    assert_eq!(r.outcome, ActionReviewOutcome::Passed);
+    store
+        .record_action_review(&s.id, &r, &cumulative, None)
+        .unwrap();
+    assert_eq!(
+        store
+            .action_review_input(&s.id, &r.id)
+            .unwrap()
+            .unwrap()
+            .commands[0]
+            .scope,
+        first.scope()
+    );
+    s = store
+        .advance_action(
+            &s.id,
+            &cumulative.binding.action_id,
+            &r.id,
+            &cumulative.binding,
+        )
+        .unwrap();
+    let mut final_action = validation(&s, true);
+    final_action
+        .required_evidence
+        .push(RequiredActionEvidence::CheckReceipt {
+            recipe_id: "rust-test".into(),
+        });
+    let final_walk = Walkthrough {
+        id: new_id(),
+        generation: s.execution_generation,
+        step_id: s.plan.as_ref().unwrap().task.steps[0].id.clone(),
+        plan_ref: s.plan.as_ref().unwrap().document_ref(),
+        actions: vec![final_action],
+        cursor: 0,
+    };
+    s = apply(
+        &mut store,
+        &s,
+        SessionCommand::SaveWalkthrough {
+            walkthrough: final_walk,
+        },
+    );
+    let final_input = input(&s, "v1");
+    let final_input = with_commands(&s, &final_input, cumulative.commands);
+    s = consume(&mut store, &s, &final_input);
+    assert!(
+        s.implementation_complete(),
+        "full-spec assessment may cite earlier execution without relabelling it"
+    );
+}
+
+#[test]
+fn a_check_journaled_on_an_earlier_action_cannot_first_bind_after_next() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path()).unwrap();
+    let mut s = started(&mut store, false);
+    s = apply(
+        &mut store,
+        &s,
+        SessionCommand::SaveWalkthrough {
+            walkthrough: walkthrough(&s, vec![edit(), command()]),
+        },
+    );
+    let first = input(&s, "v1");
+    let check = check_record(&s, &first);
+    store.save_check(&check).unwrap();
+    let mut changed_identity = check.clone();
+    changed_identity.started_at_ms += 1;
+    changed_identity.sequence += 1;
+    assert!(
+        store.save_check(&changed_identity).is_err(),
+        "updating a receipt cannot change the execution identity"
+    );
+    s = consume(&mut store, &s, &first);
+    // Even an update received on the next action must retain the execution origin.
+    let mut finished = check;
+    finished.sequence += 1;
+    store.save_check(&finished).unwrap();
+    let next = input(&s, "v1");
+    let receipt = ActionCommandEvidence::from_local_check(next.scope(), &finished).unwrap();
+    let next = with_commands(&s, &next, vec![receipt]);
+    let r = review(&s, &next);
+    assert!(
+        store.record_action_review(&s.id, &r, &next, None).is_err(),
+        "the current model-supplied scope is not the execution origin"
+    );
+}
+
+#[test]
+fn preparing_evidence_keeps_immutable_history_and_recovers_after_a_local_rerun() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(temp.path()).unwrap();
+    let mut s = started(&mut store, false);
+    s = apply(
+        &mut store,
+        &s,
+        SessionCommand::SaveWalkthrough {
+            walkthrough: walkthrough(&s, vec![command()]),
+        },
+    );
+    let empty = input(&s, "v1");
+    let mut check = check_record(&s, &empty);
+    check.snapshot = None;
+    check.command.clear();
+    check.snapshot_unchanged = None;
+    check.status = CheckStatus::Preparing;
+    check.exit_code = None;
+    check.completed_at_ms = None;
+    store.save_check(&check).unwrap();
+    let pending = ActionCommandEvidence::from_local_check(empty.scope(), &check).unwrap();
+    let pending_input = with_commands(&s, &empty, vec![pending.clone()]);
+    let pending_review = review(&s, &pending_input);
+    assert_eq!(
+        pending_review.outcome,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    store
+        .record_action_review(&s.id, &pending_review, &pending_input, None)
+        .unwrap();
+    check.finish(CheckStatus::Interrupted, "Interrupted before input capture");
+    store.save_check(&check).unwrap();
+    let interrupted = ActionCommandEvidence::from_local_check(empty.scope(), &check).unwrap();
+    assert_ne!(
+        interrupted.id, pending.id,
+        "each immutable local receipt version needs its own evidence identity"
+    );
+    let interrupted_input = with_commands(&s, &empty, vec![interrupted.clone()]);
+    let interrupted_review = review(&s, &interrupted_input);
+    store
+        .record_action_review(&s.id, &interrupted_review, &interrupted_input, None)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let rerun = check_record(&s, &empty);
+    store.save_check(&rerun).unwrap();
+    let rerun = ActionCommandEvidence::from_local_check(empty.scope(), &rerun).unwrap();
+    let recovered = with_commands(&s, &empty, vec![interrupted, rerun]);
+    s = consume(&mut store, &s, &recovered);
+    assert_eq!(s.walkthroughs[0].cursor, 1);
+    let historical = store
+        .action_review_input(&s.id, &pending_review.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(historical.commands[0].id, pending.id);
+    assert!(historical.commands[0].snapshot.is_none());
+    assert_eq!(historical.commands[0].status, CheckStatus::Preparing);
 }
 #[test]
 fn completing_step_selects_only_the_next_dependency_ready_step() {
