@@ -717,3 +717,119 @@ fn reset_progress(task: &mut TaskPlan, revision: u64) {
         step.completion_note = None;
     }
 }
+
+impl TaskSession {
+    pub fn current_action(&self) -> Result<(&Walkthrough, &GuidedAction)> {
+        self.authorize(WorkflowAction::ReviewAction)?;
+        let plan = self.plan.as_ref().context("Missing plan")?;
+        let all_steps_complete = plan
+            .task
+            .steps
+            .iter()
+            .all(|s| s.status == StepStatus::Complete);
+        let walk = self
+            .walkthroughs
+            .iter()
+            .rev()
+            .find(|w| {
+                w.generation == self.execution_generation
+                    && w.plan_ref == plan.document_ref()
+                    && if all_steps_complete {
+                        w.actions.len() == 1 && w.actions[0].kind == GuidedActionKind::ValidateTask
+                    } else {
+                        plan.task.active_step.as_ref() == Some(&w.step_id)
+                            && w.actions
+                                .last()
+                                .is_some_and(|a| a.kind == GuidedActionKind::ValidateStep)
+                    }
+            })
+            .context("Prepare a walkthrough for the active step")?;
+        let action = walk
+            .actions
+            .get(walk.cursor)
+            .context("This walkthrough has no unfinished action")?;
+        Ok((walk, action))
+    }
+    pub fn validate_action_binding(&self, binding: &ActionReviewBinding) -> Result<()> {
+        ensure!(
+            self.binding_is_current(WorkflowAction::ReviewAction, &binding.workflow),
+            "Action workflow binding is stale"
+        );
+        let (walk, action) = self.current_action()?;
+        ensure!(
+            walk.id == binding.walkthrough_id
+                && walk.step_id == binding.step_id
+                && action.id == binding.action_id
+                && action.revision == binding.action_revision
+                && action.definition_hash() == binding.action_hash,
+            "Action identity is stale or inactive"
+        );
+        Ok(())
+    }
+    pub fn implementation_complete(&self) -> bool {
+        self.authorize(WorkflowAction::ValidateTask).is_ok()
+            && self.plan.as_ref().is_some_and(|p| {
+                p.task
+                    .steps
+                    .iter()
+                    .all(|s| s.status == StepStatus::Complete)
+            })
+            && self.walkthroughs.iter().any(|w| {
+                w.generation == self.execution_generation
+                    && w.actions.len() == 1
+                    && w.actions[0].kind == GuidedActionKind::ValidateTask
+                    && w.cursor == 1
+            })
+    }
+    pub(crate) fn consume_action(
+        &mut self,
+        binding: &ActionReviewBinding,
+    ) -> Result<(usize, usize)> {
+        self.validate_action_binding(binding)?;
+        let (walk, action) = self.current_action()?;
+        let (from, kind) = (walk.cursor, action.kind);
+        let walk = self
+            .walkthroughs
+            .iter_mut()
+            .find(|w| w.id == binding.walkthrough_id)
+            .context("Missing walkthrough")?;
+        walk.cursor += 1;
+        let plan = self.plan.as_mut().context("Missing plan")?;
+        if kind == GuidedActionKind::ValidateStep {
+            let step = plan
+                .task
+                .steps
+                .iter_mut()
+                .find(|s| s.id == binding.step_id)
+                .context("Missing step")?;
+            step.status = StepStatus::Complete;
+            step.completion_note =
+                Some("Every action and cumulative step criteria reviewed".into());
+            plan.task.active_step = None;
+            if let Some(next) = plan
+                .task
+                .steps
+                .iter()
+                .find(|s| {
+                    s.status != StepStatus::Complete
+                        && s.depends_on.iter().all(|id| {
+                            plan.task
+                                .steps
+                                .iter()
+                                .any(|d| &d.id == id && d.status == StepStatus::Complete)
+                        })
+                })
+                .map(|s| s.id.clone())
+            {
+                plan.task.start_step(&next)?;
+            }
+        }
+        plan.task.state_sequence = plan
+            .task
+            .state_sequence
+            .checked_add(1)
+            .context("Task sequence exhausted")?;
+        plan.task.updated_at_ms = now_ms();
+        Ok((from, from + 1))
+    }
+}

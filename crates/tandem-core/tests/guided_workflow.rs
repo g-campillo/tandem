@@ -605,12 +605,17 @@ fn walkthrough(session: &TaskSession) -> Walkthrough {
                 spec_ref: plan.spec_ref.clone(),
                 plan_ref: plan.document_ref(),
                 step_id: Some(step_id.clone()),
-                criterion_refs: vec![CriterionRef::StepDoneWhen { step_id, index: 0 }],
+                criterion_refs: vec![CriterionRef::StepDoneWhen {
+                    step_id: step_id.clone(),
+                    index: 0,
+                }],
                 paths: vec![],
             },
             why: "Confirm the completion conditions".into(),
             expected_result: "A cumulative assessment".into(),
-            required_evidence: vec![],
+            required_evidence: vec![RequiredActionEvidence::CriterionAssessment {
+                criterion_ref: CriterionRef::StepDoneWhen { step_id, index: 0 },
+            }],
         }],
         cursor: 0,
     }
@@ -630,7 +635,9 @@ fn walkthrough_with_serialized_size(session: &TaskSession, size: usize) -> Walkt
         },
         why: "Satisfy one requirement".into(),
         expected_result: "One observable edit".into(),
-        required_evidence: vec![],
+        required_evidence: vec![RequiredActionEvidence::FileSnapshot {
+            path: "src/lib.rs".into(),
+        }],
     });
     walkthrough.actions.splice(0..0, actions);
     let mut remaining = size - serde_json::to_vec(&walkthrough).unwrap().len();
@@ -705,6 +712,11 @@ fn walkthrough_validation_binds_exact_criteria_and_requires_final_step_assessmen
     if let ActionTarget::Validation { criterion_refs, .. } = &mut walkthrough.actions[0].target {
         criterion_refs.push(CriterionRef::SpecAcceptance { id: "empty".into() });
     }
+    walkthrough.actions[0]
+        .required_evidence
+        .push(RequiredActionEvidence::CriterionAssessment {
+            criterion_ref: CriterionRef::SpecAcceptance { id: "empty".into() },
+        });
     walkthrough
         .validate(
             session.spec.as_ref().unwrap(),
@@ -873,6 +885,9 @@ fn final_task_assessment_covers_all_spec_acceptance_without_edit_or_command_targ
         criterion_refs: vec![CriterionRef::SpecAcceptance { id: "empty".into() }],
         paths: vec!["src/lib.rs".into()],
     };
+    action.required_evidence = vec![RequiredActionEvidence::CriterionAssessment {
+        criterion_ref: CriterionRef::SpecAcceptance { id: "empty".into() },
+    }];
     action.validate(spec, plan).unwrap();
     let mut expanded = spec.clone();
     expanded.acceptance.push(Criterion {

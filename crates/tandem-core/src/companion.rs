@@ -622,6 +622,77 @@ impl ThreadBinding {
     }
 }
 
+/// Parse an atomic action assessment. Identity and evidence are host supplied;
+/// legacy ReviewResponse has no route to an action transition.
+pub fn parse_action_review_response(
+    session: &crate::TaskSession,
+    input: &crate::ActionReviewInput,
+    value: Value,
+) -> Result<crate::ActionReview> {
+    use crate::{
+        ActionCriterionAssessment, ActionReview, ActionReviewFinding, ActionReviewOutcome,
+    };
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Assessment {
+        outcome: ActionReviewOutcome,
+        summary: String,
+        findings: Vec<ActionReviewFinding>,
+        evidence_used: Vec<String>,
+        limitations: Vec<String>,
+        assessments: Vec<ActionCriterionAssessment>,
+    }
+    ensure!(
+        serde_json::to_vec(&value)?.len() <= 128 * 1024,
+        "Action review exceeds response limit"
+    );
+    ensure!(
+        !contains_solution_code(&value),
+        "Implementation code is hidden in action reviews"
+    );
+    let response: Assessment = serde_json::from_value(value)?;
+    let mut review = ActionReview {
+        id: new_id(),
+        binding: input.binding.clone(),
+        outcome: response.outcome,
+        summary: response.summary,
+        findings: response.findings,
+        evidence_used: response.evidence_used,
+        limitations: response.limitations,
+        assessments: response.assessments,
+        reviewed_at_ms: now_ms(),
+    };
+    review.validate_and_gate(session, input)?;
+    Ok(review)
+}
+
+/// Action metadata contains no free-form executable body. Solution code cannot
+/// be smuggled into prose, a symbol, or an inline human command.
+pub fn parse_walkthrough_response(
+    session: &crate::TaskSession,
+    value: Value,
+) -> Result<crate::Walkthrough> {
+    session.authorize(crate::WorkflowAction::PrepareWalkthrough)?;
+    ensure!(
+        serde_json::to_vec(&value)?.len() <= 128 * 1024,
+        "Walkthrough exceeds response limit"
+    );
+    ensure!(
+        !contains_solution_code(&value),
+        "Implementation code is hidden in walkthrough metadata"
+    );
+    let walk: crate::Walkthrough = serde_json::from_value(value)?;
+    walk.validate(
+        session.spec.as_ref().context("Missing spec")?,
+        session.plan.as_ref().context("Missing plan")?,
+    )?;
+    ensure!(
+        walk.cursor == 0 && walk.generation == session.execution_generation,
+        "Walkthrough starts at the current generation"
+    );
+    Ok(walk)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

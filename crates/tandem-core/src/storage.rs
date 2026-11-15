@@ -1,13 +1,15 @@
 use crate::ModelPreference;
 use crate::conversation::{bounded_structure, bounded_text, stable_id};
 use crate::{
-    AgentRun, AgentStatus, CheckRecord, CheckStatus, ClarificationAnswer, ClarificationQuestion,
-    ConsumedActionTransition, ConversationEvent, ConversationPayload, Document, DocumentProposal,
-    DocumentRef, GuidanceSettings, ImportStatus, ImportTransaction, LegacyTaskLink, ModelRun,
+    ActionCommandEvidence, ActionReview, ActionReviewBinding, ActionReviewInput,
+    ActionReviewOutcome, AgentRun, AgentStatus, CheckRecord, CheckStatus, ClarificationAnswer,
+    ClarificationQuestion, CommandProvenance, ConsumedActionTransition, ConversationEvent,
+    ConversationPayload, Document, DocumentProposal, DocumentRef, ExecutionArchive,
+    GuidanceSettings, GuidedActionKind, ImportStatus, ImportTransaction, LegacyTaskLink, ModelRun,
     ModelStatus, OperationOutcome, PlanDocument, Project, ProjectTools, ResearchActivity,
     ResearchFinding, ResearchReceipt, SessionOperation, SpecDocument, TaskPlan, TaskSession,
-    ThreadBinding, Walkthrough, WorkflowAction, WorkflowBinding, WorkflowDocumentKind, new_id,
-    now_ms,
+    ThreadBinding, Walkthrough, WorkflowAction, WorkflowBinding, WorkflowDocumentKind,
+    WorkflowTransition, new_id, now_ms,
 };
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -99,6 +101,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS research_receipt(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS session_transition(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS action_transition(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, walkthrough_id TEXT NOT NULL, action_id TEXT NOT NULL, review_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL, UNIQUE(session_id,walkthrough_id,action_id));
+            CREATE TABLE IF NOT EXISTS action_review(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, walkthrough_id TEXT NOT NULL, action_id TEXT NOT NULL, review TEXT NOT NULL, input TEXT NOT NULL, operation_id TEXT);
+            CREATE TABLE IF NOT EXISTS action_evidence(id TEXT NOT NULL, session_id TEXT NOT NULL, scope TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,scope,id));
             CREATE TABLE IF NOT EXISTS session_operation(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, outcome TEXT);
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_session_operation ON session_operation(session_id) WHERE outcome IS NULL;
             CREATE TABLE IF NOT EXISTS legacy_task_link(session_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
@@ -662,6 +666,15 @@ pub enum SessionCommand {
     RecordActionTransition {
         transition: ConsumedActionTransition,
     },
+    RecordActionReview {
+        review: ActionReview,
+        input: Box<ActionReviewInput>,
+    },
+    AdvanceAction {
+        action_id: String,
+        review_id: String,
+        current_binding: ActionReviewBinding,
+    },
     BeginOperation {
         operation: SessionOperation,
     },
@@ -999,7 +1012,12 @@ impl Store {
                     "Workflow binding changed during transition"
                 );
             }
-            if let Some(mut event) = apply_session_command(&transaction, &mut session, command)? {
+            if let Some(mut event) = apply_session_command(
+                &transaction,
+                &mut session,
+                command,
+                transition.operation_id.as_deref(),
+            )? {
                 event.id = if index == 0 {
                     transition.id.clone()
                 } else {
@@ -1034,6 +1052,76 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(session)
+    }
+
+    pub fn action_review(&self, session_id: &str, review_id: &str) -> Result<Option<ActionReview>> {
+        let data: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT review FROM action_review WHERE session_id=?1 AND id=?2",
+                params![session_id, review_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        data.map(|data| serde_json::from_str(&data).context("Action review is damaged"))
+            .transpose()
+    }
+    pub fn action_review_input(
+        &self,
+        session_id: &str,
+        review_id: &str,
+    ) -> Result<Option<ActionReviewInput>> {
+        let data: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT input FROM action_review WHERE session_id=?1 AND id=?2",
+                params![session_id, review_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        data.map(|data| serde_json::from_str(&data).context("Action review input is damaged"))
+            .transpose()
+    }
+    pub fn record_action_review(
+        &mut self,
+        session_id: &str,
+        review: &ActionReview,
+        input: &ActionReviewInput,
+        operation_id: Option<&str>,
+    ) -> Result<TaskSession> {
+        let session = self.load_session(session_id)?.context("Unknown session")?;
+        let mut transition = SessionTransition::new(
+            crate::content_hash(format!("review:{}:{}", session_id, review.id).as_bytes()),
+            vec![SessionCommand::RecordActionReview {
+                review: review.clone(),
+                input: Box::new(input.clone()),
+            }],
+        );
+        if let Some(id) = operation_id {
+            transition = transition.for_operation(id);
+        }
+        self.apply_session_transition(session_id, session.sequence, &transition)
+    }
+    pub fn advance_action(
+        &mut self,
+        session_id: &str,
+        action_id: &str,
+        review_id: &str,
+        current_binding: &ActionReviewBinding,
+    ) -> Result<TaskSession> {
+        let session = self.load_session(session_id)?.context("Unknown session")?;
+        self.apply_session_transition(
+            session_id,
+            session.sequence,
+            &SessionTransition::new(
+                crate::content_hash(format!("advance:{}:{review_id}", session_id).as_bytes()),
+                vec![SessionCommand::AdvanceAction {
+                    action_id: action_id.into(),
+                    review_id: review_id.into(),
+                    current_binding: current_binding.clone(),
+                }],
+            ),
+        )
     }
 
     /// Explicit adoption links original IDs and progress as historical evidence.
@@ -1225,6 +1313,7 @@ fn apply_session_command(
     connection: &Connection,
     session: &mut TaskSession,
     command: &SessionCommand,
+    operation_id: Option<&str>,
 ) -> Result<Option<ConversationEvent>> {
     let event = match command {
         SessionCommand::HumanMessage { text } => session.append_human_message(text.clone())?,
@@ -1355,21 +1444,221 @@ fn apply_session_command(
                 walkthrough.generation == session.execution_generation,
                 "Walkthrough generation is stale"
             );
+            let final_task = walkthrough.actions[0].kind == GuidedActionKind::ValidateTask;
+            ensure!(
+                if final_task {
+                    plan.task
+                        .steps
+                        .iter()
+                        .all(|s| s.status == crate::StepStatus::Complete)
+                } else {
+                    plan.task.active_step.as_ref() == Some(&walkthrough.step_id)
+                        && plan.task.steps.iter().any(|s| {
+                            s.id == walkthrough.step_id
+                                && s.status == crate::StepStatus::Active
+                                && s.depends_on.iter().all(|id| {
+                                    plan.task.steps.iter().any(|d| {
+                                        &d.id == id && d.status == crate::StepStatus::Complete
+                                    })
+                                })
+                        })
+                },
+                "Walkthrough must target the active dependency-ready step, or final spec validation"
+            );
             if let Some(old) = session.walkthroughs.iter().find(|w| w.id == walkthrough.id) {
                 ensure!(
-                    serde_json::to_string(old)? == serde_json::to_string(walkthrough)?,
+                    old.actions == walkthrough.actions
+                        && old.generation == walkthrough.generation
+                        && old.step_id == walkthrough.step_id
+                        && old.plan_ref == walkthrough.plan_ref,
                     "Walkthrough ID is immutable"
                 );
                 return Ok(None);
             }
             ensure!(
+                !session
+                    .history
+                    .iter()
+                    .any(|h| h.walkthroughs.iter().any(|w| w.id == walkthrough.id)),
+                "Archived walkthrough ID cannot be reused"
+            );
+            ensure!(
                 walkthrough.cursor == 0,
                 "A new walkthrough cannot contain consumed actions"
             );
+            let mut replaced = vec![];
+            session.walkthroughs.retain(|w| {
+                if w.generation == walkthrough.generation
+                    && w.step_id == walkthrough.step_id
+                    && (w.actions[0].kind == GuidedActionKind::ValidateTask) == final_task
+                {
+                    replaced.push(w.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if !replaced.is_empty() {
+                session.history.push(ExecutionArchive {
+                    generation: session.execution_generation,
+                    spec: session.spec.clone(),
+                    plan: session.plan.clone(),
+                    walkthroughs: replaced,
+                });
+            }
             session.walkthroughs.push(walkthrough.clone());
             session.event(
                 ConversationPayload::WalkthroughPrepared {
                     walkthrough_id: walkthrough.id.clone(),
+                },
+                None,
+            )?
+        }
+        SessionCommand::RecordActionReview { review, input } => {
+            let mut review = review.clone();
+            review.validate_and_gate(session, input)?;
+            let prepared_at: i64 = connection.query_row("SELECT MAX(created) FROM (SELECT json_extract(data,'$.created_at_ms') AS created FROM conversation_event WHERE session_id=?1 AND json_extract(data,'$.payload.type')='WalkthroughPrepared' AND json_extract(data,'$.payload.walkthrough_id')=?2)",params![session.id,review.binding.walkthrough_id],|r|r.get::<_,Option<i64>>(0))?.context("Walkthrough preparation event is missing")?;
+            if input.commands.iter().any(|c| c.started_at_ms < prepared_at)
+                && review.outcome == ActionReviewOutcome::Passed
+            {
+                review.outcome = ActionReviewOutcome::InsufficientEvidence;
+                review.limitations.push("Run the required command during this walkthrough and attach its current result".into());
+            }
+            let review_data = serde_json::to_string(&review)?;
+            let input_data = serde_json::to_string(input)?;
+            let previous: Option<(String, String, String)> = connection
+                .query_row(
+                    "SELECT session_id,review,input FROM action_review WHERE id=?1",
+                    [&review.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            if let Some((owner, old_review, old_input)) = previous {
+                ensure!(
+                    owner == session.id && old_review == review_data && old_input == input_data,
+                    "Review ID is immutable"
+                );
+                return Ok(None);
+            }
+            for command in &input.commands {
+                ensure!(
+                    command.snapshot.project == session.project,
+                    "Command snapshot belongs to another project"
+                );
+                if matches!(command.provenance, CommandProvenance::LocalCheck { .. }) {
+                    authenticate_local_evidence(connection, command)?;
+                    let check: CheckRecord = serde_json::from_str(&connection.query_row(
+                        "SELECT data FROM check_run WHERE id=?1",
+                        [&command.id],
+                        |r| r.get::<_, String>(0),
+                    )?)?;
+                    ensure!(
+                        check.step_id.as_ref() == Some(&review.binding.step_id),
+                        "Check belongs to another step"
+                    );
+                }
+                let scope = serde_json::to_string(&command.scope)?;
+                let data = serde_json::to_string(command)?;
+                let previous: Option<String> = connection.query_row("SELECT data FROM action_evidence WHERE session_id=?1 AND scope=?2 AND id=?3",params![session.id,scope,command.id],|r|r.get(0)).optional()?;
+                if let Some(old) = previous {
+                    ensure!(
+                        old == data,
+                        "Attached evidence ID is immutable; attach a new receipt"
+                    );
+                } else {
+                    connection.execute(
+                        "INSERT INTO action_evidence(session_id,scope,id,data) VALUES(?1,?2,?3,?4)",
+                        params![session.id, scope, command.id, data],
+                    )?;
+                }
+            }
+            connection.execute("INSERT INTO action_review(id,session_id,walkthrough_id,action_id,review,input,operation_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![review.id,session.id,review.binding.walkthrough_id,review.binding.action_id,review_data,input_data,operation_id])?;
+            session.event(
+                ConversationPayload::AssistantMessage {
+                    text: review.summary.clone(),
+                },
+                None,
+            )?
+        }
+        SessionCommand::AdvanceAction {
+            action_id,
+            review_id,
+            current_binding,
+        } => {
+            stable_id(action_id)?;
+            stable_id(review_id)?;
+            ensure!(
+                current_binding.workflow.session_id == session.id
+                    && current_binding.action_id == *action_id,
+                "Next names another session or action"
+            );
+            let consumed: Option<String> = connection
+                .query_row(
+                    "SELECT data FROM action_transition WHERE session_id=?1 AND review_id=?2",
+                    params![session.id, review_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(data) = consumed {
+                let previous: ConsumedActionTransition = serde_json::from_str(&data)?;
+                ensure!(
+                    previous.binding == *current_binding,
+                    "Consumed review names different inputs"
+                );
+                return Ok(None);
+            }
+            session.validate_action_binding(current_binding)?;
+            let (review_data,input_data,review_operation): (String,String,Option<String>) = connection.query_row("SELECT review,input,operation_id FROM action_review WHERE id=?1 AND session_id=?2",params![review_id,session.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.context("No bound action review exists")?;
+            if let Some(operation_id) = review_operation {
+                let outcome: Option<String> = connection.query_row(
+                    "SELECT outcome FROM session_operation WHERE id=?1 AND session_id=?2",
+                    params![operation_id, session.id],
+                    |r| r.get(0),
+                )?;
+                let outcome: OperationOutcome =
+                    serde_json::from_str(&outcome.context("Review operation is still running")?)?;
+                ensure!(
+                    matches!(outcome, OperationOutcome::Completed { .. }),
+                    "Review operation was cancelled, interrupted, or failed"
+                );
+            }
+            let mut review: ActionReview = serde_json::from_str(&review_data)?;
+            let input: ActionReviewInput = serde_json::from_str(&input_data)?;
+            ensure!(
+                review.binding == *current_binding,
+                "Review inputs changed; review the current action again"
+            );
+            let latest: String = connection.query_row("SELECT id FROM action_review WHERE session_id=?1 AND walkthrough_id=?2 AND action_id=?3 ORDER BY rowid DESC LIMIT 1",params![session.id,current_binding.walkthrough_id,action_id],|r|r.get(0))?;
+            ensure!(
+                latest == *review_id,
+                "A newer review supersedes this result"
+            );
+            review.validate_and_gate(session, &input)?;
+            ensure!(
+                review.outcome == ActionReviewOutcome::Passed,
+                "This action needs changes or more evidence before Next"
+            );
+            let (from_cursor, to_cursor) = session.consume_action(current_binding)?;
+            let consumed = ConsumedActionTransition {
+                id: crate::content_hash(format!("next:{}:{review_id}", session.id).as_bytes()),
+                review_id: review_id.clone(),
+                binding: current_binding.clone(),
+                from_cursor,
+                to_cursor,
+                consumed_at_ms: now_ms(),
+            };
+            connection.execute("INSERT INTO action_transition(id,session_id,walkthrough_id,action_id,review_id,data) VALUES(?1,?2,?3,?4,?5,?6)",params![consumed.id,session.id,current_binding.walkthrough_id,action_id,review_id,serde_json::to_string(&consumed)?])?;
+            session.event(
+                ConversationPayload::WorkflowTransition {
+                    transition: if session.implementation_complete() {
+                        WorkflowTransition::ImplementationCompleted {
+                            binding: current_binding.workflow.clone(),
+                        }
+                    } else {
+                        WorkflowTransition::ActionAdvanced {
+                            transition_id: consumed.id,
+                        }
+                    },
                 },
                 None,
             )?
@@ -1464,4 +1753,40 @@ fn apply_session_command(
         }
     };
     Ok(Some(event))
+}
+
+fn authenticate_local_evidence(
+    connection: &Connection,
+    evidence: &ActionCommandEvidence,
+) -> Result<()> {
+    let CommandProvenance::LocalCheck { check_id, .. } = &evidence.provenance else {
+        return Ok(());
+    };
+    let data: String = connection
+        .query_row("SELECT data FROM check_run WHERE id=?1", [check_id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .context("Local check evidence has no authenticated receipt")?;
+    let check: CheckRecord = serde_json::from_str(&data)?;
+    let mut expected = ActionCommandEvidence::from_local_check(evidence.scope.clone(), &check)?;
+    if let crate::CommandOutput::Withheld { hash, .. } = &evidence.output {
+        ensure!(
+            *hash == crate::content_hash(check.output.as_bytes()),
+            "Withheld output hash differs from the authenticated receipt"
+        );
+        expected.output = evidence.output.clone();
+        expected.truncated = true;
+    }
+    ensure!(
+        serde_json::to_string(&expected)? == serde_json::to_string(evidence)?,
+        "Local check evidence differs from the authenticated receipt"
+    );
+    let workflow = &evidence.scope.workflow;
+    ensure!(
+        check.task_id.as_ref() == workflow.task_id.as_ref()
+            && check.plan_revision == workflow.plan_ref.as_ref().map(|p| p.revision),
+        "Check belongs to another task or plan"
+    );
+    Ok(())
 }

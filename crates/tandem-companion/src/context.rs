@@ -28,6 +28,14 @@ pub fn capture_context(
 ) -> Result<ContextSnapshot> {
     ensure!(selected.len() <= 32, "Select at most 32 context files");
     let snapshot = tandem_checks::materialize(project, overlays, &cache.join(new_id()), cancel)?;
+    context_from_snapshot(&snapshot, overlays, selected)
+}
+
+pub(crate) fn context_from_snapshot(
+    snapshot: &tandem_checks::MaterializedSnapshot,
+    overlays: &[Document],
+    selected: &[String],
+) -> Result<ContextSnapshot> {
     let mut paths: BTreeSet<String> = selected.iter().cloned().collect();
     for config in [
         "Cargo.toml",
@@ -42,7 +50,7 @@ pub fn capture_context(
         }
     }
     let mut files = Vec::new();
-    let mut omitted = snapshot.manifest.omitted;
+    let mut omitted = snapshot.manifest.omitted.clone();
     let mut bytes = 0;
     for path in paths {
         normalized_relative(Path::new(&path))?;
@@ -113,7 +121,7 @@ pub fn capture_context(
     Ok(ContextSnapshot {
         validation_environments: Default::default(),
         id,
-        project_fingerprint: snapshot.manifest.id,
+        project_fingerprint: snapshot.manifest.id.clone(),
         files,
         tree: snapshot
             .manifest
