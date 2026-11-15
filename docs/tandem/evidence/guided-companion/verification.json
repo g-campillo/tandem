@@ -2,7 +2,7 @@
   "task": 10,
   "date": "2026-11-15",
   "base_sha": "b7e24ff111bbdab14d3cc2e14fe088d5e2e05a50",
-  "status": "deterministic_passed_real_journeys_partial_native_blocked",
+  "status": "blocked_real_python_partial_native_partial",
   "runtime": {
     "version": "codex-cli 0.169.0",
     "sha256": "739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002",
@@ -16,34 +16,42 @@
     "model": "gpt-6.1-sol"
   },
   "source_hashes": {
-    "crates/tandem-core/src/companion.rs": "5e0cf1250ecfbd59afbb84d0168a74814ff9531b6cac696bc9255eb5dc924bf6",
-    "crates/tandem-companion/src/conversation.rs": "f4b75384622cb73a9a8a51224971f15958751b08e3bdfda7789f3576550eba44",
-    "crates/tandem-companion/src/runtime.rs": "faed8a5f9de34df65a7e27c1086a1316af047c888406dc79019e96a4ac06585e",
-    "crates/tandem-companion/src/public_research.rs": "742c3d21131af1dcafe96890055b4dbdfc1fa6e55a24c988ace0e997b22bbb72"
+    "crates/tandem-core/src/companion.rs": "3c9dc93a5ab29e7a99a2d4e0915395b686dc6483ab7ebef00be190c1ce9f2b4e",
+    "crates/tandem-core/src/walkthrough.rs": "e75997fc810a74c867058351d913835b1330252314a7cb2308b937da58df9c04",
+    "crates/tandem-companion/src/runtime.rs": "e545b2ce23fbe475632b29eacb1e3699a01175386212a8e7116e90e4e200ecef",
+    "crates/tandem-companion/examples/guided_journeys.rs": "5806c7f8e227c74c22bcfadf1667c1a2f3529b83a21f9000d05cdbb0f8ec09f0",
+    "crates/tandem-companion/examples/guided_support/mod.rs": "3686d131457e7963e326eaeb64aeac8f5f97b0788d96d8d222c1a3c9aaefa71e",
+    "crates/tandem-companion/tests/guided_journey.rs": "85f2417119fd75fb004b67c6e17fbbe68a282768851d92ca3d032436c1b6f71b"
   },
   "turn_usage": {
     "probe": 1,
-    "rust": 24,
-    "python": 24,
-    "total": 49
+    "python": 43,
+    "rust": 52,
+    "total": 96
   },
   "authorized_caps": {
     "probe": 4,
-    "rust": 24,
-    "python": 24,
-    "aggregate": 52
+    "rust": 56,
+    "python": 56,
+    "aggregate": 116
   },
   "automated": {
     "class": "D/S",
     "workspace": {
-      "passed": 287,
+      "passed": 289,
       "failed": 0,
       "ignored": 2
     },
-    "guided_journey_tests": 15,
+    "guided_journey_tests": 17,
     "clippy_all_targets": "passed",
     "format": "passed",
-    "build": "passed"
+    "build": "passed",
+    "final_metadata_only_example_check": "passed",
+    "new_coverage": [
+      "Authorization amendment/default caps/reopen/private+public aggregate/prefix preservation/missing or unmatched authorization/no refund",
+      "Ordinary saved owned module and detection of unauthorized module/caller/oracle mutation",
+      "Nonempty bounded provider reply text; typed validation/cwd/no-inline-command instructions retained in actual wire routing tests"
+    ]
   },
   "real": {
     "probe": {
@@ -97,26 +105,60 @@
       },
       "unchanged_generated_plan_steps": 4,
       "started_generation": 1,
-      "next_stage": "PrepareWalkthrough; exhausted24-turn cap",
-      "real_action_reviews": 0,
-      "implementation_complete": false,
+      "next_stage": null,
+      "real_action_reviews": 13,
+      "implementation_complete": true,
       "structured_answers": 1,
       "actual_research_kinds": [
         "dependencies",
         "doc",
         "git",
         "public"
-      ]
+      ],
+      "status": "passed",
+      "consumed_action_transitions": 8,
+      "exactly_once_next_checks": 8,
+      "assertions": {
+        "command": true,
+        "create_file": true,
+        "implementation_complete": true,
+        "missing_evidence_rejected": true,
+        "named_symbol": true,
+        "wrong_rejected": true
+      },
+      "immutable_originals_and_last_human_save_baseline_match": true,
+      "owned_module_last_human_save_hash": "422a918e79d463fe164b7f73769f3e26c55c073aaf9325abfbe01c6d00220c73",
+      "original_saved_spec_plan_unchanged": true,
+      "harness_choices": "Only disposable human module saves, exact check selection and real Git output attachments; no review bypass or artifact coercion",
+      "legacy_receipt_field_note": "Historical live_source_unchanged asserts protected originals and last explicit human-owned module baseline, not equality to the pre-implementation tree"
     },
     "python": {
-      "outcome": "Original24-turn cap reached; no further dispatch permitted",
-      "stage": "DraftSpec unfinished; no saved spec/plan, approvals, Start, action or review",
+      "outcome": "Model did not prepare atomic actions",
+      "stage": "Saved/edited/approved actual spec and legitimate two-step plan; Start g1; no walkthrough/action or review",
       "structured_answers": 0,
       "actual_research_kinds": [
         "public"
       ],
       "implementation_complete": false,
-      "last_continuation_receipt": ".tandem-local/guided-companion/approved-suite/python/final-draft-spec-continuation.json"
+      "last_continuation_receipt": ".tandem-local/guided-companion/approved-suite/python/receipt.json",
+      "status": "partial_stopped_without_blind_retries",
+      "saved_and_approved_spec_ref": {
+        "revision": 1,
+        "hash": "f29a8c5d0af71fdddb7d27e9d7f74f5931d1edcaa1c8aa5c103a5d37edf4303d"
+      },
+      "saved_and_approved_plan_ref": {
+        "revision": 1,
+        "hash": "d4679cf53f036cd0eeb1782cf189bbcc0e43069c139e591de3d3bfcd009a9630"
+      },
+      "plan_steps": 2,
+      "started_generation": 1,
+      "real_action_reviews": 0,
+      "consumed_action_transitions": 0,
+      "next_stage": "PrepareWalkthrough remains unfinished; actual local doc/Git/dependency research and structured answer also unmet",
+      "remaining_turns": 13,
+      "repeated_public_page_requests": "Two bounded private operations requested PublicPage while prose described missing local research; no cause established; not rerun merely to spend remaining allowance",
+      "schema_diagnostic": "All12 local/public anyOf variants and clarification fields retained; pinned provider passes schema unchanged; no evidenced public/private thread crossover",
+      "additional_zero_turn_diagnosis": "Both bounded8-round operations retain explicit human request/current captured contract and all seven complete receipt batches. No demonstrated host routing defect or public/private thread crossover. Missing module snapshot explains a request for more evidence but not the repeated wrong PublicPage kind."
     },
     "python_actual_input_diagnostics": {
       "actual_turn_has_explicit_draft_spec_intent": true,
@@ -134,29 +176,146 @@
       "allows_proposal_without_mandatory_question": true,
       "mechanical_mixed_host_stripping_and_authority_guards_retained": true,
       "simulated_routing_four_typed_intents_no_question_pending_question_discuss_and_explicit_answer": "passed",
-      "real_behavior_retest_after_correction": "not run; original per-language caps exhausted; no causal claim about all previous behavior"
+      "real_behavior_retest_after_correction": "First resumed Python DraftSpec at turn25 proposed its actual spec; causal explanation for all earlier behavior remains unproved"
+    },
+    "resumed_contract_diagnostics": [
+      "Rust25 empty reply.text and missing cumulative validation action quarantined; provider schema/text instruction aligned with existing validators",
+      "Rust27 legitimate unsaved-empty-module NeedsChanges; explicit owned-module ordinary save added",
+      "Rust28 scope notes in limitations blocked pass; instructions clarified that unresolved current-action gaps block Passed",
+      "Rust29 asked for preservation evidence; actual Git diff/status output attached as unvalidated human report",
+      "Rust44 absolute command cwd quarantined; explicit relative cwd instruction added",
+      "Rust45 harness recipe selection incorrectly replaced CommandReceipt; fixed to preserve it while adding CheckReceipt",
+      "Rust46 missing-evidence provider InsufficientEvidence normalized by host to NeedsChanges for blocking finding; accepted as genuine negative, identical immutable negative reused without extra model call",
+      "Python27 inline -c command quarantined; no-inline-script instruction added; validator retained"
+    ],
+    "harness_interruption": {
+      "model_turns": 0,
+      "charged_reservations_before_after": 71,
+      "cause": "Nested Store lock in newly added negative-review recovery; lock order corrected",
+      "cleanup": "Only verified exact harness PID terminated; stale lock removed after exit; suite failure status restored; counts/reservations/amendment unchanged",
+      "receipt": ".tandem-local/guided-companion/approved-suite/rust/harness-lock-order-interruption.json"
     }
   },
   "native": {
     "class": "M",
-    "status": "blocked",
-    "reason": "CGSSessionScreenIsLocked=1; no GUI launch/automation attempted",
-    "seed_only": "deterministic sessions/runs; no model usage; paths in private native-seed-receipt.json",
-    "measured_at_utc": "2026-11-15T13:49:30.408764+00:00"
+    "status": "partial",
+    "console_state": {
+      "IOConsoleLocked": false,
+      "on_console": true,
+      "login_done": true
+    },
+    "bundle_id": "com.tandem.guided.qa.20261115.resume",
+    "binary_sha256": "4df4f9cf90f535cfdeb7a839971bd9f5432d5398dd549af74d4ca541dc811b72",
+    "initial_pid": 73027,
+    "initial_window": 71271,
+    "restart_pid": 34781,
+    "restart_window": 71339,
+    "native_model_turns": 0,
+    "seeded_fake_model_runs_before_after": 2,
+    "observed": [
+      "Restored conversation, preset choices and custom multiline clarification text without submission",
+      "Separate Spec view: actual edit/save v2, exact approval, no-op save preserves approval",
+      "Prepare control disabled and menu reports outdated-plan/spec gate",
+      "Explicit unavailable model remains selected with useful label and Automatic option",
+      "Seeded Python current action/file target/required snapshot/Next-disabled and Open in editor",
+      "Rust and Python ordinary editor typing+Cmd-S verified on disk",
+      "Narrow1000x700 and wide1280x852 metadata/model-label wrapping",
+      "Exact-app quit/restart restores same Python action/cursor, saved composer draft and both saved editor files",
+      "Fresh bounded AX requery exposes labeled controls after initial root-only placeholder"
+    ],
+    "limitations": [
+      "No spoken VoiceOver observation",
+      "All live AI cancellation phases, active picker disabling and native AI error paths unverified",
+      "Native command attachments, passing review/Next and full native journeys unverified",
+      "Long-panel scrolling not established by driver attempts",
+      "Offscreen AXPress returned success without effect; verified Focus+Space used for actual save/approval"
+    ],
+    "cua_lookup": {
+      "requested_timeout_ms": 15000,
+      "observed_abort_after_seconds": 154.3,
+      "result": "No lookup result; parent interrupted; completion summary emitted once; no retry"
+    },
+    "artifact_directory": ".tandem-local/guided-companion/native-20261115-resume",
+    "screenshots": {
+      "initial.png": "95227b1813c1b7b422d9c1a07ff132a0653606520ced6bebe8a6dc3b425f4f0d",
+      "spec-tab.png": "939097f9a2d9cb0571c369be711f7a9f34a629f13a82d1530a2aeb5f26cd91db",
+      "spec-edit-bottom.png": "bf984745b5ce0d08186ad607a37889cf349e8c6b93235a1f6208b2111d0a7abd",
+      "spec-tall.png": "c83d4f7fc9da095edaff8e638704786a8c6c0858d3963df826d7d71828b9def4",
+      "narrow-action.png": "a719d4c1eef208349ae47a5ed469246b30e02682c3b723ba337f5d6ad0ee49dc"
+    },
+    "cleanup": "Owned QA app closed normally after restart observations; fixture/profile and evidence preserved."
   },
   "limitations": [
-    "Full real Rust/Python create/symbol/command/reject-alternative/review/Next/full-spec journeys were not completed.",
-    "Simulation, official login/model listing and kernel command checks do not substitute for real guided journeys or native usability.",
-    "Original HTTP400 schema failures, mixed-reply rejection, private-vocabulary false positives, oversized/Partial sources and fixture step-limit rejection are retained.",
-    "No model/provider/billing fallback, quota reset/refund, new probe, managed installation, push or merge.",
-    "Two early failed private dispatches predate schema-hash instrumentation; their exact400 error and original source revision are preserved, not retroactively assigned a new schema hash.",
-    "The final conditional-instruction clarification has deterministic routing coverage and was not retested with a real model after both24-turn caps were exhausted."
+    "Full real Python actions/reviews/Next/full-spec journey and actual local research/structured answer remain unverified;13Python turns remain unused to avoid repeating the same behavior.",
+    "Partial native evidence does not establish full native usability or spoken VoiceOver.",
+    "Original provider/harness failures, bounded repeated-source operations, negative reviews and interruption are retained; no refunds/reset/new suite.",
+    "No model/provider/API billing fallback, completed probe/OS rerun, native model turn, managed installation, push or merge.",
+    "Two original early private dispatches predate schema-hash instrumentation; exact errors and source revision retained."
   ],
   "receipts_root": ".tandem-local/guided-companion/approved-suite",
   "remaining_verification": [
-    "Real Rust: PrepareWalkthrough and all atomic file/symbol/command actions, actual wrong/missing-evidence rejection and valid alternative acceptance, reviewed Next and full-spec validation; saved/approved docs and Start already preserved",
-    "Real Python: finish DraftSpec, plan approval/Start, local Git/dependency/doc receipts, actual structured answer, actions/reviews/Next/full-spec validation",
-    "Native Rust/Python discussion/questions/docs/model/gates/layout/keyboard/VoiceOver/cancel/restart/offline checklist; current Mac locked"
+    "Real Python: actual local doc/Git/dependency research and structured answer; valid walkthrough, all file/symbol/command actions, wrong/missing-evidence rejection, valid alternative acceptance, reviewed exactly-once Next and full-spec validation",
+    "Native Rust/Python: command attachment/review/Next, all live AI and cancellation phases, busy model picker, complete long-panel scrolling and spoken VoiceOver; observed subset documented"
   ],
-  "diagnostic_redaction": "Known schema errors retained; unclassified runtime messages, credentials and login URLs withheld with hashes"
+  "diagnostic_redaction": "Known schema errors retained; unclassified runtime messages, credentials and login URLs withheld with hashes",
+  "updated_at_utc": "2026-11-15T17:28:32.319906+00:00",
+  "verification_worktree_head_before_commit": "0422c9798e72f5942f9f7def9d03a5f5358fe4ef",
+  "default_caps": {
+    "probe": 4,
+    "rust": 24,
+    "python": 24,
+    "aggregate": 52
+  },
+  "authorization_amendment": {
+    "version": 2,
+    "user_message": "Continue on",
+    "initial_consumed": {
+      "probe": 1,
+      "rust": 24,
+      "python": 24,
+      "total": 49
+    },
+    "authorization_hash": "24b89a3e3f6c617898b19b9c3db22d238271ac8e4e4abbf18bb9870110c62c70",
+    "original_reservation_prefix_hash": "371529452abf6e3a98e235928e6e69f2840c529cdbd15d3ef9f5d3b77a5c9288",
+    "original_reservations_preserved": 49,
+    "total_reservations": 96,
+    "no_refunds_or_reset": true,
+    "scope": "Same suite and durable sessions only; no model/provider/billing fallback",
+    "remaining": {
+      "probe": 3,
+      "rust": 4,
+      "python": 13,
+      "total": 20
+    }
+  },
+  "resumed_stages": [
+    {
+      "stage": "authorization extension begins",
+      "probe": 1,
+      "rust": 24,
+      "python": 24,
+      "total": 49
+    },
+    {
+      "stage": "Rust journey completes",
+      "probe": 1,
+      "rust": 52,
+      "python": 24,
+      "total": 77
+    },
+    {
+      "stage": "Python draft/plan/Start and inline-command quarantine",
+      "probe": 1,
+      "rust": 52,
+      "python": 27,
+      "total": 80
+    },
+    {
+      "stage": "Python explicit local-research/clarification request plus Prepare stop at bounded rounds",
+      "probe": 1,
+      "rust": 52,
+      "python": 43,
+      "total": 96
+    }
+  ]
 }

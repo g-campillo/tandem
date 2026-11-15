@@ -260,6 +260,7 @@ pub struct ReviewEvidence {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationReply {
+    #[schemars(length(min = 1, max = 16384))]
     pub text: String,
     pub question: Option<ClarificationQuestion>,
     #[schemars(length(max = 32))]
@@ -311,6 +312,7 @@ pub struct PlanDraft {
 #[serde(deny_unknown_fields)]
 pub struct WalkthroughDraft {
     pub reply: ConversationReply,
+    #[schemars(length(min = 1, max = 32))]
     pub actions: Option<Vec<GuidedAction>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

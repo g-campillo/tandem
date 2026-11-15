@@ -1,6 +1,6 @@
 # Verification strategy
 
-Status: mixed evidence, with unverified gates retained. [Plan entry point](README.md). The guided-companion Task 10 deterministic/simulated journeys, bounded real results and blocked native checklist are recorded in [guided-companion.md](guided-companion.md). Those results do not mark every scenario below or any full milestone passed.
+Status: mixed evidence, with unverified gates retained. [Plan entry point](README.md). The guided-companion Task 10 deterministic/simulated journeys, bounded real results and partial native observations/checklist are recorded in [guided-companion.md](guided-companion.md). Those results do not mark every scenario below or any full milestone passed.
 
 Use focused tests for meaningful behavior. Test domain rules deterministically; inject backend errors at adapter boundaries; use real Codex/LSP/process integrations where simulation cannot establish the claim; manually check typing and accessibility. Do not test a prompt by merely comparing it with a copy of itself, and do not use model confidence as validation evidence.
 

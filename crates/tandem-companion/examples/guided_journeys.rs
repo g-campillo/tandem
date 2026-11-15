@@ -61,17 +61,45 @@ impl Harness {
             store.create_session(task.project.key())?.id
         };
         let store = Arc::new(Mutex::new(store));
+        let overlays = store
+            .lock()
+            .unwrap()
+            .working_documents(task.project.key(), &[])?;
         let capture = StoredCapture {
             store: store.clone(),
             inner: ProjectConversationCapture {
                 project: task.project.clone(),
-                overlays: vec![],
-                selected: vec!["README.md".into()],
+                overlays,
+                selected: if language == "rust" {
+                    [
+                        "README.md",
+                        "src/limits.rs",
+                        "src/lib.rs",
+                        "tests/contract.rs",
+                        "Cargo.lock",
+                    ]
+                    .map(str::to_owned)
+                    .to_vec()
+                } else {
+                    ["README.md", "limits.py", "consumer.py", "test_contract.py"]
+                        .map(str::to_owned)
+                        .to_vec()
+                },
                 cache: directory.join("captures"),
                 check_environment: Some(environment.clone()),
                 recipe_ids: vec![task.recipe.clone()],
                 attachments: vec![],
             },
+        };
+        let progress: serde_json::Value = if directory.join("action-progress.json").exists() {
+            serde_json::from_slice(&fs::read(directory.join("action-progress.json"))?)?
+        } else {
+            json!({})
+        };
+        let choices = if directory.join("harness-human-choices.json").exists() {
+            serde_json::from_slice(&fs::read(directory.join("harness-human-choices.json"))?)?
+        } else {
+            vec![]
         };
         Ok(Self {
             task,
@@ -81,13 +109,23 @@ impl Harness {
             environment,
             inspection,
             directory: directory.into(),
-            choices: vec![],
-            saw_create: false,
-            saw_symbol: false,
-            saw_command: false,
-            rejected_wrong: false,
-            rejected_missing: false,
+            choices,
+            saw_create: progress["create_file"] == true,
+            saw_symbol: progress["named_symbol"] == true,
+            saw_command: progress["command"] == true,
+            rejected_wrong: progress["wrong_rejected"] == true,
+            rejected_missing: progress["missing_evidence_rejected"] == true,
         })
+    }
+    fn save_progress(&self) -> Result<()> {
+        write_json(
+            &self.directory.join("action-progress.json"),
+            &json!({"create_file":self.saw_create,"named_symbol":self.saw_symbol,"command":self.saw_command,"wrong_rejected":self.rejected_wrong,"missing_evidence_rejected":self.rejected_missing}),
+        )?;
+        write_json(
+            &self.directory.join("harness-human-choices.json"),
+            &self.choices,
+        )
     }
     fn runner(&self, budget: SharedBudget) -> Result<Runner> {
         Ok(ConversationRunner::new(
@@ -273,6 +311,21 @@ impl Harness {
         )?;
         Ok(())
     }
+    fn save_owned_module(&mut self, text: String) -> Result<()> {
+        self.task.verify_originals()?;
+        let mut document = self.task.project.open_document(&self.task.path, true)?;
+        document.snapshot(text);
+        let saved = self.task.project.save(&document)?;
+        self.task.record_human_save(&saved)?;
+        self.capture.inner.overlays = vec![saved];
+        self.choices.push("Harness human explicitly saves only the owned fixture module using the ordinary editor save API; caller/oracles and other live files stay hash-immutable".into());
+        checkpoint_overlays(
+            &mut self.store.lock().unwrap(),
+            &self.task.project,
+            &self.capture.inner.overlays,
+        )?;
+        self.task.verify_originals()
+    }
     fn check(&self, expected: CheckStatus) -> Result<()> {
         let recipe = self.environment.recipe(&self.task.recipe)?;
         let mut pending = CheckRecord::pending(
@@ -313,6 +366,59 @@ impl Harness {
             .review
             .context("No immutable action review")
     }
+    fn attach_preservation(&mut self) -> Result<()> {
+        self.task.verify_originals()?;
+        self.capture.inner.attachments.clear();
+        let state = self.state()?;
+        let capture = capture_action_context(
+            &state,
+            &self.task.project,
+            &self.capture.inner.overlays,
+            &self.capture.inner.selected,
+            &self.directory.join("captures"),
+            &AtomicBool::new(false),
+        )?;
+        let scope = self.current_input()?.scope();
+        for args in [
+            vec!["diff", "--exit-code", "HEAD", "--"],
+            vec!["status", "--short", "--untracked-files=all"],
+        ] {
+            let start = now_ms();
+            let output = std::process::Command::new("/usr/bin/git")
+                .args(&args)
+                .current_dir(&self.task.project.root)
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "Actual fixture preservation command failed"
+            );
+            let evidence = attach_action_output(
+                scope.clone(),
+                &capture,
+                UserCommandAttachment {
+                    argv: std::iter::once("/usr/bin/git")
+                        .chain(args)
+                        .map(str::to_owned)
+                        .collect(),
+                    cwd: ".".into(),
+                    exit_code: output.status.code().unwrap_or(-1).into(),
+                    stdout: String::from_utf8(output.stdout)?,
+                    stderr: String::from_utf8(output.stderr)?,
+                    started_at_ms: start,
+                    completed_at_ms: now_ms(),
+                },
+            )?;
+            write_json(
+                &self
+                    .directory
+                    .join(format!("human-attached-preservation-{}.json", evidence.id)),
+                &evidence,
+            )?;
+            self.capture.inner.attachments.push(evidence);
+        }
+        self.choices.push("Harness human runs fixed read-only Git diff/status in the owned fixture and explicitly attaches its real complete output as UserAttachedOutput/Unvalidated, not authenticated check evidence".into());
+        self.task.verify_originals()
+    }
     fn walkthrough(&mut self, runner: &mut Runner) -> Result<()> {
         let result = self.run(runner, ConversationIntent::PrepareWalkthrough)?;
         let mut walk = result
@@ -332,9 +438,12 @@ impl Harness {
                 *argv = recipe.argv.clone();
                 *cwd = ".".into();
                 *expected_exit_codes = vec![0];
-                a.required_evidence = vec![RequiredActionEvidence::CheckReceipt {
+                let receipt = RequiredActionEvidence::CheckReceipt {
                     recipe_id: self.task.recipe.clone(),
-                }];
+                };
+                if !a.required_evidence.contains(&receipt) {
+                    a.required_evidence.push(receipt);
+                }
                 changed = true;
             }
         }
@@ -360,7 +469,17 @@ impl Harness {
 }
 fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str) -> Result<()> {
     let resume = resume_kind != "none";
-    if resume_kind == "schema" {
+    if resume_kind == "authorized" {
+        budget.lock().unwrap().resume_authorized(language)?;
+        let receipt = root.join(language).join("receipt.json");
+        if receipt.exists() {
+            fs::copy(
+                &receipt,
+                root.join(language)
+                    .join(format!("receipt-before-authorized-{}.json", new_id())),
+            )?;
+        }
+    } else if resume_kind == "schema" {
         let error: serde_json::Value = serde_json::from_slice(&fs::read(
             root.join(language).join("failed-turn-error-private.json"),
         )?)?;
@@ -458,7 +577,13 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
         "https://docs.python.org/3/library/functions.html#min"
     };
     let result = (|| -> Result<()> {
-        if resume {
+        if resume_kind == "authorized" {
+            h.choices.push("Explicitly authorized same-suite continuation from durable documents/current action; no replay of initial message, no count refunds and no fallback".into());
+            if language == "python" && h.structured_answers()? == 0 {
+                h.choices.push("Harness human explicitly requests missing local research and one genuine structured domain confirmation before implementation; approved documents remain unchanged".into());
+                h.run(&mut r,ConversationIntent::Message("Before we return to the approved implementation, inspect the local README.md using ReadFileRange, inspect local GitHistory, and inspect Python DependencyMetadata through the host research broker. Public documentation cannot substitute for these local sources. Then ask me one structured clarification confirming the supported integer input domain and inclusive boundaries, with stable choices and a custom answer. Do not revise the approved spec or plan and do not provide code.".into()))?;
+            }
+        } else if resume {
             let s = h.state()?;
             ensure!(
                 s.spec.is_none() && s.plan.is_none() && s.pending_question.is_none(),
@@ -487,81 +612,91 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
             h.choices.push("No initial structured question was observed. Do not synthesize one; continue independent typed work and keep the final structured-answer criterion unmet until a real question is answered.".into());
         }
         h.task.verify_originals()?;
-        let spec = h.run(&mut r, ConversationIntent::DraftSpec)?;
-        let Some(CompanionResponse::SpecDraft(draft)) = spec.response else {
-            anyhow::bail!("No spec proposal")
-        };
-        let mut spec = draft
-            .spec
-            .context("Spec clarification/research still pending")?;
-        spec.constraints
-            .push("Harness human edit: retain original contract tests and caller bytes".into());
-        h.human(
-            "Harness human edits and saves the generated spec; saving does not approve",
-            vec![SessionCommand::SaveSpec { spec }],
-        )?;
-        let s = h.state()?;
-        h.human(
-            "Harness human explicitly approves this exact saved spec",
-            vec![SessionCommand::ApproveSpec {
-                document_ref: s.spec.unwrap().document_ref(),
-                approved_at_ms: now_ms(),
-            }],
-        )?;
-        let plan = h.run(&mut r, ConversationIntent::DraftPlan)?;
-        let Some(CompanionResponse::PlanDraft(draft)) = plan.response else {
-            anyhow::bail!("No plan proposal")
-        };
-        let proposal = draft
-            .plan
-            .context("Plan clarification/research still pending")?;
-        ensure!(
-            (1..=32).contains(&proposal.steps.len()),
-            "Fixture needs a small multi-step plan; received {} steps (not coerced to a single step)",
-            proposal.steps.len()
-        );
-        let s = h.state()?;
-        let mut task = proposal.into_plan(&s.project, None)?;
-        task.constraints
-            .push("Harness human edit: implement only the fixture module; no dependencies".into());
-        h.human(
-            "Harness human independently edits and saves the generated plan",
-            vec![SessionCommand::SavePlan {
-                plan: PlanDocument {
-                    revision: 1,
-                    spec_ref: s.spec.unwrap().document_ref(),
-                    task,
-                },
-            }],
-        )?;
-        let s = h.state()?;
-        ensure!(
-            s.authorize(WorkflowAction::PrepareWalkthrough).is_err(),
-            "Unapproved implementation gate bypassed"
-        );
-        h.human(
-            "Harness human explicitly approves the exact saved plan",
-            vec![SessionCommand::ApprovePlan {
-                document_ref: s.plan.unwrap().document_ref(),
-                approved_at_ms: now_ms(),
-            }],
-        )?;
-        ensure!(
-            h.state()?
-                .authorize(WorkflowAction::PrepareWalkthrough)
-                .is_err(),
-            "Start gate bypassed"
-        );
-        h.human(
-            "Harness human explicitly selects Start Implementation",
-            vec![SessionCommand::StartImplementation],
-        )?;
+        if h.state()?.spec.is_none() {
+            let spec = h.run(&mut r, ConversationIntent::DraftSpec)?;
+            let Some(CompanionResponse::SpecDraft(draft)) = spec.response else {
+                anyhow::bail!("No spec proposal")
+            };
+            let mut spec = draft
+                .spec
+                .context("Spec clarification/research still pending")?;
+            spec.constraints
+                .push("Harness human edit: retain original contract tests and caller bytes".into());
+            h.human(
+                "Harness human edits and saves the generated spec; saving does not approve",
+                vec![SessionCommand::SaveSpec { spec }],
+            )?;
+            let s = h.state()?;
+            h.human(
+                "Harness human explicitly approves this exact saved spec",
+                vec![SessionCommand::ApproveSpec {
+                    document_ref: s.spec.unwrap().document_ref(),
+                    approved_at_ms: now_ms(),
+                }],
+            )?;
+        }
+        if h.state()?.plan.is_none() {
+            let plan = h.run(&mut r, ConversationIntent::DraftPlan)?;
+            let Some(CompanionResponse::PlanDraft(draft)) = plan.response else {
+                anyhow::bail!("No plan proposal")
+            };
+            let proposal = draft
+                .plan
+                .context("Plan clarification/research still pending")?;
+            ensure!(
+                (1..=32).contains(&proposal.steps.len()),
+                "Fixture needs a small multi-step plan; received {} steps (not coerced to a single step)",
+                proposal.steps.len()
+            );
+            let s = h.state()?;
+            let mut task = proposal.into_plan(&s.project, None)?;
+            task.constraints.push(
+                "Harness human edit: implement only the fixture module; no dependencies".into(),
+            );
+            h.human(
+                "Harness human independently edits and saves the generated plan",
+                vec![SessionCommand::SavePlan {
+                    plan: PlanDocument {
+                        revision: 1,
+                        spec_ref: s.spec.unwrap().document_ref(),
+                        task,
+                    },
+                }],
+            )?;
+            let s = h.state()?;
+            ensure!(
+                s.authorize(WorkflowAction::PrepareWalkthrough).is_err(),
+                "Unapproved implementation gate bypassed"
+            );
+            h.human(
+                "Harness human explicitly approves the exact saved plan",
+                vec![SessionCommand::ApprovePlan {
+                    document_ref: s.plan.unwrap().document_ref(),
+                    approved_at_ms: now_ms(),
+                }],
+            )?;
+        }
+        if h.state()?.started_generation.is_none() {
+            ensure!(
+                h.state()?
+                    .authorize(WorkflowAction::PrepareWalkthrough)
+                    .is_err(),
+                "Start gate bypassed"
+            );
+            h.human(
+                "Harness human explicitly selects Start Implementation",
+                vec![SessionCommand::StartImplementation],
+            )?;
+        }
         // Rebuild the runtime transport; transcript/documents remain in Store.
         drop(r);
         r = h.runner(budget.clone())?;
         let mut actions = 0;
         while !h.state()?.implementation_complete() {
-            ensure!(actions < 16, "Fixture action bound reached");
+            ensure!(
+                actions < 1024,
+                "Production plan/walkthrough action bound reached"
+            );
             if h.state()?.current_action().is_err() {
                 h.walkthrough(&mut r)?;
             }
@@ -576,49 +711,74 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
                         path == &h.task.path,
                         "Model action exceeds fixture module scope: {path}"
                     );
-                    if *change_kind == FileChangeKind::Create && symbol.is_none() && !h.saw_create {
+                    if *change_kind == FileChangeKind::Create && symbol.is_none() {
                         h.saw_create = true;
-                        h.overlay(
-                            if language == "rust" {
-                                "// New module shell; implementation follows in the next action.\n"
-                            } else {
-                                "# New module shell; implementation follows in the next action.\n"
-                            }
-                            .into(),
-                        )?;
+                        h.save_owned_module(String::new())?;
                     } else {
                         ensure!(
-                            symbol.as_deref() == Some("bounded_count"),
+                            symbol.as_deref().is_some_and(
+                                |symbol| symbol.rsplit("::").next() == Some("bounded_count")
+                            ),
                             "Expected one explicitly named symbol action"
                         );
                         h.saw_symbol = true;
-                        h.overlay(h.task.wrong.clone())?;
-                        h.check(CheckStatus::Failed)?;
-                        let bad = h.review(&mut r)?;
-                        ensure!(
-                            bad.outcome == ActionReviewOutcome::NeedsChanges,
-                            "Actual review accepted the wrong implementation: {:?}",
-                            bad.outcome
-                        );
-                        ensure!(h.next(&bad).is_err(), "Wrong implementation advanced");
-                        h.rejected_wrong = true;
-                        h.overlay(h.task.alternative.clone())?;
+                        if !h.rejected_wrong {
+                            h.overlay(h.task.wrong.clone())?;
+                            h.check(CheckStatus::Failed)?;
+                            let bad = h.review(&mut r)?;
+                            ensure!(
+                                bad.outcome == ActionReviewOutcome::NeedsChanges,
+                                "Actual review accepted the wrong implementation: {:?}",
+                                bad.outcome
+                            );
+                            ensure!(h.next(&bad).is_err(), "Wrong implementation advanced");
+                            h.rejected_wrong = true;
+                        }
+                        h.save_owned_module(h.task.alternative.clone())?;
                         h.check(CheckStatus::Passed)?;
                     }
                 }
                 ActionTarget::Command { .. } => {
                     h.saw_command = true;
-                    let missing = h.review(&mut r)?;
-                    ensure!(
-                        missing.outcome == ActionReviewOutcome::InsufficientEvidence,
-                        "Command without action-bound evidence was not rejected: {:?}",
-                        missing.outcome
-                    );
-                    ensure!(h.next(&missing).is_err(), "Missing evidence advanced");
-                    h.rejected_missing = true;
+                    if !h.rejected_missing {
+                        let state = h.state()?;
+                        let saved = h.store.lock().unwrap().current_action_review(&state)?;
+                        let current = h.current_input()?;
+                        let missing = if let Some((
+                            review,
+                            Some(OperationOutcome::Completed { .. }),
+                        )) = saved.filter(|(review, _)| {
+                            review.binding == current.binding
+                                && matches!(
+                                    review.outcome,
+                                    ActionReviewOutcome::NeedsChanges
+                                        | ActionReviewOutcome::InsufficientEvidence
+                                )
+                                && current.evidence_gate(&action).0 != ActionReviewOutcome::Passed
+                        }) {
+                            h.choices.push("Resume the immutable current negative review against identical missing-evidence inputs; no duplicate model call or invented outcome".into());
+                            review
+                        } else {
+                            h.review(&mut r)?
+                        };
+                        ensure!(
+                            matches!(
+                                missing.outcome,
+                                ActionReviewOutcome::InsufficientEvidence
+                                    | ActionReviewOutcome::NeedsChanges
+                            ),
+                            "Command without action-bound evidence was not rejected: {:?}",
+                            missing.outcome
+                        );
+                        ensure!(h.next(&missing).is_err(), "Missing evidence advanced");
+                        h.rejected_missing = true;
+                    }
                     h.check(CheckStatus::Passed)?;
                 }
                 ActionTarget::Validation { .. } => {}
+            }
+            if !matches!(action.target, ActionTarget::Command { .. }) {
+                h.attach_preservation()?;
             }
             let review = h.review(&mut r)?;
             ensure!(
@@ -648,6 +808,8 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
                 r = h.runner(budget.clone())?;
             }
             h.next(&review)?;
+            h.capture.inner.attachments.clear();
+            h.save_progress()?;
             actions += 1;
             h.task.verify_originals()?;
         }
@@ -676,6 +838,7 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
         Ok(())
     })();
     let status = if result.is_ok() { "passed" } else { "failed" };
+    h.save_progress()?;
     budget.lock().unwrap().finish(language, status)?;
     let state = h.state()?;
     write_json(
@@ -684,7 +847,7 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
     )?;
     write_json(
         &h.directory.join("receipt.json"),
-        &json!({"class":"R","status":status,"error":result.as_ref().err().map(|e|format!("{e:#}")),"identity":identity()?,"charged_turns":budget.lock().unwrap().counts(),"harness_choices":h.choices,"structured_answer_count":h.structured_answers()?,"actual_research_kinds":h.research_kinds()?,"assertions":{"create_file":h.saw_create,"named_symbol":h.saw_symbol,"command":h.saw_command,"wrong_rejected":h.rejected_wrong,"missing_evidence_rejected":h.rejected_missing,"implementation_complete":h.state()?.implementation_complete(),"live_source_unchanged":h.task.verify_originals().is_ok()},"limitations":["These programmatic human decisions are disposable harness choices, not native usability proof.","Solutions remain hidden; no Reveal is requested.","Transport restart is real; changing models without another quota-consuming example is covered deterministically."]}),
+        &json!({"class":"R","status":status,"error":result.as_ref().err().map(|e|format!("{e:#}")),"identity":identity()?,"charged_turns":budget.lock().unwrap().counts(),"harness_choices":h.choices,"structured_answer_count":h.structured_answers()?,"actual_research_kinds":h.research_kinds()?,"assertions":{"create_file":h.saw_create,"named_symbol":h.saw_symbol,"command":h.saw_command,"wrong_rejected":h.rejected_wrong,"missing_evidence_rejected":h.rejected_missing,"implementation_complete":h.state()?.implementation_complete(),"immutable_originals_and_human_save_baseline_match":h.task.verify_originals().is_ok(),"owned_module_last_human_save_hash":h.task.owned_module_hash},"limitations":["These programmatic human decisions are disposable harness choices, not native usability proof.","Solutions remain hidden; no Reveal is requested.","Transport restart is real; changing models without another quota-consuming example is covered deterministically."]}),
     )?;
     println!(
         "{language} {status}; charged totals={:?}; receipts={}",
@@ -696,6 +859,93 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
 fn main() -> Result<()> {
     require_subscription_usage(std::env::args())?;
     let directory = run_directory()?;
+    if let Some(language) = std::env::args()
+        .skip_while(|a| a != "--dump-latest-schema")
+        .nth(1)
+    {
+        ensure!(
+            matches!(language.as_str(), "rust" | "python"),
+            "Unknown suite"
+        );
+        let root = directory.join(language);
+        let latest = fs::read_dir(&root)?
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("private-"))
+            .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+            .context("No private dispatch")?;
+        let run: ModelRun = serde_json::from_slice(&fs::read(latest.path())?)?;
+        let schema = run.request.schema();
+        write_json(
+            &root.join(format!("schema-diagnostic-{}.json", run.id)),
+            &schema,
+        )?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&schema["$defs"]["ResearchRequestKind"])?
+        );
+        return Ok(());
+    }
+    if let Some(language) = std::env::args()
+        .skip_while(|a| a != "--diagnose-latest")
+        .nth(1)
+    {
+        return diagnose_latest(&directory, &language);
+    }
+    if std::env::args().any(|a| a == "--resume-authorized") {
+        let args = std::env::args().collect::<Vec<_>>();
+        let auth = args
+            .windows(2)
+            .find(|a| a[0] == "--authorization")
+            .context("--authorization path required")?;
+        let language = args
+            .windows(2)
+            .find(|a| a[0] == "--language")
+            .map(|a| a[1].as_str())
+            .context("--language rust|python required for targeted continuation")?;
+        ensure!(
+            matches!(language, "rust" | "python"),
+            "Only existing language suites may continue"
+        );
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .context("Repository missing")?;
+        let plan = PathBuf::from(std::env::var_os("HOME").context("HOME missing")?)
+            .join(".codex/plans/tandem/2026-11-14-guided-companion.md");
+        let budget = Arc::new(Mutex::new(TurnBudget::open_authorized(
+            &directory.join("turn-budget.json"),
+            Path::new(&auth[1]),
+            repo,
+            &plan,
+        )?));
+        {
+            let b = budget.lock().unwrap();
+            println!(
+                "Same-suite authorized {language} continuation BEFORE: {:?}; total={}",
+                b.counts(),
+                b.total()
+            );
+        }
+        let before = budget.lock().unwrap().counts();
+        let receipt_path = directory
+            .join(language)
+            .join(format!("authorized-continuation-{}.json", new_id()));
+        write_json(
+            &receipt_path,
+            &json!({"language":language,"before":before,"status":"started","authorization_hash":content_hash(&fs::read(&auth[1])?)}),
+        )?;
+        let result = journey(&directory, language, budget.clone(), "authorized");
+        println!(
+            "Same-suite authorized {language} continuation AFTER: {:?}",
+            budget.lock().unwrap().counts()
+        );
+        write_json(
+            &receipt_path,
+            &json!({"language":language,"before":before,"after":budget.lock().unwrap().counts(),"status":if result.is_ok(){"passed"}else{"failed"},"error":result.as_ref().err().map(|e|format!("{e:#}")),"authorization_hash":content_hash(&fs::read(&auth[1])?),"identity":identity()?}),
+        )?;
+        return result;
+    }
     if std::env::args().any(|a| a == "--continue-python-draft-spec") {
         return continue_python_draft_only(&directory);
     }
@@ -708,8 +958,8 @@ fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--inspect-failures") {
         return inspect_failures(&directory);
     }
-    let _ = health(&directory)?;
     let budget = budget(&directory)?;
+    let _ = health(&directory)?;
     let mut errors = vec![];
     let schema = std::env::args().any(|a| a == "--resume-after-schema-fix");
     let research = std::env::args().any(|a| a == "--resume-after-research-question-fix");
@@ -985,6 +1235,71 @@ fn finish_rust_documents(directory: &Path) -> Result<()> {
         "Rust real documents saved/approved and Start recorded with zero model turns; next PrepareWalkthrough blocked by cap; artifact={}",
         path.display()
     );
+    Ok(())
+}
+fn diagnose_latest(directory: &Path, language: &str) -> Result<()> {
+    ensure!(matches!(language, "rust" | "python"), "Unknown suite");
+    let root = directory.join(language);
+    let project = Project::open(&root.join("project"))?;
+    let store = Store::open(&root.join("state"))?;
+    let run = store
+        .model_runs(project.key())?
+        .into_iter()
+        .max_by_key(|r| r.started_at_ms)
+        .context("No run")?;
+    let runtime = tandem_codex::discover_runtime()?;
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME missing")?)
+        .join("Library/Application Support/Tandem/codex-m0");
+    let mut client = tandem_codex::Client::start_with_overrides(
+        &runtime.binary,
+        &home,
+        directory,
+        &[
+            "forced_login_method=\"chatgpt\"".into(),
+            "model_provider=\"openai\"".into(),
+            "cli_auth_credentials_store=\"keyring\"".into(),
+        ],
+    )?;
+    let thread = client.request(
+        "thread/read",
+        json!({"threadId":run.thread_id,"includeTurns":true}),
+        std::time::Duration::from_secs(15),
+    )?;
+    let mut diagnostics = vec![];
+    for turn in thread["thread"]["turns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|turn| turn["id"].as_str() == run.turn_id.as_deref())
+    {
+        for item in turn["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|i| i["type"] == "agentMessage")
+        {
+            let Some(text) = item["text"].as_str() else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(text)?;
+            let error = run
+                .request
+                .parse_response(value.clone())
+                .err()
+                .map(|e| format!("{e:#}"));
+            write_json(
+                &root.join(format!("diagnosed-response-private-{}.json", run.id)),
+                &value,
+            )?;
+            diagnostics.push(json!({"run_id":run.id,"action":run.request.action,"status":run.status,"response_hash":content_hash(text.as_bytes()),"contract_error":error,"keys":value.as_object().map(|v|v.keys().collect::<Vec<_>>()),"action_targets":value["actions"].as_array().map(|v|v.iter().map(|a|&a["target"]).collect::<Vec<_>>())}));
+        }
+    }
+    client.shutdown()?;
+    write_json(
+        &root.join(format!("diagnosed-contract-{}.json", run.id)),
+        &diagnostics,
+    )?;
+    println!("{}", serde_json::to_string_pretty(&diagnostics)?);
     Ok(())
 }
 fn inspect_failures(directory: &Path) -> Result<()> {

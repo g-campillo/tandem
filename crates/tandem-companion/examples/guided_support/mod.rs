@@ -28,17 +28,62 @@ struct Ledger {
     counts: BTreeMap<String, usize>,
     reservations: Vec<Reservation>,
     suites: BTreeMap<String, String>,
+    #[serde(default)]
+    amendments: Vec<BudgetAmendment>,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Reservation {
     language: String,
     worker: String,
     at_ms: i64,
 }
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Caps {
+    probe: usize,
+    rust: usize,
+    python: usize,
+    total: usize,
+}
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            probe: 4,
+            rust: 24,
+            python: 24,
+            total: 52,
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BudgetAuthorization {
+    version: u32,
+    authorized_at_utc: String,
+    user_message: String,
+    interpretation: String,
+    plan_path: PathBuf,
+    repo: PathBuf,
+    suite_directory: PathBuf,
+    ledger_path: PathBuf,
+    previous_caps: Caps,
+    authorized_caps: Caps,
+    consumed_at_authorization: Caps,
+    constraints: Vec<String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BudgetAmendment {
+    authorization: BudgetAuthorization,
+    authorization_hash: String,
+    reservation_prefix_hash: String,
+}
 pub struct TurnBudget {
     path: PathBuf,
     ledger: Ledger,
     lock: PathBuf,
+    caps: Caps,
 }
 impl Drop for TurnBudget {
     fn drop(&mut self) {
@@ -47,6 +92,51 @@ impl Drop for TurnBudget {
 }
 impl TurnBudget {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_inner(path, None)
+    }
+    pub fn open_authorized(
+        path: &Path,
+        authorization_path: &Path,
+        repo: &Path,
+        plan: &Path,
+    ) -> Result<Self> {
+        let bytes =
+            fs::read(authorization_path).context("Explicit budget authorization unavailable")?;
+        let authorization: BudgetAuthorization = serde_json::from_slice(&bytes)?;
+        ensure!(
+            authorization.version == 2
+                && authorization.user_message == "Continue on"
+                && !authorization.authorized_at_utc.is_empty()
+                && !authorization.interpretation.is_empty()
+                && !authorization.constraints.is_empty()
+                && authorization.repo == repo.canonicalize()?
+                && authorization.plan_path == plan
+                && authorization.suite_directory
+                    == path.parent().context("Suite missing")?.canonicalize()?
+                && authorization.ledger_path == path
+                && authorization.previous_caps == Caps::default()
+                && authorization.authorized_caps
+                    == Caps {
+                        probe: 4,
+                        rust: 56,
+                        python: 56,
+                        total: 116
+                    }
+                && authorization.consumed_at_authorization
+                    == Caps {
+                        probe: 1,
+                        rust: 24,
+                        python: 24,
+                        total: 49
+                    },
+            "Authorization does not match this approved suite, plan, caps and consumed ledger"
+        );
+        Self::open_inner(path, Some((authorization, content_hash(&bytes))))
+    }
+    fn open_inner(
+        path: &Path,
+        authorization: Option<(BudgetAuthorization, String)>,
+    ) -> Result<Self> {
         fs::create_dir_all(path.parent().context("Budget directory missing")?)?;
         let lock = path.with_extension("lock");
         let lock_file = fs::OpenOptions::new().write(true).create_new(true).open(&lock)
@@ -64,24 +154,90 @@ impl TurnBudget {
                 return Err(error.into());
             }
         };
-        let budget = Self {
+        let mut budget = Self {
             path: path.into(),
             ledger,
             lock,
+            caps: Caps::default(),
         };
-        for (language, count) in &budget.ledger.counts {
-            ensure!(*count <= Self::cap(language)?, "Corrupt turn count");
+        if let Some((authorization, hash)) = authorization {
+            let baseline = authorization.consumed_at_authorization.total;
+            ensure!(
+                budget.ledger.reservations.len() >= baseline,
+                "Authorization history was refunded or reset"
+            );
+            let prefix = &budget.ledger.reservations[..baseline];
+            let mut counts = BTreeMap::<String, usize>::new();
+            for r in prefix {
+                *counts.entry(r.language.clone()).or_default() += 1;
+            }
+            ensure!(
+                counts
+                    == BTreeMap::from([
+                        ("probe".into(), 1),
+                        ("rust".into(), 24),
+                        ("python".into(), 24)
+                    ]),
+                "Authorization consumed history mismatches"
+            );
+            let prefix_hash = content_hash(&serde_json::to_vec(prefix)?);
+            if let Some(amendment) = budget.ledger.amendments.first() {
+                ensure!(
+                    budget.ledger.amendments.len() == 1
+                        && amendment.authorization_hash == hash
+                        && amendment.reservation_prefix_hash == prefix_hash
+                        && serde_json::to_value(&amendment.authorization)?
+                            == serde_json::to_value(&authorization)?,
+                    "Immutable authorization amendment changed"
+                );
+            } else {
+                ensure!(
+                    budget.total() == baseline && budget.ledger.reservations.len() == baseline,
+                    "Initial amendment must match consumed authorization exactly"
+                );
+                budget.ledger.amendments.push(BudgetAmendment {
+                    authorization: authorization.clone(),
+                    authorization_hash: hash,
+                    reservation_prefix_hash: prefix_hash,
+                });
+            }
+            budget.caps = authorization.authorized_caps;
+        } else {
+            ensure!(
+                budget.ledger.amendments.is_empty(),
+                "Extended ledger requires its explicit matching authorization; defaults remain 24/52"
+            );
+        }
+        let mut actual_counts = BTreeMap::<String, usize>::new();
+        for r in &budget.ledger.reservations {
+            ensure!(
+                matches!(r.worker.as_str(), "private" | "public"),
+                "Unknown worker"
+            );
+            *actual_counts.entry(r.language.clone()).or_default() += 1;
         }
         ensure!(
-            budget.total() <= 52 && budget.total() == budget.ledger.reservations.len(),
+            actual_counts == budget.ledger.counts,
+            "Counts do not match charged reservations"
+        );
+        for (language, count) in &budget.ledger.counts {
+            ensure!(*count <= budget.cap(language)?, "Corrupt turn count");
+        }
+        ensure!(
+            budget.total() <= budget.caps.total
+                && budget.total() == budget.ledger.reservations.len(),
             "Corrupt aggregate budget"
         );
+        if !budget.ledger.amendments.is_empty() {
+            budget.persist()?;
+        }
         Ok(budget)
     }
-    fn cap(language: &str) -> Result<usize> {
+    fn cap(&self, language: &str) -> Result<usize> {
         Ok(match language {
-            "probe" => 4,
-            "rust" | "python" => 24,
+            "probe" => self.caps.probe,
+            "rust" => self.caps.rust,
+            "python" => self.caps.python,
             _ => anyhow::bail!("Unknown verification budget"),
         })
     }
@@ -110,9 +266,11 @@ impl TurnBudget {
     /// turn/start. A pre-dispatch failure is never refunded. Public workers share
     /// this ledger; retries cannot acquire a fresh allowance.
     pub fn reserve(&mut self, language: &str, worker: &str) -> Result<()> {
-        let cap = Self::cap(language)?;
+        let cap = self.cap(language)?;
+        ensure!(matches!(worker, "private" | "public"), "Unknown worker");
         ensure!(
-            self.ledger.counts.get(language).copied().unwrap_or(0) < cap && self.total() < 52,
+            self.ledger.counts.get(language).copied().unwrap_or(0) < cap
+                && self.total() < self.caps.total,
             "Approved subscription turn cap reached; no dispatch permitted"
         );
         *self.ledger.counts.entry(language.into()).or_default() += 1;
@@ -124,7 +282,7 @@ impl TurnBudget {
         self.persist()
     }
     pub fn claim(&mut self, suite: &str) -> Result<()> {
-        Self::cap(suite)?;
+        self.cap(suite)?;
         ensure!(
             !self.ledger.suites.contains_key(suite),
             "This suite was already attempted. Inspect its durable receipts; no blind retry or fresh budget is permitted"
@@ -138,6 +296,21 @@ impl TurnBudget {
             "Suite was not claimed"
         );
         self.ledger.suites.insert(suite.into(), outcome.into());
+        self.persist()
+    }
+    pub fn resume_authorized(&mut self, language: &str) -> Result<()> {
+        ensure!(
+            !self.ledger.amendments.is_empty()
+                && matches!(language, "rust" | "python")
+                && self.ledger.suites.get(language).map(String::as_str) == Some("failed")
+                && self.ledger.counts.get(language).copied().unwrap_or(0) >= 24
+                && self.ledger.counts[language] < self.cap(language)?,
+            "No authorized unfinished same-suite continuation"
+        );
+        self.ledger.suites.insert(
+            language.into(),
+            "same-suite-authorized-stage-continuation".into(),
+        );
         self.persist()
     }
     pub fn resume_schema_failure(&mut self, language: &str) -> Result<()> {
@@ -423,6 +596,7 @@ pub struct FixtureTask {
     pub wrong: String,
     pub alternative: String,
     pub original_hashes: BTreeMap<String, String>,
+    pub owned_module_hash: Option<String>,
 }
 /// The Store-aware host adapter follows the native workspace's check-origin
 /// policy. Raw ProjectConversationCapture has no Store and cannot authenticate
@@ -600,6 +774,7 @@ impl FixtureTask {
             wrong: wrong.into(),
             alternative: alternative.into(),
             original_hashes,
+            owned_module_hash: None,
         })
     }
     pub fn reopen_before_implementation(root: &Path, language: &str) -> Result<Self> {
@@ -612,7 +787,14 @@ impl FixtureTask {
             output.status.success(),
             "Original tracked fixture changed before continuation"
         );
-        let original_hashes = tree_hashes(&project)?;
+        let mut original_hashes = tree_hashes(&project)?;
+        // The disposable human may save only the new module. Existing caller,
+        // oracle, metadata and all unrelated paths remain immutable.
+        original_hashes.remove(if language == "rust" {
+            "src/limits.rs"
+        } else {
+            "limits.py"
+        });
         let hash_path = root
             .parent()
             .context("Fixture parent missing")?
@@ -655,6 +837,19 @@ impl FixtureTask {
                 "def bounded_count(value: int, ceiling: int) -> int:\n    if ceiling < value:\n        return ceiling\n    return value\n",
             )
         };
+        let saves_path = root
+            .parent()
+            .context("Fixture parent missing")?
+            .join("module-human-saves.json");
+        let saves: Vec<serde_json::Value> = if saves_path.exists() {
+            serde_json::from_slice(&fs::read(saves_path)?)?
+        } else {
+            vec![]
+        };
+        let owned_module_hash = saves
+            .last()
+            .and_then(|v| v["hash"].as_str())
+            .map(str::to_owned);
         Ok(Self {
             project,
             language: language.into(),
@@ -663,17 +858,56 @@ impl FixtureTask {
             wrong: wrong.into(),
             alternative: alternative.into(),
             original_hashes,
+            owned_module_hash,
         })
     }
     pub fn guidance(&self) -> EffectiveGuidance {
         GuidanceSettings::default().effective(self.project.key(), &self.language, None)
     }
     pub fn verify_originals(&self) -> Result<()> {
+        let mut current = tree_hashes(&self.project)?;
+        current.remove(&self.path);
         ensure!(
-            tree_hashes(&self.project)? == self.original_hashes,
-            "Live fixture source changed; research/checks must use captures/overlays"
+            current == self.original_hashes,
+            "Immutable fixture caller/oracles or unrelated paths changed"
+        );
+        let module = self.project.root.join(&self.path);
+        let actual = if module.exists() {
+            Some(file_hash(&module)?)
+        } else {
+            None
+        };
+        ensure!(
+            actual == self.owned_module_hash,
+            "Owned module differs from last explicit human save baseline"
         );
         Ok(())
+    }
+    pub fn record_human_save(&mut self, saved: &Document) -> Result<()> {
+        ensure!(
+            saved.path == self.path && !saved.dirty(),
+            "Only an ordinary saved owned-module document can update its human baseline"
+        );
+        let hash = file_hash(&self.project.root.join(&self.path))?;
+        ensure!(
+            saved.base_hash.as_deref() == Some(hash.as_str()),
+            "Saved module baseline mismatch"
+        );
+        let path = self
+            .project
+            .root
+            .parent()
+            .context("Fixture parent missing")?
+            .join("module-human-saves.json");
+        let mut saves: Vec<serde_json::Value> = if path.exists() {
+            serde_json::from_slice(&fs::read(&path)?)?
+        } else {
+            vec![]
+        };
+        saves.push(json!({"path":self.path,"hash":hash,"at_ms":now_ms(),"choice":"Explicit harness human ordinary editor save; no research/check mutation authority"}));
+        write_json(&path, &saves)?;
+        self.owned_module_hash = Some(hash);
+        self.verify_originals()
     }
 }
 fn tree_hashes(project: &Project) -> Result<BTreeMap<String, String>> {

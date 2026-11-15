@@ -66,7 +66,9 @@ pub enum ActionTarget {
         change_kind: FileChangeKind,
     },
     Command {
+        /// One ordinary executable invocation; no shell wrappers or inline interpreter code.
         argv: Vec<String>,
+        /// Project-relative working directory; use "." for the project root.
         cwd: String,
         expected_exit_codes: Vec<i32>,
     },

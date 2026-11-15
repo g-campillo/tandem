@@ -132,6 +132,11 @@ fn every_generated_output_schema_requires_nullable_fields_and_closed_objects() {
             delegation: None,
         };
         let schema = request.schema();
+        if action == CompanionAction::PrepareWalkthrough {
+            let text = &schema["$defs"]["ConversationReply"]["properties"]["text"];
+            assert_eq!(text["minLength"], 1);
+            assert_eq!(text["maxLength"], 16384);
+        }
         assert_eq!(schema["type"], "object");
         assert!(schema.get("anyOf").is_none());
         let reply_schema = if action == CompanionAction::Discuss {
@@ -161,6 +166,116 @@ fn every_generated_output_schema_requires_nullable_fields_and_closed_objects() {
         }
         strict(&schema, &format!("{action:?}"));
     }
+}
+
+#[test]
+fn saved_owned_fixture_module_preserves_immutable_caller_and_oracle() {
+    for language in ["rust", "python"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut task =
+            support::FixtureTask::create(&temp.path().join("project"), language).unwrap();
+        let document = task.project.open_document(&task.path, true).unwrap();
+        let saved = task.project.save(&document).unwrap();
+        task.record_human_save(&saved).unwrap();
+        task.verify_originals().unwrap();
+        let reopened =
+            support::FixtureTask::reopen_before_implementation(&task.project.root, language)
+                .unwrap();
+        reopened.verify_originals().unwrap();
+        std::fs::write(task.project.root.join(&task.path), "unauthorized mutation").unwrap();
+        assert!(task.verify_originals().is_err());
+        std::fs::write(task.project.root.join(&task.path), "").unwrap();
+        let oracle = if language == "rust" {
+            "tests/contract.rs"
+        } else {
+            "test_contract.py"
+        };
+        std::fs::write(task.project.root.join(oracle), "changed").unwrap();
+        assert!(task.verify_originals().is_err());
+        assert!(
+            support::FixtureTask::reopen_before_implementation(&task.project.root, language)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn explicit_budget_amendment_preserves_history_and_requires_matching_authorization() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let suite = root.join("approved-suite");
+    std::fs::create_dir(&suite).unwrap();
+    let path = suite.join("turn-budget.json");
+    let plan = root.join("plan.md");
+    let auth_path = root.join("authorization.json");
+    let mut budget = support::TurnBudget::open(&path).unwrap();
+    budget.reserve("probe", "public").unwrap();
+    for language in ["rust", "python"] {
+        budget.claim(language).unwrap();
+        for _ in 0..24 {
+            budget.reserve(language, "private").unwrap();
+        }
+        budget.finish(language, "failed").unwrap();
+    }
+    drop(budget);
+    let before: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let auth = json!({"version":2,"authorized_at_utc":"2026-11-15T16:49:04Z","user_message":"Continue on","interpretation":"Same suite continuation","plan_path":plan,"repo":root,"suite_directory":suite,"ledger_path":path,"previous_caps":{"probe":4,"rust":24,"python":24,"total":52},"authorized_caps":{"probe":4,"rust":56,"python":56,"total":116},"consumed_at_authorization":{"probe":1,"rust":24,"python":24,"total":49},"constraints":["No reset, refunds or fallback"]});
+    std::fs::write(&auth_path, b"{corrupt").unwrap();
+    assert!(support::TurnBudget::open_authorized(&path, &auth_path, &root, &plan).is_err());
+    let mut expanded = auth.clone();
+    expanded["authorized_caps"]["python"] = json!(57);
+    std::fs::write(&auth_path, serde_json::to_vec(&expanded).unwrap()).unwrap();
+    assert!(support::TurnBudget::open_authorized(&path, &auth_path, &root, &plan).is_err());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
+        before
+    );
+    std::fs::write(&auth_path, serde_json::to_vec(&auth).unwrap()).unwrap();
+    let mut budget = support::TurnBudget::open_authorized(&path, &auth_path, &root, &plan).unwrap();
+    assert_eq!(budget.total(), 49);
+    budget.resume_authorized("rust").unwrap();
+    for i in 24..56 {
+        budget
+            .reserve("rust", if i % 2 == 0 { "public" } else { "private" })
+            .unwrap();
+    }
+    assert!(budget.reserve("rust", "private").is_err());
+    drop(budget);
+    assert!(
+        support::TurnBudget::open(&path).is_err(),
+        "extended ledger needs explicit authorization every time"
+    );
+    let mut budget = support::TurnBudget::open_authorized(&path, &auth_path, &root, &plan).unwrap();
+    for _ in 0..32 {
+        budget.reserve("python", "public").unwrap();
+    }
+    for _ in 0..3 {
+        budget.reserve("probe", "public").unwrap();
+    }
+    assert_eq!(budget.total(), 116);
+    assert!(budget.reserve("python", "private").is_err());
+    assert!(budget.reserve("probe", "public").is_err());
+    drop(budget);
+    let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        &after["reservations"].as_array().unwrap()[..49],
+        before["reservations"].as_array().unwrap()
+    );
+    assert_eq!(after["amendments"].as_array().unwrap().len(), 1);
+    // Missing, altered, wrong-suite and refunded history all fail closed.
+    assert!(
+        support::TurnBudget::open_authorized(&path, &root.join("missing"), &root, &plan).is_err()
+    );
+    let mut wrong = auth.clone();
+    wrong["suite_directory"] = json!(root.join("other"));
+    std::fs::write(&auth_path, serde_json::to_vec(&wrong).unwrap()).unwrap();
+    assert!(support::TurnBudget::open_authorized(&path, &auth_path, &root, &plan).is_err());
+    std::fs::write(&auth_path, serde_json::to_vec(&auth).unwrap()).unwrap();
+    let mut refunded = after;
+    refunded["reservations"].as_array_mut().unwrap().remove(0);
+    refunded["counts"]["probe"] = json!(3);
+    std::fs::write(&path, serde_json::to_vec(&refunded).unwrap()).unwrap();
+    assert!(support::TurnBudget::open_authorized(&path, &auth_path, &root, &plan).is_err());
 }
 
 #[test]
@@ -1749,6 +1864,18 @@ fn actual_wire_routing_allows_unquestioned_artifacts_and_preserves_real_clarific
                 .find(|(method, _)| method == "thread/start")
                 .unwrap();
             let base = start.1["baseInstructions"].as_str().unwrap();
+            assert!(base.contains("nonempty concise reply.text"));
+            assert!(base.contains("End that walkthrough with a ValidateStep"));
+            assert!(base.contains("exactly one ValidateTask"));
+            assert!(
+                base.contains("never a shell wrapper, inline script, interpreter -c/-e expression")
+            );
+            assert!(
+                base.contains("All action file paths and command cwd use project-relative paths")
+            );
+            assert!(
+                base.contains("limitations lists unresolved evidence gaps for the CURRENT action")
+            );
             assert!(
                 !base.contains(
                     "Return null for any typed artifact until the human explicitly answers;"
