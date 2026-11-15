@@ -1,3 +1,4 @@
+mod appearance;
 mod workspace;
 
 use anyhow::{Context as _, Result};
@@ -144,6 +145,8 @@ fn main() -> Result<()> {
             .detach();
             let handle = gpui_kit::open_window(
                 WindowOptions {
+                    #[cfg(target_os = "macos")]
+                    window_background: WindowBackgroundAppearance::Blurred,
                     window_min_size: Some(size(px(900.0), px(600.0))),
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                         None,
@@ -165,6 +168,19 @@ fn main() -> Result<()> {
                 },
             )
             .expect("open Tandem window");
+            // The component RootPlugin supplies an opaque background by default.
+            // Override only this root so app chrome can expose the native material;
+            // component/editor/popover surfaces keep their opaque theme colors.
+            #[cfg(target_os = "macos")]
+            handle
+                .0
+                .update(cx, |_, window, cx| {
+                    gpui_kit::base::Root::update(window, cx, |root, _, cx| {
+                        root.style().background = Some(Hsla::transparent_black().into());
+                        cx.notify();
+                    });
+                })
+                .expect("set Tandem root material");
             install_actions(cx, handle.0, handle.1.downgrade());
             let quitting = handle.1.downgrade();
             cx.on_action(move |_: &Quit, cx| {

@@ -247,6 +247,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let appearance = crate::appearance::install(window, cx);
         window.set_window_title("Tandem");
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find a file · ⌘P"));
         let subscription = cx.subscribe_in(
@@ -304,7 +305,7 @@ impl Workspace {
             copy_inflight: false,
             disk_events: Arc::new(AtomicBool::new(false)),
             _watcher: None,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![appearance, subscription],
             terminal: None,
             show_terminal: false,
             diff: None,
