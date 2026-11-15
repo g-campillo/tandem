@@ -414,6 +414,9 @@ impl TaskSession {
             return Ok(None);
         }
         spec.revision = self.next_spec_revision()?;
+        // The host-assigned revision is part of the bounded saved document.
+        // Validate the final candidate before emitting an event or changing state.
+        spec.validate()?;
         let generation = self.replacement_generation(
             self.spec_approval.is_some()
                 || self.plan_approval.is_some()

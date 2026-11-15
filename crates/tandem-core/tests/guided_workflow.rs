@@ -412,6 +412,175 @@ fn oversized_plan_definition_is_rejected_without_changing_approved_state() {
 }
 
 #[test]
+fn near_limit_spec_is_validated_after_host_revision_normalization() {
+    let mut session = saved_session();
+    session.spec.as_mut().unwrap().revision = 9;
+    session.plan.as_mut().unwrap().spec_ref = session.spec.as_ref().unwrap().document_ref();
+    approve(&mut session);
+    session.start_implementation().unwrap();
+    session.walkthroughs.push(walkthrough(&session));
+    session.ask_question(question(), None).unwrap();
+    let before = serde_json::to_value(&session).unwrap();
+
+    let mut candidate = spec();
+    candidate.revision = 9;
+    candidate.constraints = vec!["x".repeat(4096); 31];
+    let remaining =
+        MAX_STRUCTURED_RESPONSE_BYTES - serde_json::to_vec(&candidate).unwrap().len() - 3;
+    candidate.constraints.push("x".repeat(remaining));
+    assert_eq!(
+        serde_json::to_vec(&candidate).unwrap().len(),
+        MAX_STRUCTURED_RESPONSE_BYTES
+    );
+    candidate.validate().unwrap();
+
+    assert_eq!(
+        session
+            .propose_spec(candidate.clone(), None)
+            .unwrap_err()
+            .to_string(),
+        "Structured content exceeds 128 KiB"
+    );
+    assert_eq!(serde_json::to_value(&session).unwrap(), before);
+    assert_eq!(
+        session
+            .save_spec(candidate.clone())
+            .unwrap_err()
+            .to_string(),
+        "Structured content exceeds 128 KiB"
+    );
+    assert_eq!(serde_json::to_value(&session).unwrap(), before);
+
+    candidate.constraints.last_mut().unwrap().pop();
+    session.save_spec(candidate).unwrap();
+    let saved = session.spec.as_ref().unwrap();
+    assert_eq!(saved.revision, 10);
+    assert_eq!(
+        serde_json::to_vec(saved).unwrap().len(),
+        MAX_STRUCTURED_RESPONSE_BYTES
+    );
+    session.approve_spec(&saved.document_ref(), 20).unwrap();
+}
+
+#[test]
+fn near_limit_plan_remains_valid_after_host_revision_normalization() {
+    let mut session = saved_session();
+    session.plan.as_mut().unwrap().revision = 9;
+    session.plan.as_mut().unwrap().task.revision = 9;
+    approve(&mut session);
+    session.start_implementation().unwrap();
+    let mut candidate = session.plan.clone().unwrap();
+    let initial_size = serde_json::to_vec(&candidate).unwrap().len();
+    candidate.task.analysis = "x".repeat(MAX_STRUCTURED_RESPONSE_BYTES - initial_size);
+    assert_eq!(
+        serde_json::to_vec(&candidate).unwrap().len(),
+        MAX_STRUCTURED_RESPONSE_BYTES
+    );
+
+    let event = session.propose_plan(candidate.task.clone(), None).unwrap();
+    let ConversationPayload::DocumentProposed {
+        proposal: DocumentProposal::Plan(proposed),
+    } = event.payload
+    else {
+        panic!("Expected a proposed plan");
+    };
+    assert_eq!(proposed.revision, 10);
+    proposed.validate().unwrap();
+    session.save_plan(candidate).unwrap();
+    let saved = session.plan.as_ref().unwrap();
+    assert_eq!(saved.revision, 10);
+    assert_eq!(saved.task.revision, 10);
+    session.approve_plan(&saved.document_ref(), 20).unwrap();
+    session.start_implementation().unwrap();
+    session.authorize(WorkflowAction::ReviewAction).unwrap();
+}
+
+#[test]
+fn exhausted_document_transition_counters_preserve_the_entire_session() {
+    for counter in ["session", "document", "generation", "task"] {
+        let mut session = saved_session();
+        approve(&mut session);
+        session.start_implementation().unwrap();
+        session.walkthroughs.push(walkthrough(&session));
+        match counter {
+            "session" => session.sequence = u64::MAX,
+            "document" => {
+                session.spec.as_mut().unwrap().revision = u64::MAX;
+                session.plan.as_mut().unwrap().revision = u64::MAX;
+                session.plan.as_mut().unwrap().spec_ref =
+                    session.spec.as_ref().unwrap().document_ref();
+            }
+            "generation" => session.execution_generation = u64::MAX,
+            "task" => session.plan.as_mut().unwrap().task.state_sequence = u64::MAX,
+            _ => unreachable!(),
+        }
+        let before = serde_json::to_value(&session).unwrap();
+        let mut changed_spec = session.spec.clone().unwrap();
+        changed_spec.summary.push_str(" revised");
+        let mut changed_plan = session.plan.clone().unwrap();
+        changed_plan.task.goal.push_str(" revised");
+
+        if counter != "task" {
+            let expected = match counter {
+                "session" => "Session sequence exhausted",
+                "document" => "Spec revision exhausted",
+                "generation" => "Execution generation exhausted",
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                session
+                    .save_spec(changed_spec.clone())
+                    .unwrap_err()
+                    .to_string(),
+                expected,
+                "{counter}"
+            );
+            assert_eq!(serde_json::to_value(&session).unwrap(), before, "{counter}");
+        }
+        let expected = match counter {
+            "session" => "Session sequence exhausted",
+            "document" => "Plan revision exhausted",
+            "generation" => "Execution generation exhausted",
+            "task" => "Task sequence exhausted",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            session
+                .save_plan(changed_plan.clone())
+                .unwrap_err()
+                .to_string(),
+            expected,
+            "{counter}"
+        );
+        assert_eq!(serde_json::to_value(&session).unwrap(), before, "{counter}");
+        if matches!(counter, "session" | "document") {
+            assert_eq!(
+                session
+                    .propose_spec(changed_spec, None)
+                    .unwrap_err()
+                    .to_string(),
+                if counter == "session" {
+                    "Session sequence exhausted"
+                } else {
+                    "Spec revision exhausted"
+                },
+                "{counter}"
+            );
+            assert_eq!(serde_json::to_value(&session).unwrap(), before, "{counter}");
+            assert_eq!(
+                session
+                    .propose_plan(changed_plan.task, None)
+                    .unwrap_err()
+                    .to_string(),
+                expected,
+                "{counter}"
+            );
+            assert_eq!(serde_json::to_value(&session).unwrap(), before, "{counter}");
+        }
+    }
+}
+
+#[test]
 fn legacy_task_json_still_deserializes_without_new_workflow_fields() {
     let task: TaskPlan = serde_json::from_str(r#"{"id":"legacy","project":"project","goal":"Old task","acceptance":[],"constraints":[],"unknowns":[],"steps":[{"id":"step","title":"Implement","why":"","files":[],"depends_on":[],"done_when":[],"status":"Complete","evidence":["manually recorded"],"completion_note":"Historical completion"}],"revision":1,"active_step":null,"updated_at_ms":0}"#).unwrap();
     task.validate().unwrap();
@@ -444,6 +613,82 @@ fn walkthrough(session: &TaskSession) -> Walkthrough {
             required_evidence: vec![],
         }],
         cursor: 0,
+    }
+}
+
+fn walkthrough_with_serialized_size(session: &TaskSession, size: usize) -> Walkthrough {
+    let mut walkthrough = walkthrough(session);
+    let actions = (0..11).map(|index| GuidedAction {
+        id: format!("edit-{index}"),
+        revision: 1,
+        kind: GuidedActionKind::Edit,
+        what: "Implement one symbol".into(),
+        target: ActionTarget::File {
+            path: "src/lib.rs".into(),
+            symbol: Some(format!("symbol_{index}")),
+            change_kind: FileChangeKind::Modify,
+        },
+        why: "Satisfy one requirement".into(),
+        expected_result: "One observable edit".into(),
+        required_evidence: vec![],
+    });
+    walkthrough.actions.splice(0..0, actions);
+    let mut remaining = size - serde_json::to_vec(&walkthrough).unwrap().len();
+    for action in &mut walkthrough.actions {
+        for text in [
+            &mut action.what,
+            &mut action.why,
+            &mut action.expected_result,
+        ] {
+            let added = remaining.min(4096 - text.len());
+            text.push_str(&"x".repeat(added));
+            remaining -= added;
+        }
+    }
+    assert_eq!(
+        remaining, 0,
+        "Fixture needs more action description capacity"
+    );
+    assert_eq!(serde_json::to_vec(&walkthrough).unwrap().len(), size);
+    walkthrough
+}
+
+#[test]
+fn near_limit_walkthrough_remains_valid_when_cursor_gains_a_digit() {
+    let session = saved_session();
+    let spec = session.spec.as_ref().unwrap();
+    let plan = session.plan.as_ref().unwrap();
+    let mut walkthrough = walkthrough_with_serialized_size(&session, MAX_STRUCTURED_RESPONSE_BYTES);
+    assert_eq!(walkthrough.actions.len(), 12);
+    walkthrough.validate(spec, plan).unwrap();
+
+    for cursor in [10, walkthrough.actions.len()] {
+        walkthrough.cursor = cursor;
+        assert_eq!(
+            serde_json::to_vec(&walkthrough).unwrap().len(),
+            MAX_STRUCTURED_RESPONSE_BYTES + 1
+        );
+        walkthrough.validate(spec, plan).unwrap();
+    }
+}
+
+#[test]
+fn oversized_walkthrough_definition_is_rejected_regardless_of_cursor() {
+    let session = saved_session();
+    let mut walkthrough =
+        walkthrough_with_serialized_size(&session, MAX_STRUCTURED_RESPONSE_BYTES + 1024);
+    for cursor in [0, 10, walkthrough.actions.len()] {
+        walkthrough.cursor = cursor;
+        assert_eq!(
+            walkthrough
+                .validate(
+                    session.spec.as_ref().unwrap(),
+                    session.plan.as_ref().unwrap()
+                )
+                .unwrap_err()
+                .to_string(),
+            "Structured content exceeds 128 KiB"
+        );
     }
 }
 

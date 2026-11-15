@@ -301,7 +301,14 @@ impl Walkthrough {
                 );
             }
         }
-        bounded_structure(self)
+        // Cursor progress must not change whether an accepted definition fits.
+        bounded_structure(&(
+            &self.id,
+            self.generation,
+            &self.step_id,
+            &self.plan_ref,
+            &self.actions,
+        ))
     }
 }
 
