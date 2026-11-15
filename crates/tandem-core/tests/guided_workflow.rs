@@ -351,6 +351,67 @@ fn plan_hash_ignores_progress_but_binds_spec_and_task_definition() {
 }
 
 #[test]
+fn near_limit_plan_stays_authorized_after_start_and_progress() {
+    let mut session = saved_session();
+    let mut plan = session.plan.take().unwrap();
+    let initial_size = serde_json::to_vec(&plan).unwrap().len();
+    plan.task.analysis = "x".repeat(MAX_STRUCTURED_RESPONSE_BYTES - initial_size);
+    assert_eq!(
+        serde_json::to_vec(&plan).unwrap().len(),
+        MAX_STRUCTURED_RESPONSE_BYTES
+    );
+    session.save_plan(plan).unwrap();
+    approve(&mut session);
+    let approved_ref = session.plan.as_ref().unwrap().document_ref();
+
+    session.start_implementation().unwrap();
+    assert!(
+        serde_json::to_vec(session.plan.as_ref().unwrap())
+            .unwrap()
+            .len()
+            > MAX_STRUCTURED_RESPONSE_BYTES
+    );
+    let binding = session
+        .authorize(WorkflowAction::PrepareWalkthrough)
+        .unwrap();
+    assert_eq!(binding.plan_ref.as_ref(), Some(&approved_ref));
+
+    let plan = session.plan.as_mut().unwrap();
+    plan.task
+        .complete_active_manually(vec!["e".repeat(MAX_STRUCTURED_RESPONSE_BYTES)])
+        .unwrap();
+    plan.task
+        .start_step(&plan.task.steps[1].id.clone())
+        .unwrap();
+    assert_eq!(plan.document_ref(), approved_ref);
+    assert_eq!(
+        session
+            .authorize(WorkflowAction::PrepareWalkthrough)
+            .unwrap(),
+        binding
+    );
+    assert_eq!(
+        session.authorize(WorkflowAction::ReviewAction).unwrap(),
+        binding
+    );
+}
+
+#[test]
+fn oversized_plan_definition_is_rejected_without_changing_approved_state() {
+    let mut session = saved_session();
+    approve(&mut session);
+    session.start_implementation().unwrap();
+    let before = serde_json::to_value(&session).unwrap();
+    let mut plan = session.plan.clone().unwrap();
+    plan.task.analysis = "x".repeat(MAX_STRUCTURED_RESPONSE_BYTES);
+    assert_eq!(
+        session.save_plan(plan).unwrap_err().to_string(),
+        "Structured content exceeds 128 KiB"
+    );
+    assert_eq!(serde_json::to_value(&session).unwrap(), before);
+}
+
+#[test]
 fn legacy_task_json_still_deserializes_without_new_workflow_fields() {
     let task: TaskPlan = serde_json::from_str(r#"{"id":"legacy","project":"project","goal":"Old task","acceptance":[],"constraints":[],"unknowns":[],"steps":[{"id":"step","title":"Implement","why":"","files":[],"depends_on":[],"done_when":[],"status":"Complete","evidence":["manually recorded"],"completion_note":"Historical completion"}],"revision":1,"active_step":null,"updated_at_ms":0}"#).unwrap();
     task.validate().unwrap();

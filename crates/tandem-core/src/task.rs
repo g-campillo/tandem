@@ -248,10 +248,13 @@ impl TaskPlan {
         Ok(())
     }
 
+    pub(crate) fn definition_content(&self) -> serde_json::Value {
+        serde_json::json!({"goal":self.goal,"analysis":self.analysis,"acceptance":self.acceptance,"constraints":self.constraints,"unknowns":self.unknowns,
+            "steps":self.steps.iter().map(|s|serde_json::json!({"id":s.id,"title":s.title,"why":s.why,"files":s.files,"symbols":s.symbols,"languages":s.languages,"depends_on":s.depends_on,"done_when":s.done_when})).collect::<Vec<_>>()})
+    }
+
     pub fn definition_hash(&self) -> String {
-        let value = serde_json::json!({"goal":self.goal,"analysis":self.analysis,"acceptance":self.acceptance,"constraints":self.constraints,"unknowns":self.unknowns,
-            "steps":self.steps.iter().map(|s|serde_json::json!({"id":s.id,"title":s.title,"why":s.why,"files":s.files,"symbols":s.symbols,"languages":s.languages,"depends_on":s.depends_on,"done_when":s.done_when})).collect::<Vec<_>>()});
-        crate::content_hash(value.to_string().as_bytes())
+        crate::content_hash(self.definition_content().to_string().as_bytes())
     }
 }
 

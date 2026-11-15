@@ -111,7 +111,15 @@ impl PlanDocument {
                 normalized_relative(std::path::Path::new(path))?;
             }
         }
-        bounded_structure(self)
+        // Bound the same immutable fields used by definition_hash, retaining the
+        // full task definition here rather than its fixed-size hash. Runtime
+        // progress can grow without changing the approved document identity.
+        bounded_structure(&(
+            &self.spec_ref,
+            &self.task.id,
+            &self.task.project,
+            self.task.definition_content(),
+        ))
     }
 
     pub fn definition_hash(&self) -> String {
