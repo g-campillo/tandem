@@ -1,4 +1,6 @@
-use super::companion_state::{CompanionTab, DocumentEditorDraft, approval_matches};
+use super::companion_state::{
+    CompanionTab, DocumentEditorDraft, DraftField, approval_matches, entry_index, field_kind,
+};
 use super::panels::note;
 use super::*;
 use crate::appearance::{
@@ -23,23 +25,31 @@ pub struct DocumentFields {
 impl DocumentFields {
     pub fn fingerprint(&self, cx: &App) -> String {
         content_hash(
-            self.fields
-                .iter()
-                .map(|f| f.input.read(cx).value().to_string())
-                .collect::<Vec<_>>()
-                .join("\0")
-                .as_bytes(),
+            &serde_json::to_vec(
+                &self
+                    .fields
+                    .iter()
+                    .map(|f| (&f.key, f.input.read(cx).value().to_string()))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("String fields serialize"),
         )
     }
 
     pub fn snapshot(&self, cx: &App) -> DocumentEditorDraft {
-        let mut draft = DocumentEditorDraft::new(self.spec.clone(), self.plan.clone());
-        for field in &mut draft.fields {
-            if let Some(input) = self.fields.iter().find(|f| f.key == field.key) {
-                field.value = input.input.read(cx).value().to_string();
-            }
+        DocumentEditorDraft {
+            spec: self.spec.clone(),
+            plan: self.plan.clone(),
+            fields: self
+                .fields
+                .iter()
+                .map(|f| DraftField {
+                    key: f.key.clone(),
+                    label: f.label.clone(),
+                    value: f.input.read(cx).value().to_string(),
+                })
+                .collect(),
         }
-        draft
     }
     fn read_spec(&self, cx: &App) -> Result<SpecDocument> {
         self.snapshot(cx).read_spec()
@@ -282,20 +292,15 @@ impl Workspace {
                 let mut draft = DocumentEditorDraft::new(spec, Some(plan));
                 if let Some(previous) = previous {
                     draft.spec = previous.spec;
-                    for field in &mut draft.fields {
-                        if matches!(
-                            field.key.as_str(),
-                            "summary"
-                                | "requirements"
-                                | "in_scope"
-                                | "out_of_scope"
-                                | "spec_constraints"
-                                | "acceptance"
-                        ) && let Some(old) = previous.fields.iter().find(|f| f.key == field.key)
-                        {
-                            field.value = old.value.clone();
-                        }
-                    }
+                    draft
+                        .fields
+                        .retain(|f| field_kind(&f.key) != WorkflowDocumentKind::Spec);
+                    draft.fields.extend(
+                        previous
+                            .fields
+                            .into_iter()
+                            .filter(|f| field_kind(&f.key) == WorkflowDocumentKind::Spec),
+                    );
                 }
                 self.set_document_draft(draft, window, cx);
             }
@@ -332,6 +337,30 @@ impl Workspace {
         match result {
             Ok((spec, plan)) => self.set_document_fields(spec, Some(plan), window, cx),
             Err(e) => self.companion.status = e.to_string(),
+        }
+        cx.notify();
+    }
+    fn edit_document_list(
+        &mut self,
+        key: &str,
+        remove: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.companion.busy || self.agent.busy {
+            return;
+        }
+        let Some(fields) = &self.companion.documents else {
+            return;
+        };
+        let mut draft = fields.snapshot(cx);
+        let result = match remove {
+            Some(index) => draft.remove_entry(key, index),
+            None => draft.add_entry(key),
+        };
+        match result {
+            Ok(()) => self.set_document_draft(draft, window, cx),
+            Err(error) => self.companion.status = error.to_string(),
         }
         cx.notify();
     }
@@ -410,36 +439,68 @@ impl Workspace {
         }
         body = body.children(
             fields
-                .fields
-                .iter()
-                .filter(|f| {
-                    if kind == WorkflowDocumentKind::Spec {
-                        [
-                            "summary",
-                            "requirements",
-                            "in_scope",
-                            "out_of_scope",
-                            "spec_constraints",
-                            "acceptance",
-                        ]
-                        .contains(&f.key.as_str())
-                    } else {
-                        ![
-                            "summary",
-                            "requirements",
-                            "in_scope",
-                            "out_of_scope",
-                            "spec_constraints",
-                            "acceptance",
-                        ]
-                        .contains(&f.key.as_str())
-                    }
-                })
-                .map(|f| {
-                    solid_section(panel_body(cx), cx)
+                .snapshot(cx)
+                .sections()
+                .into_iter()
+                .filter(|s| s.kind() == kind)
+                .enumerate()
+                .map(|(section_index, section)| {
+                    let mut group = solid_section(panel_body(cx), cx)
                         .p_2()
-                        .child(note(f.label.clone()))
-                        .child(Textarea::new(&f.input).aria_label(f.label.clone()))
+                        .child(note(section.label.clone()));
+                    let entries = fields
+                        .fields
+                        .iter()
+                        .filter(|f| section.contains(&f.key))
+                        .collect::<Vec<_>>();
+                    for f in &entries {
+                        let label = if section.list {
+                            format!(
+                                "{} {} · {}",
+                                section.label,
+                                entry_index(&f.key, &section.key).unwrap() + 1,
+                                f.label
+                            )
+                        } else {
+                            section.label.clone()
+                        };
+                        group = group
+                            .child(note(label.clone()))
+                            .child(Textarea::new(&f.input).aria_label(label));
+                        // Criteria have separate ID and text inputs, and one remove control.
+                        if section.list && (!section.criteria || f.key.ends_with(".text")) {
+                            let key = section.key.clone();
+                            let index = entry_index(&f.key, &key).unwrap();
+                            group = group.child(
+                                path_button(
+                                    Button::new(SharedString::from(format!(
+                                        "remove-document-entry-{key}-{index}"
+                                    ))),
+                                    "Remove entry",
+                                )
+                                .disabled(busy)
+                                .on_click(cx.listener(
+                                    move |this, _, w, cx| {
+                                        this.edit_document_list(&key, Some(index), w, cx)
+                                    },
+                                )),
+                            );
+                        }
+                    }
+                    if section.list {
+                        let key = section.key.clone();
+                        group = group.child(
+                            path_button(
+                                Button::new(("add-document-entry", section_index)),
+                                "Add entry",
+                            )
+                            .disabled(busy)
+                            .on_click(cx.listener(
+                                move |this, _, w, cx| this.edit_document_list(&key, None, w, cx),
+                            )),
+                        );
+                    }
+                    group
                 }),
         );
         body.when(

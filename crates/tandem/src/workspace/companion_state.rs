@@ -121,7 +121,9 @@ pub fn clear_submitted_input(completed: bool, submitted: Option<&str>, current: 
 
 #[path = "document_drafts.rs"]
 mod document_drafts;
-pub use document_drafts::{DocumentEditorDraft, SessionDocumentDrafts};
+pub use document_drafts::{
+    DocumentEditorDraft, DraftField, SessionDocumentDrafts, entry_index, field_kind,
+};
 
 #[path = "companion_history.rs"]
 mod companion_history;

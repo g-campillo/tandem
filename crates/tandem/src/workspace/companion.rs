@@ -1,5 +1,6 @@
 use super::companion_state::{self, CompanionTab};
 use super::documents_view::DocumentFields;
+use super::research_adapter::ProjectInspection;
 use super::*;
 use gpui_kit::component::input::TextareaState;
 use std::collections::BTreeSet;
@@ -770,13 +771,22 @@ impl Workspace {
             session_id: session_id.clone(),
             ..Default::default()
         }));
+        // Bind research to the same selected tools and saved trust as this UI
+        // operation. No discovery, tool activation or model executable authority.
+        let mut check_environment = self.dev.environment.clone();
+        if let Some(environment) = &mut check_environment {
+            environment.tools = self.dev.rust.clone();
+            environment.python = self.dev.python.clone();
+        }
+        let inspection =
+            ProjectInspection::snapshot(check_environment.clone(), self.dev.settings.clone());
         let mut capture = FreshCapture {
             capture: ProjectConversationCapture {
                 project: project.clone(),
                 overlays: vec![],
                 selected: self.selected_context_paths(cx),
                 cache: companion_cache(),
-                check_environment: self.dev.environment.clone(),
+                check_environment,
                 recipe_ids: self.dev.recipes.iter().map(|r| r.id.clone()).collect(),
                 attachments: vec![],
             },
@@ -796,6 +806,7 @@ impl Workspace {
         let project_key = project.key().to_string();
         self.companion.status = "Preserving input…".into();
         let operation = cx.background_spawn(async move {
+            let inspection_environment = inspection.environment()?;
             let mut runner = runner
                 .lock()
                 .map_err(|_| anyhow!("Conversation coordinator unavailable"))?;
@@ -807,13 +818,16 @@ impl Workspace {
                     ResearchBroker::default(),
                 ));
             }
-            runner
-                .as_mut()
-                .unwrap()
-                .run(input, &mut capture, None, cancel, |op| {
+            runner.as_mut().unwrap().run(
+                input,
+                &mut capture,
+                inspection_environment.as_ref(),
+                cancel,
+                |op| {
                     *progress.lock().unwrap() = Some(op.clone());
                     Ok(())
-                })
+                },
+            )
         });
         let weak = cx.entity().downgrade();
         window.spawn(cx,async move |cx| {

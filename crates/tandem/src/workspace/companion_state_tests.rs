@@ -81,6 +81,250 @@ fn approved() -> (tempfile::TempDir, Store, TaskSession) {
     let session = support::approved_session(&mut store, task).unwrap();
     (dir, store, session)
 }
+
+fn lossless_documents() -> (tempfile::TempDir, Store, TaskSession) {
+    let (dir, mut store, fixture) = approved();
+    let mut spec = fixture.spec.unwrap();
+    spec.summary = "  Preserve the API\nand its behavior | exactly  \n".into();
+    spec.requirements[0].text = spec.summary.clone();
+    spec.acceptance[0].text = "\tSame inputs | same outputs\r\nincluding boundaries \n".into();
+    spec.in_scope = vec![" first\nsecond | third ".into(), "separate entry\n".into()];
+    spec.out_of_scope = vec![" \nNo removals\t ".into()];
+    spec.constraints = vec!["\tKeep whitespace\r\nand separators | intact\n".into()];
+    spec.validate().unwrap();
+    let mut plan = fixture.plan.unwrap();
+    plan.task.id = new_id();
+    plan.spec_ref = spec.document_ref();
+    plan.task.goal = spec.summary.clone();
+    plan.task.analysis = " Analysis\nwith | separators \n".into();
+    // TaskPlan permits empty entries too: the editor must preserve them.
+    plan.task.acceptance = vec![" first\nsecond | third ".into(), "".into(), "\n".into()];
+    plan.task.constraints = vec![" constraint\r\nnext | part ".into(), "".into()];
+    plan.task.unknowns = vec![" question\ncontinued | value \n".into()];
+    let step = &mut plan.task.steps[0];
+    step.title = " Step\ncontinued | title ".into();
+    step.why = " Reason\ncontinued | reason \n".into();
+    step.files = vec![
+        " src/with | separator.rs ".into(),
+        "src/line\nbreak.rs".into(),
+    ];
+    step.symbols = vec![" symbol\ncontinued | name ".into(), "".into()];
+    step.languages = vec![" rust\npython | other ".into(), "".into()];
+    step.done_when = vec![
+        " Done\nwhen | exact \n".into(),
+        " Another condition ".into(),
+    ];
+    let mut second = step.clone();
+    second.id = new_id();
+    second.depends_on = vec![step.id.clone()];
+    plan.task.steps.push(second);
+    plan.validate().unwrap();
+    let session = store.create_session("/fixture").unwrap();
+    let session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![
+                    SessionCommand::SaveSpec { spec },
+                    SessionCommand::SavePlan { plan },
+                ],
+            ),
+        )
+        .unwrap();
+    (dir, store, session)
+}
+
+#[test]
+fn untouched_structured_documents_preserve_exact_refs_and_allow_save_approve_start() {
+    let (_dir, mut store, session) = lossless_documents();
+    let draft = DocumentEditorDraft::from_session(&session, &[]);
+    let spec = draft.read_spec().unwrap();
+    let plan = draft.read_plan().unwrap();
+    assert_eq!(spec, *session.spec.as_ref().unwrap());
+    assert_eq!(
+        serde_json::to_value(&plan).unwrap(),
+        serde_json::to_value(session.plan.as_ref().unwrap()).unwrap()
+    );
+    assert_eq!(
+        spec.document_ref(),
+        session.spec.as_ref().unwrap().document_ref()
+    );
+    assert_eq!(
+        plan.document_ref(),
+        session.plan.as_ref().unwrap().document_ref()
+    );
+    assert!(!draft.dirty(WorkflowDocumentKind::Spec, &session));
+    assert!(!draft.dirty(WorkflowDocumentKind::Plan, &session));
+    let saved = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![
+                    SessionCommand::SaveSpec { spec },
+                    SessionCommand::SavePlan { plan },
+                ],
+            ),
+        )
+        .unwrap();
+    assert_eq!(saved.sequence, session.sequence);
+    let started = store
+        .apply_session_transition(
+            &saved.id,
+            saved.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![
+                    SessionCommand::ApproveSpec {
+                        document_ref: draft.spec.document_ref(),
+                        approved_at_ms: now_ms(),
+                    },
+                    SessionCommand::ApprovePlan {
+                        document_ref: draft.plan.as_ref().unwrap().document_ref(),
+                        approved_at_ms: now_ms(),
+                    },
+                    SessionCommand::StartImplementation,
+                ],
+            ),
+        )
+        .unwrap();
+    assert!(started.authorize(WorkflowAction::PrepareAction).is_ok());
+    let draft = DocumentEditorDraft::from_session(&started, &[]);
+    let saved = store
+        .apply_session_transition(
+            &started.id,
+            started.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![
+                    SessionCommand::SaveSpec {
+                        spec: draft.read_spec().unwrap(),
+                    },
+                    SessionCommand::SavePlan {
+                        plan: draft.read_plan().unwrap(),
+                    },
+                ],
+            ),
+        )
+        .unwrap();
+    assert_eq!(saved.sequence, started.sequence);
+    assert_eq!(saved.spec_approval, started.spec_approval);
+    assert_eq!(saved.plan_approval, started.plan_approval);
+    assert_eq!(saved.started_generation, started.started_generation);
+}
+
+#[test]
+fn unrelated_document_field_edits_preserve_every_other_value_and_entry_boundary() {
+    let (_dir, _store, session) = lossless_documents();
+    let mut draft = DocumentEditorDraft::from_session(&session, &[]);
+    draft
+        .fields
+        .iter_mut()
+        .find(|f| f.key == "summary")
+        .unwrap()
+        .value = "Edited summary".into();
+    let mut expected = session.spec.clone().unwrap();
+    expected.summary = "Edited summary".into();
+    assert_eq!(draft.read_spec().unwrap(), expected);
+    draft
+        .fields
+        .iter_mut()
+        .find(|f| f.key == "goal")
+        .unwrap()
+        .value = "Edited goal".into();
+    let mut expected = session.plan.clone().unwrap();
+    expected.task.goal = "Edited goal".into();
+    assert_eq!(
+        serde_json::to_value(draft.read_plan().unwrap()).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+}
+
+#[test]
+fn structured_entry_add_remove_and_invalid_human_input_remain_lossless() {
+    let (_dir, _store, session) = lossless_documents();
+    let mut draft = DocumentEditorDraft::from_session(&session, &[]);
+    let mut expected = session.spec.clone().unwrap();
+    draft.add_entry("requirements").unwrap();
+    let text = "  New requirement\r\nwith | separators\n  ";
+    draft
+        .fields
+        .iter_mut()
+        .find(|f| f.key == "requirements.1.id")
+        .unwrap()
+        .value = "extra-requirement".into();
+    draft
+        .fields
+        .iter_mut()
+        .find(|f| f.key == "requirements.1.text")
+        .unwrap()
+        .value = text.into();
+    expected.requirements.push(Criterion {
+        id: "extra-requirement".into(),
+        text: text.into(),
+    });
+    assert_eq!(draft.read_spec().unwrap(), expected);
+    draft.remove_entry("requirements", 0).unwrap();
+    expected.requirements.remove(0);
+    assert_eq!(draft.read_spec().unwrap(), expected);
+    draft.remove_entry("in_scope", 0).unwrap();
+    expected.in_scope.remove(0);
+    draft.add_entry("in_scope").unwrap();
+    draft
+        .fields
+        .iter_mut()
+        .find(|f| f.key == "in_scope.1")
+        .unwrap()
+        .value = text.into();
+    expected.in_scope.push(text.into());
+    assert_eq!(draft.read_spec().unwrap(), expected);
+
+    let mut expected_plan = session.plan.clone().unwrap();
+    draft.add_entry("unknowns").unwrap();
+    expected_plan.task.unknowns.push(String::new());
+    draft.remove_entry("step.0.files", 0).unwrap();
+    expected_plan.task.steps[0].files.remove(0);
+    assert_eq!(
+        serde_json::to_value(draft.read_plan().unwrap()).unwrap(),
+        serde_json::to_value(expected_plan).unwrap()
+    );
+
+    let invalid = "  invalid | ID\nretained verbatim  ";
+    draft
+        .fields
+        .iter_mut()
+        .find(|f| f.key == "requirements.0.id")
+        .unwrap()
+        .value = invalid.into();
+    assert!(draft.read_spec().is_err());
+    assert!(draft.dirty(WorkflowDocumentKind::Spec, &session));
+    draft.refresh(&session, &[], Some(WorkflowDocumentKind::Plan));
+    let mut drafts = SessionDocumentDrafts::default();
+    drafts.preserve(&session.id, draft);
+    let restored = drafts.restore(&session, &[]);
+    assert!(restored.read_spec().is_err());
+    assert_eq!(
+        restored
+            .fields
+            .iter()
+            .find(|f| f.key == "requirements.0.id")
+            .unwrap()
+            .value,
+        invalid
+    );
+    assert_eq!(
+        restored
+            .fields
+            .iter()
+            .find(|f| f.key == "requirements.0.text")
+            .unwrap()
+            .value,
+        text
+    );
+}
 fn with_actions(session: &mut TaskSession) {
     let walkthrough = support::fixture_walkthrough(session);
     walkthrough
@@ -339,7 +583,7 @@ fn document_refresh_preserves_other_document_and_preexisting_edits() {
     other_draft
         .fields
         .iter_mut()
-        .find(|f| f.key == "requirements")
+        .find(|f| f.key == "requirements.0.id")
         .unwrap()
         .value = "invalid raw criterion".into();
     sessions.preserve(&other.id, other_draft);
@@ -357,7 +601,7 @@ fn document_refresh_preserves_other_document_and_preexisting_edits() {
             .restore(&other, &[])
             .fields
             .iter()
-            .find(|f| f.key == "requirements")
+            .find(|f| f.key == "requirements.0.id")
             .unwrap()
             .value,
         "invalid raw criterion"

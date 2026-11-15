@@ -8,6 +8,7 @@ mod companion_view;
 mod conversation_view;
 mod documents_view;
 mod panels;
+mod research_adapter;
 use companion::CompanionUi;
 mod provider;
 mod tools;
