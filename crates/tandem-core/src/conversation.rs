@@ -4,6 +4,7 @@ use crate::{
     WorkflowBinding,
 };
 use anyhow::{Result, ensure};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -38,7 +39,7 @@ pub(crate) fn bounded_structure(value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QuestionChoice {
     pub id: String,
@@ -46,7 +47,7 @@ pub struct QuestionChoice {
     pub description: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClarificationQuestion {
     pub id: String,
@@ -126,6 +127,24 @@ pub enum WorkflowDocumentKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum ConversationPayload {
+    OperationInputRecorded {
+        operation_id: String,
+        input_hash: String,
+    },
+    OperationResultHistorical {
+        operation_id: String,
+        detail: String,
+    },
+    OperationPhaseChanged {
+        operation_id: String,
+        phase: OperationPhase,
+    },
+    OperationSnapshot {
+        snapshot: ConversationSnapshot,
+    },
+    SummaryCheckpoint {
+        checkpoint: SummaryCheckpoint,
+    },
     HumanMessage {
         text: String,
     },
@@ -221,4 +240,50 @@ pub enum SessionOperationKind {
     DraftPlan,
     PrepareAction,
     ReviewAction,
+    Reveal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationPhase {
+    PreservingInput,
+    CapturingContext,
+    CheckingAccount,
+    CheckingModels,
+    ReadingSource,
+    SearchingSource,
+    InspectingSource,
+    PublicSearch,
+    PublicRetrieval,
+    Discussing,
+    DraftingSpec,
+    DraftingPlan,
+    PreparingAction,
+    Reviewing,
+    Revealing,
+    Stopping,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConversationSnapshot {
+    pub operation_id: String,
+    pub context_id: String,
+    pub project_fingerprint: String,
+    pub research_snapshot_id: String,
+    pub model: crate::ResolvedModel,
+    pub guidance_fingerprint: String,
+    pub workflow: Option<WorkflowBinding>,
+    pub spec_ref: Option<DocumentRef>,
+    pub plan_ref: Option<DocumentRef>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SummaryCheckpoint {
+    pub first_sequence: u64,
+    pub covered_sequence: u64,
+    pub covered_hash: String,
+    pub text: String,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TranscriptContext {
+    pub checkpoint: Option<SummaryCheckpoint>,
+    pub recent: Vec<ConversationEvent>,
+    pub omitted_history_available: bool,
 }

@@ -13,3 +13,8 @@ pub use public_research::*;
 
 mod evidence;
 pub use evidence::*;
+
+mod operation;
+pub use operation::*;
+mod conversation;
+pub use conversation::*;

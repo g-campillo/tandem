@@ -6454,6 +6454,7 @@ dependencies = [
  "percent-encoding",
  "regex",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tandem-checks",

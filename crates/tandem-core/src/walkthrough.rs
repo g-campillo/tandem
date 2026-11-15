@@ -7,11 +7,12 @@ use crate::{
     normalized_relative,
 };
 use anyhow::{Context, Result, ensure};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum CriterionRef {
     SpecAcceptance { id: String },
@@ -41,7 +42,7 @@ impl CriterionRef {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum GuidedActionKind {
     Edit,
     Command,
@@ -49,14 +50,14 @@ pub enum GuidedActionKind {
     ValidateTask,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum FileChangeKind {
     Create,
     Modify,
     Delete,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum ActionTarget {
     File {
@@ -78,7 +79,7 @@ pub enum ActionTarget {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum RequiredActionEvidence {
     FileSnapshot { path: String },
@@ -87,7 +88,7 @@ pub enum RequiredActionEvidence {
     CriterionAssessment { criterion_ref: CriterionRef },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GuidedAction {
     pub id: String,
@@ -369,7 +370,7 @@ pub struct ActionReviewBinding {
     pub evidence: Vec<ActionEvidenceBinding>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ActionReviewOutcome {
     Passed,
     NeedsChanges,
@@ -379,7 +380,7 @@ pub enum ActionReviewOutcome {
     Failed,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActionReviewFinding {
     pub problem: String,
@@ -729,7 +730,7 @@ impl ActionCommandEvidence {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActionCriterionAssessment {
     pub criterion_ref: CriterionRef,

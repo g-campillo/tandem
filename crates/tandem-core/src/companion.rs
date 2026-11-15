@@ -7,6 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompanionAction {
+    Discuss,
+    DraftSpec,
+    DraftPlan,
+    PrepareWalkthrough,
+    ReviewAction,
     Analyze,
     Guide,
     Hint,
@@ -228,6 +233,11 @@ pub struct ReviewResponse {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CompanionResponse {
+    Discussion(ConversationReply),
+    SpecDraft(SpecDraft),
+    PlanDraft(PlanDraft),
+    WalkthroughDraft(WalkthroughDraft),
+    ActionAssessment(ActionAssessmentDraft),
     Plan(TaskProposal),
     Guidance(GuidanceResponse),
     Solution(SuggestedSolution),
@@ -243,6 +253,87 @@ pub struct ReviewEvidence {
     pub summary: String,
     pub verified_failure: bool,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationReply {
+    pub text: String,
+    pub question: Option<ClarificationQuestion>,
+    pub findings: Vec<ResearchFinding>,
+    /// Requests have no model-chosen receipt identity or execution authority.
+    pub research_requests: Vec<ResearchRequestKind>,
+}
+impl ConversationReply {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.text.trim().is_empty() && self.text.len() <= 16 * 1024,
+            "Reply needs bounded prose"
+        );
+        ensure!(
+            !contains_solution_code(&serde_json::json!([
+                self.text,
+                self.question,
+                self.findings
+            ])),
+            "Implementation code is hidden in discussion"
+        );
+        ensure!(
+            self.findings.len() <= 32 && self.research_requests.len() <= 4,
+            "Reply exceeds research bounds"
+        );
+        if let Some(question) = &self.question {
+            question.validate()?;
+        }
+        for kind in &self.research_requests {
+            ResearchRequest::new(kind.clone())?;
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecDraft {
+    pub reply: ConversationReply,
+    pub spec: Option<SpecDocument>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDraft {
+    pub reply: ConversationReply,
+    pub plan: Option<TaskProposal>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WalkthroughDraft {
+    pub reply: ConversationReply,
+    pub actions: Option<Vec<GuidedAction>>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActionAssessment {
+    pub outcome: ActionReviewOutcome,
+    pub summary: String,
+    pub findings: Vec<ActionReviewFinding>,
+    pub evidence_used: Vec<String>,
+    pub limitations: Vec<String>,
+    pub assessments: Vec<ActionCriterionAssessment>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActionAssessmentDraft {
+    pub reply: ConversationReply,
+    pub assessment: Option<ActionAssessment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GuidedContext {
+    pub operation_id: String,
+    pub session: TaskSession,
+    pub workflow: Option<WorkflowBinding>,
+    pub transcript: TranscriptContext,
+    pub receipts: Vec<ResearchReceipt>,
+    pub review: Option<ActionReviewInput>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRequest {
     #[serde(default)]
@@ -254,6 +345,9 @@ pub struct ModelRequest {
     /// retained conversation id until explicitly adopted into a TaskSession.
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Host-created operation snapshot, never model authority.
+    #[serde(default)]
+    pub guided: Option<GuidedContext>,
     pub action: CompanionAction,
     pub question: String,
     pub language: String,
@@ -266,6 +360,73 @@ pub struct ModelRequest {
     pub delegation: Option<DelegationInput>,
 }
 impl ModelRequest {
+    pub fn validate_guided(&self) -> Result<()> {
+        let managed = matches!(
+            self.action,
+            CompanionAction::Discuss
+                | CompanionAction::DraftSpec
+                | CompanionAction::DraftPlan
+                | CompanionAction::PrepareWalkthrough
+                | CompanionAction::ReviewAction
+        );
+        if !managed && self.guided.is_none() {
+            return Ok(());
+        }
+        let guided = self
+            .guided
+            .as_ref()
+            .context("Managed requests require a durable session snapshot")?;
+        ensure!(
+            self.conversation_id.as_ref() == Some(&guided.session.id),
+            "Conversation identity differs from the durable session"
+        );
+        ensure!(
+            self.delegation.is_none(),
+            "Managed conversations carry no mutation grant"
+        );
+        match self.action {
+            CompanionAction::PrepareWalkthrough
+            | CompanionAction::ReviewAction
+            | CompanionAction::Reveal => {
+                let action = match self.action {
+                    CompanionAction::PrepareWalkthrough => WorkflowAction::PrepareWalkthrough,
+                    CompanionAction::ReviewAction => WorkflowAction::ReviewAction,
+                    _ => WorkflowAction::Reveal,
+                };
+                let binding = guided
+                    .workflow
+                    .as_ref()
+                    .context("Implementation request requires its workflow binding")?;
+                ensure!(
+                    guided.session.binding_is_current(action, binding),
+                    "Implementation request is unauthorized"
+                );
+                if self.action != CompanionAction::PrepareWalkthrough {
+                    let review = guided
+                        .review
+                        .as_ref()
+                        .context("Action evidence/scope is missing")?;
+                    review.validate(&guided.session)?;
+                    ensure!(
+                        review.context.id == self.context.id
+                            && review.binding.project_fingerprint
+                                == self.context.project_fingerprint
+                            && review.binding.language == self.language
+                            && review.binding.guidance_fingerprint == self.guidance.fingerprint(),
+                        "Action evidence differs from the request snapshot"
+                    );
+                }
+            }
+            CompanionAction::DraftPlan => {
+                ensure!(
+                    guided.session.spec.is_some(),
+                    "Save a spec before drafting a plan"
+                );
+            }
+            _ => {}
+        }
+        Ok(())
+    }
     pub fn binding(&self) -> ReviewBinding {
         ReviewBinding {
             context_id: self.context.id.clone(),
@@ -279,6 +440,11 @@ impl ModelRequest {
     }
     pub fn schema(&self) -> Value {
         let schema = match self.action {
+            CompanionAction::Discuss => schemars::schema_for!(ConversationReply),
+            CompanionAction::DraftSpec => schemars::schema_for!(SpecDraft),
+            CompanionAction::DraftPlan => schemars::schema_for!(PlanDraft),
+            CompanionAction::PrepareWalkthrough => schemars::schema_for!(WalkthroughDraft),
+            CompanionAction::ReviewAction => schemars::schema_for!(ActionAssessmentDraft),
             CompanionAction::Analyze => schemars::schema_for!(TaskProposal),
             CompanionAction::Reveal => schemars::schema_for!(SuggestedSolution),
             CompanionAction::Review => schemars::schema_for!(ReviewResponse),
@@ -297,13 +463,104 @@ impl ModelRequest {
             serde_json::to_vec(&value)?.len() <= 128 * 1024,
             "Companion response exceeded its size limit"
         );
-        if !self.action.permits_solution() {
+        if !self.action.permits_solution()
+            && !matches!(
+                self.action,
+                CompanionAction::PrepareWalkthrough
+                    | CompanionAction::Discuss
+                    | CompanionAction::DraftSpec
+                    | CompanionAction::DraftPlan
+            )
+        {
             ensure!(
                 !contains_solution_code(&value),
                 "Response contained implementation code in a hidden channel; request a solution explicitly to view code"
             );
         }
         let response = match self.action {
+            CompanionAction::Discuss => {
+                let reply: ConversationReply = serde_json::from_value(value)?;
+                self.validate_conversation_reply(&reply)?;
+                CompanionResponse::Discussion(reply)
+            }
+            CompanionAction::DraftSpec => {
+                let draft: SpecDraft = serde_json::from_value(value)?;
+                self.validate_conversation_reply(&draft.reply)?;
+                if let Some(spec) = &draft.spec {
+                    spec.validate()?;
+                    ensure!(
+                        !contains_solution_code(&serde_json::to_value(spec)?),
+                        "Implementation code is hidden in specs"
+                    );
+                }
+                CompanionResponse::SpecDraft(draft)
+            }
+            CompanionAction::DraftPlan => {
+                let draft: PlanDraft = serde_json::from_value(value)?;
+                self.validate_conversation_reply(&draft.reply)?;
+                if let Some(plan) = &draft.plan {
+                    plan.into_plan(
+                        self.guided
+                            .as_ref()
+                            .context("Missing session snapshot")?
+                            .session
+                            .project
+                            .as_str(),
+                        self.task.as_ref(),
+                    )?;
+                    ensure!(
+                        !contains_solution_code(&serde_json::to_value(plan)?),
+                        "Implementation code is hidden in plans"
+                    );
+                }
+                CompanionResponse::PlanDraft(draft)
+            }
+            CompanionAction::PrepareWalkthrough => {
+                let draft: WalkthroughDraft = serde_json::from_value(value)?;
+                self.validate_conversation_reply(&draft.reply)?;
+                if let Some(actions) = &draft.actions {
+                    ensure!(
+                        (1..=32).contains(&actions.len()),
+                        "A walkthrough needs 1–32 actions"
+                    );
+                    let session = &self
+                        .guided
+                        .as_ref()
+                        .context("Missing workflow snapshot")?
+                        .session;
+                    session.authorize(WorkflowAction::PrepareWalkthrough)?;
+                    for action in actions {
+                        action.validate(
+                            session.spec.as_ref().context("Missing spec")?,
+                            session.plan.as_ref().context("Missing plan")?,
+                        )?;
+                        // argv and file paths are data in their typed slots.
+                        ensure!(
+                            !contains_solution_code(&serde_json::json!([
+                                action.what,
+                                action.why,
+                                action.expected_result
+                            ])),
+                            "Implementation code is hidden in action prose"
+                        );
+                    }
+                    walkthrough_proposal(session, actions.clone())?;
+                }
+                CompanionResponse::WalkthroughDraft(draft)
+            }
+            CompanionAction::ReviewAction => {
+                let draft: ActionAssessmentDraft = serde_json::from_value(value)?;
+                self.validate_conversation_reply(&draft.reply)?;
+                if let Some(assessment) = &draft.assessment {
+                    let guided = self.guided.as_ref().context("Missing review snapshot")?;
+                    parse_action_review_response(
+                        &guided.session,
+                        guided.review.as_ref().context("Missing review evidence")?,
+                        serde_json::to_value(assessment)?,
+                    )?;
+                }
+                CompanionResponse::ActionAssessment(draft)
+            }
             CompanionAction::Delegate => {
                 let input = self
                     .delegation
@@ -447,6 +704,57 @@ impl ModelRequest {
         };
         Ok(response)
     }
+    fn validate_conversation_reply(&self, reply: &ConversationReply) -> Result<()> {
+        reply.validate()?;
+        if let Some(guided) = &self.guided {
+            for finding in &reply.findings {
+                finding.validate(&guided.receipts)?;
+            }
+            if let Some(question) = &reply.question {
+                let mut session = guided.session.clone();
+                session.ask_question(question.clone(), None)?;
+            }
+        } else {
+            ensure!(
+                reply.findings.is_empty(),
+                "Citations require host-supplied receipts"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The host stamps walkthrough identity and scope. A separate final task
+/// assessment becomes available only after all high-level steps are complete.
+pub fn walkthrough_proposal(
+    session: &TaskSession,
+    actions: Vec<GuidedAction>,
+) -> Result<Walkthrough> {
+    session.authorize(WorkflowAction::PrepareWalkthrough)?;
+    let plan = session.plan.as_ref().context("Missing plan")?;
+    let step_id = plan
+        .task
+        .active_step
+        .clone()
+        .or_else(|| {
+            plan.task
+                .steps
+                .iter()
+                .all(|s| s.status == StepStatus::Complete)
+                .then(|| plan.task.steps.last().map(|s| s.id.clone()))
+                .flatten()
+        })
+        .context("No dependency-ready step or final task assessment")?;
+    let walkthrough = Walkthrough {
+        id: new_id(),
+        generation: session.execution_generation,
+        step_id,
+        plan_ref: plan.document_ref(),
+        actions,
+        cursor: 0,
+    };
+    walkthrough.validate(session.spec.as_ref().context("Missing spec")?, plan)?;
+    Ok(walkthrough)
 }
 
 /// Defense in depth for prose channels, not a proof that every semantic answer
@@ -701,6 +1009,7 @@ mod tests {
             model_preference: ModelPreference::Automatic,
             resolved_model: None,
             conversation_id: None,
+            guided: None,
             delegation: None,
             action,
             question: "Explain".into(),

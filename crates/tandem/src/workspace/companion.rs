@@ -414,7 +414,7 @@ impl Workspace {
     }
     pub(super) fn run_companion(
         &mut self,
-        mut action: CompanionAction,
+        action: CompanionAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -438,18 +438,12 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if action == CompanionAction::Ask
-            && ["show ", "give ", "write ", "reveal ", "implement "]
-                .iter()
-                .any(|p| typed.to_lowercase().starts_with(p))
-        {
-            action = CompanionAction::Reveal;
-        }
         let task = self.active_task().cloned();
         let guidance = self.effective_guidance();
         let language = self.companion.language.clone();
         let question = if typed.is_empty() {
             match action{
+            CompanionAction::Discuss | CompanionAction::DraftSpec | CompanionAction::DraftPlan | CompanionAction::PrepareWalkthrough | CompanionAction::ReviewAction => "Use the durable conversation coordinator for this request.".into(),
             CompanionAction::Analyze=>task.as_ref().map(|t|format!("Reassess and revise the plan for: {}",t.goal)).unwrap_or_default(),
             CompanionAction::Guide=>"Guide the current step at my selected level. Explain what to do, why, and how to know it is complete. Keep the implementation hidden.".into(),
             CompanionAction::Hint=>"Give one useful hint for the current step without revealing its implementation.".into(),
@@ -560,6 +554,7 @@ impl Workspace {
             model_preference,
             resolved_model: None,
             conversation_id,
+            guided: None,
             delegation: None,
             action,
             question,

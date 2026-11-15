@@ -94,6 +94,7 @@ fn request() -> ModelRequest {
         model_preference: ModelPreference::Automatic,
         resolved_model: None,
         conversation_id: Some("durable-session".into()),
+        guided: None,
         action: CompanionAction::Ask,
         question: "Explain this decision".into(),
         language: "rust".into(),

@@ -453,6 +453,13 @@ impl Workspace {
                 }
                 body=body.child(panel_metadata(note("Suggestions remain proposals. No source change is authorized by this response."),cx));
             }
+            Some(
+                CompanionResponse::Discussion(_)
+                | CompanionResponse::SpecDraft(_)
+                | CompanionResponse::PlanDraft(_)
+                | CompanionResponse::WalkthroughDraft(_)
+                | CompanionResponse::ActionAssessment(_),
+            ) => {}
             None => {}
         }
         if !requested.is_empty() {

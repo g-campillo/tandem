@@ -92,7 +92,7 @@ fn main() -> Result<()> {
         "{}",
         session.connection.detail
     );
-    let request=ModelRequest{ model_preference: ModelPreference::Automatic, resolved_model: None, conversation_id: Some(new_id()),
+    let request=ModelRequest{ model_preference: ModelPreference::Automatic, resolved_model: None, conversation_id: Some(new_id()), guided: None,
         delegation:None,action:CompanionAction::Analyze,question:"Implement double for values between 0 and 1,000,000. It must return twice the input, including zero. Keep the plan to one meaningful implementation step and keep the solution hidden.".into(),language:"rust".into(),guidance:GuidanceSettings::default().effective(project.key(),"rust",None),task:None,context,evidence:vec![],prior_decisions:vec![]};
     let (run, binding) = session.run(
         ModelRun::pending(project.key().into(), request),

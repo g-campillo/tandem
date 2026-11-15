@@ -2,6 +2,7 @@
 use crate::conversation::{bounded_structure, bounded_text, stable_id};
 use crate::{content_hash, new_id, normalized_relative, now_ms};
 use anyhow::{Result, ensure};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -12,7 +13,7 @@ pub const MAX_RESEARCH_RECEIPTS: u8 = 32;
 pub const MAX_RESEARCH_RECEIPT_BYTES: usize = 64 * 1024;
 pub const MAX_RESEARCH_RETURNED_BYTES: usize = 256 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchRequest {
     /// Minted by the host, not chosen by a model when it cites findings.
@@ -20,13 +21,13 @@ pub struct ResearchRequest {
     pub kind: ResearchRequestKind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum DependencyEcosystem {
     Rust,
     Python,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum InspectionRecipe {
     GitStatus,
     RustWorkspaceMetadata,
@@ -35,7 +36,7 @@ pub enum InspectionRecipe {
     PythonToolchain,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum ResearchRequestKind {
     ListFiles {
@@ -198,7 +199,7 @@ fn validate_public_url_shape(url: &str) -> Result<()> {
 /// A minimal host-created brief, after privacy screening. It intentionally has
 /// no transcript, task documents, local paths or repository-content fields.
 /// Structural validation is not a substitute for that host privacy screening.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublicResearchBrief {
     pub id: String,
@@ -239,7 +240,7 @@ impl PublicResearchBrief {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum SourceLocator {
     FileRange {
@@ -282,7 +283,7 @@ pub enum SourceLocator {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ResearchProvenance {
     ProjectFile,
     Git,
@@ -292,7 +293,7 @@ pub enum ResearchProvenance {
     PublicWeb,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchSource {
     pub id: String,
@@ -302,7 +303,7 @@ pub struct ResearchSource {
     pub provenance: ResearchProvenance,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ResearchReceiptStatus {
     Complete,
     Partial,
@@ -312,14 +313,14 @@ pub enum ResearchReceiptStatus {
     Interrupted,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchOmission {
     pub locator: Option<SourceLocator>,
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchReceiptLimits {
     pub max_content_bytes: usize,
@@ -328,7 +329,7 @@ pub struct ResearchReceiptLimits {
 
 /// Anonymous host retrieval provenance. A hosted-search candidate is not a
 /// retrieval receipt; only a successful bounded GET can populate a body hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublicWebReceipt {
     pub final_url: String,
@@ -339,7 +340,7 @@ pub struct PublicWebReceipt {
 }
 
 /// Observed host execution only. This is never implementation-check evidence.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchCommand {
     pub argv: Vec<String>,
@@ -351,7 +352,7 @@ pub struct ResearchCommand {
     pub timed_out: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchReceipt {
     pub id: String,
@@ -501,7 +502,7 @@ impl ResearchReceipt {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchCitation {
     pub receipt_id: String,
@@ -509,7 +510,7 @@ pub struct ResearchCitation {
     pub locator: SourceLocator,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchFinding {
     pub summary: String,
@@ -553,7 +554,7 @@ impl ResearchFinding {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum PublicSearchAction {
     Other,
@@ -569,12 +570,12 @@ pub enum PublicSearchAction {
         pattern: Option<String>,
     },
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum PublicSearchPhase {
     Started,
     Completed,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublicSearchObservation {
     pub thread_id: String,
@@ -609,7 +610,7 @@ pub enum ResearchActivity {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ResearchStopReason {
     Complete,
     BudgetExhausted,
@@ -617,7 +618,7 @@ pub enum ResearchStopReason {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResearchBudget {
     pub rounds: u8,
     pub requests: u8,

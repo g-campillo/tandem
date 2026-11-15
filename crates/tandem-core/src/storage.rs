@@ -11,6 +11,7 @@ use crate::{
     ThreadBinding, Walkthrough, WorkflowAction, WorkflowBinding, WorkflowDocumentKind,
     WorkflowTransition, new_id, now_ms,
 };
+use crate::{ConversationSnapshot, OperationPhase, SummaryCheckpoint};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -690,6 +691,24 @@ impl Store {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "command", deny_unknown_fields)]
 pub enum SessionCommand {
+    RecordOperationInput {
+        operation_id: String,
+        input_hash: String,
+    },
+    OperationResultHistorical {
+        operation_id: String,
+        detail: String,
+    },
+    OperationPhase {
+        operation_id: String,
+        phase: OperationPhase,
+    },
+    OperationSnapshot {
+        snapshot: ConversationSnapshot,
+    },
+    SummaryCheckpoint {
+        checkpoint: SummaryCheckpoint,
+    },
     HumanMessage {
         text: String,
     },
@@ -778,6 +797,14 @@ pub struct SessionTransition {
     /// publish new artifacts, but identical already-committed retries still work.
     pub operation_id: Option<String>,
     pub authorization: Option<SessionAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definitions: Option<SessionDefinitions>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionDefinitions {
+    pub spec_ref: Option<DocumentRef>,
+    pub plan_ref: Option<DocumentRef>,
 }
 
 impl SessionTransition {
@@ -787,6 +814,7 @@ impl SessionTransition {
             commands,
             operation_id: None,
             authorization: None,
+            definitions: None,
         }
     }
     pub fn for_operation(mut self, operation_id: impl Into<String>) -> Self {
@@ -795,6 +823,13 @@ impl SessionTransition {
     }
     pub fn with_authorization(mut self, action: WorkflowAction, binding: WorkflowBinding) -> Self {
         self.authorization = Some(SessionAuthorization { action, binding });
+        self
+    }
+    pub fn with_definitions(mut self, session: &TaskSession) -> Self {
+        self.definitions = Some(SessionDefinitions {
+            spec_ref: session.spec.as_ref().map(SpecDocument::document_ref),
+            plan_ref: session.plan.as_ref().map(PlanDocument::document_ref),
+        });
         self
     }
 }
@@ -1001,6 +1036,13 @@ impl Store {
         row.map(|data| serde_json::from_str(&data).context("Operation outcome is damaged"))
             .transpose()
     }
+    pub fn operation_input_hash(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<String>> {
+        self.connection.query_row("SELECT json_extract(data,'$.payload.input_hash') FROM conversation_event WHERE session_id=?1 AND json_extract(data,'$.payload.type')='OperationInputRecorded' AND json_extract(data,'$.payload.operation_id')=?2",params![session_id,operation_id],|r|r.get(0)).optional().map_err(Into::into)
+    }
 
     pub fn append_user_message(
         &mut self,
@@ -1068,6 +1110,14 @@ impl Store {
             session.sequence == expected_sequence,
             "A newer session state already exists"
         );
+        if let Some(definitions) = &transition.definitions {
+            ensure!(
+                session.spec.as_ref().map(SpecDocument::document_ref) == definitions.spec_ref
+                    && session.plan.as_ref().map(PlanDocument::document_ref)
+                        == definitions.plan_ref,
+                "Document definitions changed while the operation was running"
+            );
+        }
         if let Some(authorization) = &transition.authorization {
             ensure!(
                 session.binding_is_current(authorization.action, &authorization.binding),
@@ -1394,6 +1444,89 @@ fn apply_session_command(
     operation_id: Option<&str>,
 ) -> Result<Option<ConversationEvent>> {
     let event = match command {
+        SessionCommand::RecordOperationInput {
+            operation_id,
+            input_hash,
+        } => {
+            stable_id(operation_id)?;
+            ensure!(
+                input_hash.len() == 64 && input_hash.bytes().all(|c| c.is_ascii_hexdigit()),
+                "Invalid input hash"
+            );
+            session.event(
+                ConversationPayload::OperationInputRecorded {
+                    operation_id: operation_id.clone(),
+                    input_hash: input_hash.clone(),
+                },
+                Some(operation_id.clone()),
+            )?
+        }
+        SessionCommand::OperationResultHistorical {
+            operation_id: id,
+            detail,
+        } => {
+            ensure!(
+                operation_id == Some(id.as_str()),
+                "Historical result requires its active operation fence"
+            );
+            bounded_text(detail, 4096, "Historical result detail")?;
+            session.event(
+                ConversationPayload::OperationResultHistorical {
+                    operation_id: id.clone(),
+                    detail: detail.clone(),
+                },
+                Some(id.clone()),
+            )?
+        }
+        SessionCommand::OperationPhase {
+            operation_id: id,
+            phase,
+        } => {
+            ensure!(
+                operation_id == Some(id.as_str()),
+                "Phase needs its active operation fence"
+            );
+            session.event(
+                ConversationPayload::OperationPhaseChanged {
+                    operation_id: id.clone(),
+                    phase: *phase,
+                },
+                Some(id.clone()),
+            )?
+        }
+        SessionCommand::OperationSnapshot { snapshot } => {
+            ensure!(
+                operation_id == Some(snapshot.operation_id.as_str()),
+                "Snapshot needs its active operation fence"
+            );
+            bounded_structure(snapshot)?;
+            session.event(
+                ConversationPayload::OperationSnapshot {
+                    snapshot: snapshot.clone(),
+                },
+                operation_id.map(str::to_owned),
+            )?
+        }
+        SessionCommand::SummaryCheckpoint { checkpoint } => {
+            bounded_text(&checkpoint.text, 16 * 1024, "History summary")?;
+            let events = connection.prepare("SELECT data FROM conversation_event WHERE session_id=?1 AND sequence>=?2 AND sequence<=?3 ORDER BY sequence")?
+                .query_map(params![session.id, i64::try_from(checkpoint.first_sequence)?, i64::try_from(checkpoint.covered_sequence)?], |r|r.get::<_,String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?.into_iter().map(|s|serde_json::from_str::<ConversationEvent>(&s)).collect::<serde_json::Result<Vec<_>>>()?;
+            ensure!(
+                !events.is_empty()
+                    && events.first().map(|e| e.sequence) == Some(checkpoint.first_sequence)
+                    && events.last().map(|e| e.sequence) == Some(checkpoint.covered_sequence)
+                    && crate::content_hash(&serde_json::to_vec(&events)?)
+                        == checkpoint.covered_hash,
+                "Summary coverage differs from durable history"
+            );
+            session.event(
+                ConversationPayload::SummaryCheckpoint {
+                    checkpoint: checkpoint.clone(),
+                },
+                operation_id.map(str::to_owned),
+            )?
+        }
         SessionCommand::HumanMessage { text } => session.append_human_message(text.clone())?,
         SessionCommand::AssistantMessage { text, run_id } => {
             stable_id(run_id)?;

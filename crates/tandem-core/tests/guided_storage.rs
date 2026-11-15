@@ -161,6 +161,7 @@ fn legacy_run(task: Option<&TaskPlan>) -> String {
         model_preference: ModelPreference::Automatic,
         resolved_model: None,
         conversation_id: None,
+        guided: None,
         action: CompanionAction::Review,
         question: "Check the greeting".into(),
         language: "rust".into(),

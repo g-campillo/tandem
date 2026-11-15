@@ -347,6 +347,7 @@ impl AgentExecution<'_> {
                     model_preference: model_preference.clone(),
                     resolved_model: Some(resolved_model.clone()),
                     conversation_id: Some(run.id.clone()),
+                    guided: None,
                     action: CompanionAction::Delegate,
                     question: run.grant.objective.clone(),
                     language: language.clone(),

@@ -30,6 +30,7 @@ fn request() -> ModelRequest {
         model_preference: ModelPreference::Automatic,
         resolved_model: None,
         conversation_id: None,
+        guided: None,
         delegation: None,
         action: CompanionAction::Guide,
         question: "Explain the next step".into(),
