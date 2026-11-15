@@ -10,7 +10,6 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
-use tandem_companion::ConversationIntent;
 
 pub struct Field {
     key: String,
@@ -252,7 +251,7 @@ impl Workspace {
             Ok(()) => {
                 self.reload_conversation(false, window, cx);
                 self.companion.tab = CompanionTab::Conversation;
-                self.start_conversation(ConversationIntent::PrepareWalkthrough, window, cx);
+                self.continue_walkthrough(window, cx);
             }
             Err(e) => {
                 self.companion.status = e.to_string();

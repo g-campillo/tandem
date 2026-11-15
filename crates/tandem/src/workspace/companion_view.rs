@@ -26,7 +26,7 @@ impl Workspace {
                 .child(path_button(Button::new("explanation-preference"), format!("Explanation override: {}",patch.explanation.map(|p|format!("{p}")).unwrap_or("Inherit".into()))).on_click(cx.listener(|this,_,_,cx|this.change_guidance("explanation",cx))))
                 .child(path_button(Button::new("solution-preference"), format!("Solution override: {}",patch.solution.map(|p|format!("{p}")).unwrap_or("Inherit".into()))).on_click(cx.listener(|this,_,_,cx|this.change_guidance("solution",cx))))
                 .child(path_button(Button::new("reset-guidance"), "Reset This Scope to Inherited").on_click(cx.listener(|this,_,_,cx|this.change_guidance("reset",cx))))
-                .child(note("AutomaticPreview is a standing request for a solution when this step/language becomes active. It still grants no source-edit authority. Hidden and OnRequest both keep implementation content out until you reveal it.")))
+                .child(note("AutomaticPreview is a standing request for a suggestion for the current action/language after document approvals and Start. It still grants no source-edit authority. Hidden and OnRequest both keep implementation content out until you reveal it.")))
             .into_any_element()
     }
 }

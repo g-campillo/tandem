@@ -9,6 +9,7 @@ mod conversation_view;
 mod documents_view;
 mod panels;
 mod research_adapter;
+mod walkthrough_view;
 use companion::CompanionUi;
 mod provider;
 mod tools;
@@ -21,7 +22,7 @@ use gpui_kit::*;
 use notify::Watcher as _;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tandem_core::*;
@@ -170,7 +171,10 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
         }
         if let Some(cancel) = &v.companion.cancel {
             cancel.store(true, Ordering::Relaxed);
-            v.companion.status = "Cancellation requested.".into();
+            if let Some(op) = &mut v.companion.foreground {
+                op.stop();
+            }
+            v.companion.status = "Stopping…".into();
             c.notify();
         }
     });
@@ -232,6 +236,7 @@ pub struct Workspace {
     loading: bool,
     copy_inflight: bool,
     disk_events: Arc<AtomicBool>,
+    source_generation: Arc<AtomicU64>,
     _watcher: Option<notify::RecommendedWatcher>,
     _subscriptions: Vec<Subscription>,
     terminal: Option<Entity<TerminalView>>,
@@ -308,6 +313,7 @@ impl Workspace {
             loading: false,
             copy_inflight: false,
             disk_events: Arc::new(AtomicBool::new(false)),
+            source_generation: Arc::new(AtomicU64::new(0)),
             _watcher: None,
             _subscriptions: vec![appearance, subscription],
             terminal: None,
@@ -605,9 +611,9 @@ impl Workspace {
                         view.set_sidebar(Sidebar::Files, window, cx);
                         for document in loaded.documents { view.add_tab(document, window, cx); }
                         view.active = loaded.state.active.and_then(|path| view.tabs.iter().position(|t| t.document.path == path)).or_else(|| (!view.tabs.is_empty()).then_some(0));
-                        let signal = view.disk_events.clone(); let watched_root = loaded.project.root.clone();
+                        let signal = view.disk_events.clone(); let source_generation=view.source_generation.clone(); let watched_root = loaded.project.root.clone();
                         if let Ok(mut watcher) = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                            if let Ok(event) = event && event.paths.iter().any(|path| !path.strip_prefix(&watched_root).unwrap_or(path).components().any(|part| matches!(part.as_os_str().to_str(), Some("target" | ".git" | "node_modules" | ".tandem-local")))) { signal.store(true, Ordering::Relaxed); }
+                            if let Ok(event) = event && event.paths.iter().any(|path| !path.strip_prefix(&watched_root).unwrap_or(path).components().any(|part| matches!(part.as_os_str().to_str(), Some("target" | ".git" | "node_modules" | ".tandem-local")))) { source_generation.fetch_add(1,Ordering::Relaxed); signal.store(true, Ordering::Relaxed); }
                         }) && watcher.watch(&loaded.project.root, notify::RecursiveMode::Recursive).is_ok() { view._watcher = Some(watcher); }
                         view.recent.retain(|root| root != loaded.project.key()); view.recent.insert(0, loaded.project.key().into()); view.recent.truncate(12);
                         let recovered = view.tabs.iter().filter(|t| t.document.recovered).count();

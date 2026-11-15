@@ -722,15 +722,16 @@ impl Workspace {
             recipe.id.clone(),
             recipe.fingerprint.clone(),
         );
-        if let Some(task) = self
-            .dev
-            .tasks
-            .iter()
-            .find(|t| Some(&t.id) == self.dev.selected_task.as_ref())
-        {
+        if let Some(task) = self.active_task() {
             record.task_id = Some(task.id.clone());
             record.step_id = task.active_step.clone();
-            record.plan_revision = Some(task.revision);
+            record.plan_revision = Some(
+                self.companion
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.plan.as_ref())
+                    .map_or(task.revision, |p| p.revision),
+            );
         }
         let stored = self.store.lock().unwrap().save_check(&record);
         if let Err(e) = stored {

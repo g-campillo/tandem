@@ -12,6 +12,8 @@ use std::collections::BTreeSet;
 
 pub(super) struct AgentUi {
     pub busy: bool,
+    operation_id: Option<String>,
+    preparing: bool,
     pub cancel: Option<Arc<AtomicBool>>,
     pub updates: Option<Arc<Mutex<Option<AgentRun>>>>,
     pub runs: Vec<AgentRun>,
@@ -26,7 +28,7 @@ pub(super) struct AgentUi {
 }
 impl AgentUi {
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
-        Self {busy:false,cancel:None,updates:None,runs:vec![],selected:None,imports:vec![],scope:DelegationScope::Step,
+        Self {busy:false,operation_id:None,preparing:false,cancel:None,updates:None,runs:vec![],selected:None,imports:vec![],scope:DelegationScope::Step,
             paths:cx.new(|cx|TextareaState::new(window,cx).rows(4).placeholder("Exact relative paths, one per line")), checks:BTreeSet::new(),status:"Prepare a scope before delegating. Source changes stay isolated until you import them.".into(),preview:None,undo:None}
     }
     fn selected(&self) -> Option<&AgentRun> {
@@ -177,6 +179,9 @@ impl Workspace {
         let cancel = Arc::new(AtomicBool::new(false));
         self.agent.cancel = Some(cancel.clone());
         self.agent.busy = true;
+        self.agent.preparing = true;
+        let operation_id = new_id();
+        self.agent.operation_id = Some(operation_id.clone());
         self.agent.preview = None;
         self.agent.status = "Capturing isolated working source…".into();
         let store = self.store.clone();
@@ -191,9 +196,10 @@ impl Workspace {
         cx.spawn(async move |view, cx| {
             let result = operation.await;
             let _ = view.update(cx, |view, cx| {
-                if view.epoch != epoch {
+                if view.epoch != epoch || view.agent.operation_id.as_ref() != Some(&operation_id) {
                     return;
                 }
+                view.agent.operation_id = None;
                 view.agent.busy = false;
                 view.agent.cancel = None;
                 match result {
@@ -262,6 +268,9 @@ impl Workspace {
         let cancel = Arc::new(AtomicBool::new(false));
         let updates = Arc::new(Mutex::new(None));
         self.agent.busy = true;
+        self.agent.preparing = false;
+        let operation_id = new_id();
+        self.agent.operation_id = Some(operation_id.clone());
         self.agent.cancel = Some(cancel.clone());
         self.agent.updates = Some(updates.clone());
         self.agent.preview = None;
@@ -306,7 +315,7 @@ impl Workspace {
             }
             result
         });
-        cx.spawn(async move|view,cx|{let result=operation.await;let _=view.update(cx,|view,cx|{if view.epoch!=epoch{return;}view.agent.busy=false;view.agent.cancel=None;view.agent.updates=None;match result{Ok(run)=>view.receive_agent(run,cx),Err(e)=>view.agent.status=format!("Handoff persistence failed: {e}. Do not replay; inspect recovery state.")};if let Some(p)=&view.project{view.dev.checks=view.store.lock().unwrap().checks(p.key()).unwrap_or_default();}view.invalidate_companion(cx);cx.notify();});}).detach();
+        cx.spawn(async move|view,cx|{let result=operation.await;let _=view.update(cx,|view,cx|{if view.epoch!=epoch || view.agent.operation_id.as_ref()!=Some(&operation_id){return;}view.agent.operation_id=None;view.agent.busy=false;view.agent.cancel=None;view.agent.updates=None;match result{Ok(run)=>view.receive_agent(run,cx),Err(e)=>view.agent.status=format!("Handoff persistence failed: {e}. Do not replay; inspect recovery state.")};if let Some(p)=&view.project{view.dev.checks=view.store.lock().unwrap().checks(p.key()).unwrap_or_default();}view.invalidate_companion(cx);cx.notify();});}).detach();
         cx.notify();
     }
     pub(super) fn agent_preview(
@@ -538,7 +547,7 @@ impl Workspace {
             .child(Textarea::new(&self.agent.paths).aria_label("Delegated source paths"))
             .child(note("Empty paths use the selected step/feature files. Preparation captures current buffers, including unsaved work. Editing these fields does not change an already prepared grant; prepare again to change its scope."))
             .children(self.dev.recipes.iter().map(|r|{let id=r.id.clone();let selected=self.agent.checks.contains(&id);navigation_button(path_button(Button::new(SharedString::from(format!("agent-check:{id}"))), format!("{} {}",if selected{"✓"}else{"○"},r.title)),selected,cx).disabled(busy).on_click(cx.listener(move|this,_,_,cx|{if !this.agent.checks.remove(&id){this.agent.checks.insert(id.clone());}cx.notify();}))}))
-            .child(path_button(Button::new("prepare-agent"), "Prepare Delegation Scope").primary().disabled(busy||self.active_task().is_none()).on_click(cx.listener(|this,_,_,cx|this.prepare_agent(cx))));
+            .child(path_button(Button::new("prepare-agent"), if self.agent.busy && self.agent.preparing {"Capturing delegation inputs…"}else if busy {"Prepare Delegation Scope · Another operation is active"}else{"Prepare Delegation Scope"}).loading(self.agent.busy && self.agent.preparing).primary().disabled(busy||self.active_task().is_none()).on_click(cx.listener(|this,_,_,cx|this.prepare_agent(cx))));
         if let Some(run) = selected {
             body=body.child(panel_heading(note(format!("{:?} · {:?} · round {}/{} · plan {}",run.status,run.grant.scope,run.round,run.grant.max_rounds,run.grant.plan_revision))).when(run.status==AgentStatus::Failed,|d|d.text_color(p.error)).mt_3().pt_3().border_t_1().border_color(cx.theme().border))
                 .child(div().font_semibold().child(note(run.grant.objective.clone()))).child(note(format!("Exact writable paths: {}",run.grant.paths.join(", "))))
@@ -569,8 +578,13 @@ impl Workspace {
                         d.child(
                             path_button(
                                 Button::new("authorize-agent"),
-                                "Authorize Scope & Start Takeover",
+                                if self.agent.busy && !self.agent.preparing {
+                                    "Takeover running…"
+                                } else {
+                                    "Authorize Scope & Start Takeover"
+                                },
                             )
+                            .loading(self.agent.busy && !self.agent.preparing)
                             .primary()
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| this.start_agent(cx))),

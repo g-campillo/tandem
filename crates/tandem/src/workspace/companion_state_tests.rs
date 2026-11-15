@@ -6,6 +6,7 @@ fn every_implementation_route_requires_current_approvals_and_start() {
     for action in [
         CompanionAction::Guide,
         CompanionAction::Hint,
+        CompanionAction::Explain,
         CompanionAction::Review,
         CompanionAction::Reveal,
         CompanionAction::Delegate,
@@ -22,7 +23,6 @@ fn every_implementation_route_requires_current_approvals_and_start() {
         CompanionAction::Analyze,
         CompanionAction::Ask,
         CompanionAction::Discuss,
-        CompanionAction::Explain,
         CompanionAction::DraftSpec,
         CompanionAction::DraftPlan,
     ] {
@@ -337,7 +337,8 @@ fn with_actions(session: &mut TaskSession) {
 }
 #[test]
 fn command_matrix_tracks_each_approval_start_and_document_replacement() {
-    let (_dir, mut store, session) = approved();
+    let (_dir, mut store, mut session) = approved();
+    with_actions(&mut session);
     let routes = [
         CompanionAction::Guide,
         CompanionAction::Hint,
@@ -1261,4 +1262,1057 @@ fn clean_initial_document_accepts_a_proposal_and_history_shows_actual_measuremen
     ] {
         assert!(text.contains(expected), "Missing {expected}");
     }
+}
+
+#[test]
+fn local_operation_loading_belongs_only_to_its_initiator_and_cleanup_is_fenced() {
+    let mut operation =
+        ForegroundOperation::new("one".into(), "session".into(), CompanionAction::Review);
+    for phase in [
+        OperationPhase::PreservingInput,
+        OperationPhase::CapturingContext,
+        OperationPhase::CheckingAccount,
+        OperationPhase::CheckingModels,
+        OperationPhase::ReadingSource,
+        OperationPhase::SearchingSource,
+        OperationPhase::InspectingSource,
+        OperationPhase::PublicSearch,
+        OperationPhase::PublicRetrieval,
+        OperationPhase::Discussing,
+        OperationPhase::DraftingSpec,
+        OperationPhase::DraftingPlan,
+        OperationPhase::PreparingAction,
+        OperationPhase::Reviewing,
+        OperationPhase::Revealing,
+        OperationPhase::Stopping,
+    ] {
+        operation.phase = phase;
+        let own = operation.button(CompanionAction::ReviewAction, "Review");
+        assert!(own.loading && own.disabled);
+        assert!(own.label.contains(phase_label(phase)));
+        let other = operation.button(CompanionAction::DraftSpec, "Draft Spec");
+        assert!(!other.loading && other.disabled);
+        assert!(other.label.contains("Another operation is active"));
+    }
+    operation.stop();
+    assert_eq!(operation.phase, OperationPhase::Stopping);
+    assert!(!operation.owns("old", "session"));
+    assert!(!operation.owns("one", "other-session"));
+    assert!(operation.owns("one", "session"));
+    assert!(
+        operation
+            .button(CompanionAction::Review, "Review")
+            .label
+            .contains("Stopping")
+    );
+    operation.control = Some("answer:choice".into());
+    assert!(operation.control_button("answer:choice", "Answer").loading);
+    assert!(!operation.control_button("answer:other", "Answer").loading);
+    assert!(!operation.button(CompanionAction::Review, "Review").loading);
+    let send = ForegroundOperation::new("send".into(), "session".into(), CompanionAction::Ask);
+    assert!(send.button(CompanionAction::Ask, "Send").loading);
+    assert!(
+        !send
+            .button(CompanionAction::Analyze, "Analyze / discuss")
+            .loading
+    );
+}
+
+#[test]
+fn exact_recipe_matching_never_substitutes_the_models_command() {
+    let (_, _, session) = approved();
+    let mut action = support::fixture_walkthrough(&session).actions.remove(0);
+    let recipe = tandem_checks::Recipe {
+        id: "cargo-check".into(),
+        title: "Check".into(),
+        argv: vec!["/tools/cargo".into(), "check".into()],
+        fingerprint: "recipe".into(),
+        grant_fingerprint: "grant".into(),
+        language: "rust".into(),
+        version: "test".into(),
+        read_roots: vec![],
+    };
+    action.kind = GuidedActionKind::Command;
+    action.target = ActionTarget::Command {
+        argv: recipe.argv.clone(),
+        cwd: ".".into(),
+        expected_exit_codes: vec![0],
+    };
+    assert_eq!(
+        matching_action_recipe(&action, std::slice::from_ref(&recipe)),
+        Some("cargo-check")
+    );
+    for argv in [
+        vec!["cargo".into(), "check".into()],
+        vec!["/tools/cargo".into(), "test".into()],
+        vec!["/tools/cargo".into(), "check".into(), "{artifacts}".into()],
+    ] {
+        action.target = ActionTarget::Command {
+            argv,
+            cwd: ".".into(),
+            expected_exit_codes: vec![0],
+        };
+        assert!(matching_action_recipe(&action, std::slice::from_ref(&recipe)).is_none());
+    }
+    action.target = ActionTarget::Command {
+        argv: recipe.argv.clone(),
+        cwd: "subdir".into(),
+        expected_exit_codes: vec![0],
+    };
+    assert!(matching_action_recipe(&action, &[recipe]).is_none());
+}
+
+#[test]
+fn attachment_draft_requires_explicit_exact_argv_and_preserves_incomplete_input() {
+    let draft = OutputAttachmentDraft {
+        command: "[\"cargo\",\"test\"]".into(),
+        cwd: ".".into(),
+        exit: "unknown".into(),
+        stdout: "retained output\n".into(),
+        stderr: "retained error\n".into(),
+    };
+    assert!(draft.attachment().is_err());
+    assert_eq!(draft.stdout, "retained output\n");
+    let mut valid = draft.clone();
+    valid.exit = "1".into();
+    let attachment = valid.attachment().unwrap();
+    assert_eq!(attachment.argv, ["cargo", "test"]);
+    assert_eq!(attachment.exit_code, 1);
+    assert_eq!(attachment.stderr, "retained error\n");
+    valid.command = "cargo test".into();
+    assert!(
+        valid.attachment().is_err(),
+        "no implicit shell parsing or execution"
+    );
+}
+
+fn ui_walk_fixture() -> (tempfile::TempDir, Store, TaskSession, Project) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("greeting.rs"),
+        "// existing user's implementation\n",
+    )
+    .unwrap();
+    let project = Project::open(&root).unwrap();
+    let mut store = Store::open(&dir.path().join("state")).unwrap();
+    let mut task = TaskPlan::new(
+        project.key().into(),
+        "Greeting".into(),
+        vec!["Greeting works".into()],
+        vec!["Implement".into(), "Exercise".into()],
+    )
+    .unwrap();
+    for step in &mut task.steps {
+        step.done_when = vec!["Greeting is available".into()];
+        step.files = vec!["greeting.rs".into()];
+        step.languages = vec!["rust".into()];
+    }
+    let session = support::approved_session(&mut store, task).unwrap();
+    (dir, store, session, project)
+}
+fn save_ui_walk(store: &mut Store, session: &TaskSession) -> TaskSession {
+    let mut walk = support::fixture_walkthrough(session);
+    let active = session
+        .plan
+        .as_ref()
+        .unwrap()
+        .task
+        .active_step
+        .as_ref()
+        .unwrap();
+    walk.step_id = active.clone();
+    if let ActionTarget::Validation {
+        step_id,
+        criterion_refs,
+        ..
+    } = &mut walk.actions[1].target
+    {
+        *step_id = Some(active.clone());
+        *criterion_refs = vec![CriterionRef::StepDoneWhen {
+            step_id: active.clone(),
+            index: 0,
+        }];
+        walk.actions[1].required_evidence = vec![RequiredActionEvidence::CriterionAssessment {
+            criterion_ref: criterion_refs[0].clone(),
+        }];
+    }
+    store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveWalkthrough { walkthrough: walk }],
+            ),
+        )
+        .unwrap()
+}
+fn ui_capture(
+    dir: &tempfile::TempDir,
+    store: &Store,
+    session: &TaskSession,
+    project: &Project,
+) -> (ActionReviewInput, EffectiveGuidance) {
+    use tandem_companion::ConversationCapture;
+    let guidance = GuidanceSettings::default().effective(
+        project.key(),
+        "rust",
+        session.plan.as_ref().map(|p| &p.task),
+    );
+    let mut capture = tandem_companion::ProjectConversationCapture {
+        project: project.clone(),
+        overlays: vec![],
+        selected: vec![],
+        cache: dir.path().join("capture"),
+        check_environment: None,
+        recipe_ids: vec![],
+        attachments: vec![],
+    };
+    let input = capture
+        .capture(
+            session,
+            CompanionAction::ReviewAction,
+            "rust",
+            &guidance,
+            &[],
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap()
+        .review
+        .unwrap();
+    (
+        super::super::companion::authenticate_capture(store, session, input, "rust", &guidance)
+            .unwrap(),
+        guidance,
+    )
+}
+fn ui_review(
+    store: &mut Store,
+    session: &TaskSession,
+    input: &ActionReviewInput,
+    outcome: Option<OperationOutcome>,
+) -> (TaskSession, ActionReview, String) {
+    let operation_id = new_id();
+    let session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::BeginOperation {
+                    operation: SessionOperation {
+                        id: operation_id.clone(),
+                        session_id: session.id.clone(),
+                        kind: SessionOperationKind::ReviewAction,
+                        started_at_ms: now_ms(),
+                    },
+                }],
+            ),
+        )
+        .unwrap();
+    let assessments = session
+        .current_action()
+        .unwrap()
+        .1
+        .required_evidence
+        .iter()
+        .filter_map(|r| match r {
+            RequiredActionEvidence::CriterionAssessment { criterion_ref } => {
+                Some(ActionCriterionAssessment {
+                    criterion_ref: criterion_ref.clone(),
+                    satisfied: true,
+                    explanation: "Captured implementation meets the named criterion".into(),
+                    evidence_ids: vec![],
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    let review = ActionReview {
+        id: new_id(),
+        binding: input.binding.clone(),
+        outcome: ActionReviewOutcome::Passed,
+        summary: "Captured inputs satisfy this action".into(),
+        findings: vec![],
+        evidence_used: vec![],
+        limitations: vec![],
+        assessments,
+        reviewed_at_ms: now_ms(),
+    };
+    let mut session = store
+        .record_action_review(&session.id, &review, input, Some(&operation_id))
+        .unwrap();
+    if let Some(outcome) = outcome {
+        session = store
+            .apply_session_transition(
+                &session.id,
+                session.sequence,
+                &SessionTransition::new(
+                    new_id(),
+                    vec![SessionCommand::FinishOperation {
+                        operation_id: operation_id.clone(),
+                        outcome,
+                    }],
+                ),
+            )
+            .unwrap();
+    }
+    let review = store.current_action_review(&session).unwrap().unwrap().0;
+    (session, review, operation_id)
+}
+#[test]
+fn start_queues_first_action_next_is_atomic_and_dependency_ready_step_queues_automatically() {
+    let (dir, mut store, mut session, project) = ui_walk_fixture();
+    assert_eq!(
+        walkthrough_continuation(&session),
+        WalkthroughContinuation::PrepareAction,
+        "the production Start continuation queues a preparation"
+    );
+    session = save_ui_walk(&mut store, &session);
+    let first = session.current_action().unwrap().1.id.clone();
+    assert_eq!(
+        walkthrough_continuation(&session),
+        WalkthroughContinuation::DisplayAction
+    );
+    assert!(
+        current_action_summary(&session)
+            .join("\n")
+            .contains("Implement the named behavior")
+    );
+    assert!(
+        !current_action_summary(&session)
+            .join("\n")
+            .contains("Assess the implementation"),
+        "future action omitted from ordinary/accessibility rows"
+    );
+    let (input, guidance) = ui_capture(&dir, &store, &session, &project);
+    let (mut session, review, op) = ui_review(&mut store, &session, &input, None);
+    let (stored, pending) = store.current_action_review(&session).unwrap().unwrap();
+    assert!(!current_review_candidate(
+        &session,
+        &stored,
+        pending.as_ref(),
+        "rust",
+        &guidance
+    ));
+    assert!(
+        advance_review(&mut store, &session, &review, &input).is_err(),
+        "a stored result is not yet a completed operation"
+    );
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::FinishOperation {
+                    operation_id: op,
+                    outcome: OperationOutcome::Completed {
+                        summary: "Reviewed".into(),
+                    },
+                }],
+            ),
+        )
+        .unwrap();
+    let (stored, completed) = store.current_action_review(&session).unwrap().unwrap();
+    assert!(current_review_candidate(
+        &session,
+        &stored,
+        completed.as_ref(),
+        "rust",
+        &guidance
+    ));
+    assert!(!current_review_candidate(
+        &session,
+        &stored,
+        completed.as_ref(),
+        "python",
+        &guidance
+    ));
+    let (fresh, _) = ui_capture(&dir, &store, &session, &project);
+    let next = advance_review(&mut store, &session, &review, &fresh).unwrap();
+    let duplicate = advance_review(&mut store, &session, &review, &fresh).unwrap();
+    assert_eq!(next.current_action().unwrap().0.cursor, 1);
+    assert_eq!(duplicate.current_action().unwrap().0.cursor, 1);
+    assert_ne!(duplicate.current_action().unwrap().1.id, first);
+    let (input, _) = ui_capture(&dir, &store, &next, &project);
+    let (session, review, _) = ui_review(
+        &mut store,
+        &next,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Step reviewed".into(),
+        }),
+    );
+    let next = advance_review(&mut store, &session, &review, &input).unwrap();
+    assert_eq!(
+        next.plan.as_ref().unwrap().task.steps[0].status,
+        StepStatus::Complete
+    );
+    assert_eq!(
+        next.plan.as_ref().unwrap().task.active_step,
+        Some(next.plan.as_ref().unwrap().task.steps[1].id.clone())
+    );
+    assert_eq!(
+        walkthrough_continuation(&next),
+        WalkthroughContinuation::PrepareAction
+    );
+    let next = save_ui_walk(&mut store, &next);
+    assert_eq!(next.current_action().unwrap().0.cursor, 0);
+    let id = next.id.clone();
+    let action = next.current_action().unwrap().1.id.clone();
+    drop(store);
+    let store = Store::open(&dir.path().join("state")).unwrap();
+    let restored = store.load_session(&id).unwrap().unwrap();
+    assert_eq!(restored.current_action().unwrap().1.id, action);
+    assert_eq!(
+        walkthrough_continuation(&restored),
+        WalkthroughContinuation::DisplayAction
+    );
+    assert!(
+        !restored.implementation_complete(),
+        "final task validation is still required"
+    );
+}
+#[test]
+fn next_recaptures_real_source_and_blocks_old_review_even_without_ui_notifications() {
+    let (dir, mut store, session, project) = ui_walk_fixture();
+    let session = save_ui_walk(&mut store, &session);
+    let (input, _) = ui_capture(&dir, &store, &session, &project);
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Reviewed".into(),
+        }),
+    );
+    std::fs::write(
+        project.root.join("greeting.rs"),
+        "// changed externally after the review\n",
+    )
+    .unwrap();
+    let (fresh, _) = ui_capture(&dir, &store, &session, &project);
+    assert!(advance_review(&mut store, &session, &review, &fresh).is_err());
+    assert_eq!(
+        store
+            .load_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .current_action()
+            .unwrap()
+            .0
+            .cursor,
+        0
+    );
+}
+#[test]
+fn cancelled_failed_interrupted_reviews_never_enable_next_and_restart_preserves_action() {
+    for outcome in [
+        OperationOutcome::Cancelled {
+            detail: "Cancelled".into(),
+        },
+        OperationOutcome::Interrupted {
+            detail: "Lost connection".into(),
+        },
+        OperationOutcome::Failed {
+            detail: "Malformed response or unavailable model".into(),
+        },
+    ] {
+        let (dir, mut store, session, project) = ui_walk_fixture();
+        let session = save_ui_walk(&mut store, &session);
+        let (input, guidance) = ui_capture(&dir, &store, &session, &project);
+        let (session, review, _) = ui_review(&mut store, &session, &input, Some(outcome));
+        let (stored, outcome) = store.current_action_review(&session).unwrap().unwrap();
+        assert!(!current_review_candidate(
+            &session,
+            &stored,
+            outcome.as_ref(),
+            "rust",
+            &guidance
+        ));
+        assert!(advance_review(&mut store, &session, &review, &input).is_err());
+    }
+}
+
+#[test]
+fn deliberate_output_is_unvalidated_exact_scoped_immutable_evidence_and_replacement_invalidates_next()
+ {
+    let (dir, mut store, mut session, project) = ui_walk_fixture();
+    let mut walk = support::fixture_walkthrough(&session);
+    let command = &mut walk.actions[0];
+    command.kind = GuidedActionKind::Command;
+    command.target = ActionTarget::Command {
+        argv: vec!["cargo".into(), "test".into()],
+        cwd: ".".into(),
+        expected_exit_codes: vec![0],
+    };
+    command.required_evidence = vec![RequiredActionEvidence::CommandReceipt];
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveWalkthrough { walkthrough: walk }],
+            ),
+        )
+        .unwrap();
+    let (empty, guidance) = ui_capture(&dir, &store, &session, &project);
+    let draft = OutputAttachmentDraft {
+        command: "[\"cargo\",\"test\"]".into(),
+        cwd: ".".into(),
+        exit: "0".into(),
+        stdout: "complete output\n".into(),
+        stderr: "".into(),
+    };
+    let capture = || {
+        tandem_companion::capture_action_context(
+            &session,
+            &project,
+            &[],
+            &[],
+            &dir.path().join("evidence"),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap()
+    };
+    let receipt = tandem_companion::attach_action_output(
+        empty.scope(),
+        &capture(),
+        draft.attachment().unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        receipt.provenance,
+        CommandProvenance::UserAttachedOutput
+    ));
+    assert_eq!(receipt.status, CheckStatus::Unvalidated);
+    assert!(receipt.recipe_id.is_none() && receipt.recipe_fingerprint.is_none());
+    let input_with = |receipt: ActionCommandEvidence| {
+        let c = capture();
+        ActionReviewInput::capture(
+            &session,
+            c.context,
+            c.targets,
+            vec![receipt],
+            "rust",
+            &guidance,
+        )
+        .unwrap()
+    };
+    let input = input_with(receipt.clone());
+    let action = session.current_action().unwrap().1;
+    assert_eq!(input.evidence_gate(action).0, ActionReviewOutcome::Passed);
+    assert_eq!(
+        empty.evidence_gate(action).0,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    let mut wrong = receipt.clone();
+    wrong.argv = vec!["cargo".into(), "check".into()];
+    assert_eq!(
+        input_with(wrong).evidence_gate(action).0,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    let mut wrong = receipt.clone();
+    wrong.cwd = "subdir".into();
+    assert_eq!(
+        input_with(wrong).evidence_gate(action).0,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    let mut failed = receipt.clone();
+    failed.exit_code = Some(1);
+    assert_eq!(
+        input_with(failed).evidence_gate(action).0,
+        ActionReviewOutcome::NeedsChanges
+    );
+    let mut truncated = receipt.clone();
+    truncated.truncated = true;
+    assert_eq!(
+        input_with(truncated).evidence_gate(action).0,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    let mut running = receipt.clone();
+    running.status = CheckStatus::Running;
+    running.completed_at_ms = None;
+    assert_eq!(
+        input_with(running).evidence_gate(action).0,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    let replacement = tandem_companion::attach_action_output(
+        empty.scope(),
+        &capture(),
+        draft.attachment().unwrap(),
+    )
+    .unwrap();
+    assert_ne!(receipt.id, replacement.id);
+    let replaced_input = input_with(replacement.clone());
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Attached output assessed".into(),
+        }),
+    );
+    assert!(advance_review(&mut store, &session, &review, &replaced_input).is_err());
+    store
+        .record_action_attachment(&session.id, &replacement, &input.binding)
+        .unwrap();
+    assert!(
+        advance_review(&mut store, &session, &review, &input).is_err(),
+        "a replacement saved after fresh capture is rechecked by the Next transaction"
+    );
+    let mut late_receipt = receipt.clone();
+    late_receipt.id = new_id();
+    let late_input = input_with(late_receipt);
+    let mut late_review = review.clone();
+    late_review.id = new_id();
+    late_review.binding = late_input.binding.clone();
+    assert!(
+        store
+            .record_action_review(&session.id, &late_review, &late_input, None)
+            .is_err(),
+        "a late model result cannot select older output over an explicit replacement"
+    );
+    assert_eq!(
+        store
+            .current_action_attachment(&session)
+            .unwrap()
+            .unwrap()
+            .id,
+        replacement.id
+    );
+    std::fs::write(
+        project.root.join("greeting.rs"),
+        "// new inputs require rerun\n",
+    )
+    .unwrap();
+    let c = tandem_companion::capture_action_context(
+        &session,
+        &project,
+        &[],
+        &[],
+        &dir.path().join("evidence"),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    let stale = ActionReviewInput::capture(
+        &session,
+        c.context,
+        c.targets,
+        vec![receipt],
+        "rust",
+        &guidance,
+    )
+    .unwrap();
+    assert_eq!(
+        stale.evidence_gate(session.current_action().unwrap().1).0,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    assert_eq!(
+        draft.stdout, "complete output\n",
+        "review failures never consume the attachment draft"
+    );
+}
+
+#[test]
+fn local_check_capture_retains_original_action_and_record_version_for_cumulative_review() {
+    let (dir, mut store, session, project) = ui_walk_fixture();
+    let session = save_ui_walk(&mut store, &session);
+    let (mut input, guidance) = ui_capture(&dir, &store, &session, &project);
+    let mut record =
+        CheckRecord::pending(project.key().into(), "cargo-check".into(), "recipe".into());
+    record.task_id = Some(session.plan.as_ref().unwrap().task.id.clone());
+    record.step_id = session.plan.as_ref().unwrap().task.active_step.clone();
+    record.plan_revision = Some(session.plan.as_ref().unwrap().revision);
+    store.save_check(&record).unwrap();
+    assert_eq!(
+        store.check_action_scope(&record.id).unwrap(),
+        Some(input.scope())
+    );
+    let unrelated =
+        CheckRecord::pending(project.key().into(), "cargo-check".into(), "recipe".into());
+    store.save_check(&unrelated).unwrap();
+    let checks =
+        super::super::companion::action_checks(&store, &session, &[record.clone(), unrelated])
+            .unwrap();
+    assert_eq!(
+        checks.len(),
+        1,
+        "unbound checks cannot consume the action evidence budget"
+    );
+    let captured = tandem_companion::capture_action_context(
+        &session,
+        &project,
+        &[],
+        &[],
+        &dir.path().join("receipt"),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    record.sequence += 1;
+    record.command = vec!["/tools/cargo".into(), "check".into()];
+    record.snapshot = Some(captured.snapshot);
+    record.snapshot_unchanged = Some(true);
+    record.status = CheckStatus::Passed;
+    record.exit_code = Some(0);
+    record.output = "complete local result".into();
+    record.completed_at_ms = Some(now_ms());
+    store.save_check(&record).unwrap();
+    input
+        .context
+        .validation_environments
+        .insert("cargo-check".into(), "recipe".into());
+    let scope = input.scope();
+    input = ActionReviewInput::capture(
+        &session,
+        input.context,
+        input.targets,
+        vec![ActionCommandEvidence::from_local_check(scope, &record).unwrap()],
+        "rust",
+        &guidance,
+    )
+    .unwrap();
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Reviewed".into(),
+        }),
+    );
+    let next = advance_review(&mut store, &session, &review, &input).unwrap();
+    let (mut current, _) = ui_capture(&dir, &store, &next, &project);
+    current
+        .context
+        .validation_environments
+        .insert("cargo-check".into(), "recipe".into());
+    let temporarily_scoped =
+        ActionCommandEvidence::from_local_check(current.scope(), &record).unwrap();
+    let input = ActionReviewInput::capture(
+        &next,
+        current.context,
+        current.targets,
+        vec![temporarily_scoped],
+        "rust",
+        &guidance,
+    )
+    .unwrap();
+    let authenticated =
+        super::super::companion::authenticate_capture(&store, &next, input, "rust", &guidance)
+            .unwrap();
+    assert_eq!(authenticated.commands[0].scope, review.binding.scope());
+    assert_ne!(authenticated.commands[0].scope, authenticated.scope());
+    assert!(
+        matches!(&authenticated.commands[0].provenance,CommandProvenance::LocalCheck {check_id,check_hash,..} if check_id==&record.id && *check_hash==content_hash(&serde_json::to_vec(&record).unwrap()))
+    );
+    assert_eq!(
+        session.walkthroughs[0].cursor, 0,
+        "completed history is stored by Next, not rewritten by later capture"
+    );
+    assert_eq!(next.walkthroughs[0].cursor, 1);
+}
+
+#[test]
+fn restart_reuses_completed_review_after_fresh_local_capture_without_replaying_model_work() {
+    let (dir, mut store, session, project) = ui_walk_fixture();
+    let session = save_ui_walk(&mut store, &session);
+    let (input, _) = ui_capture(&dir, &store, &session, &project);
+    let (session, _, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Reviewed before restart".into(),
+        }),
+    );
+    let id = session.id.clone();
+    drop(store);
+    let store = Store::open(&dir.path().join("state")).unwrap();
+    let session = store.load_session(&id).unwrap().unwrap();
+    let (review, outcome) = store.current_action_review(&session).unwrap().unwrap();
+    let (fresh, guidance) = ui_capture(&dir, &store, &session, &project);
+    assert!(current_review_candidate(
+        &session,
+        &review,
+        outcome.as_ref(),
+        "rust",
+        &guidance
+    ));
+    review_matches_capture(&session, &review, &fresh).unwrap();
+    assert_eq!(
+        session.current_action().unwrap().0.cursor,
+        0,
+        "freshness does not consume Next"
+    );
+    assert!(
+        store.model_runs(project.key()).unwrap().is_empty(),
+        "only local capture occurred"
+    );
+    std::fs::write(
+        project.root.join("greeting.rs"),
+        "// changed between restart and Next\n",
+    )
+    .unwrap();
+    let (fresh, _) = ui_capture(&dir, &store, &session, &project);
+    assert!(review_matches_capture(&session, &review, &fresh).is_err());
+}
+
+#[test]
+fn all_steps_queue_final_task_validation_and_only_its_reviewed_next_completes_implementation() {
+    let (dir, mut store, mut session, project) = ui_walk_fixture();
+    for _ in 0..2 {
+        assert_eq!(
+            walkthrough_continuation(&session),
+            WalkthroughContinuation::PrepareAction
+        );
+        session = save_ui_walk(&mut store, &session);
+        for _ in 0..2 {
+            let (input, _) = ui_capture(&dir, &store, &session, &project);
+            let (reviewed, review, _) = ui_review(
+                &mut store,
+                &session,
+                &input,
+                Some(OperationOutcome::Completed {
+                    summary: "Reviewed current action".into(),
+                }),
+            );
+            session = advance_review(&mut store, &reviewed, &review, &input).unwrap();
+        }
+    }
+    assert!(
+        session
+            .plan
+            .as_ref()
+            .unwrap()
+            .task
+            .steps
+            .iter()
+            .all(|s| s.status == StepStatus::Complete)
+    );
+    assert!(!session.implementation_complete());
+    assert_eq!(
+        walkthrough_continuation(&session),
+        WalkthroughContinuation::PrepareAction
+    );
+    let spec = session.spec.as_ref().unwrap();
+    let plan = session.plan.as_ref().unwrap();
+    let criteria = spec
+        .acceptance
+        .iter()
+        .map(|c| CriterionRef::SpecAcceptance { id: c.id.clone() })
+        .collect::<Vec<_>>();
+    let action = GuidedAction {
+        id: "final-task-validation".into(),
+        revision: 1,
+        kind: GuidedActionKind::ValidateTask,
+        what: "Assess all approved task acceptance criteria".into(),
+        target: ActionTarget::Validation {
+            spec_ref: spec.document_ref(),
+            plan_ref: plan.document_ref(),
+            step_id: None,
+            criterion_refs: criteria.clone(),
+            paths: vec!["greeting.rs".into()],
+        },
+        why: "Confirm the completed steps meet the whole approved task".into(),
+        expected_result: "Every approved acceptance criterion is satisfied".into(),
+        required_evidence: criteria
+            .into_iter()
+            .map(|criterion_ref| RequiredActionEvidence::CriterionAssessment { criterion_ref })
+            .collect(),
+    };
+    let walk = walkthrough_proposal(&session, vec![action]).unwrap();
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveWalkthrough { walkthrough: walk }],
+            ),
+        )
+        .unwrap();
+    let (input, guidance) = ui_capture(&dir, &store, &session, &project);
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Final task reviewed".into(),
+        }),
+    );
+    let (_, outcome) = store.current_action_review(&session).unwrap().unwrap();
+    for negative in [
+        ActionReviewOutcome::NeedsChanges,
+        ActionReviewOutcome::InsufficientEvidence,
+        ActionReviewOutcome::Cancelled,
+        ActionReviewOutcome::Failed,
+        ActionReviewOutcome::Interrupted,
+    ] {
+        let mut negative_review = review.clone();
+        negative_review.outcome = negative;
+        assert!(!current_review_candidate(
+            &session,
+            &negative_review,
+            outcome.as_ref(),
+            "rust",
+            &guidance
+        ));
+    }
+    assert!(
+        !session.implementation_complete(),
+        "passing final review still awaits explicit Next"
+    );
+    let completed = advance_review(&mut store, &session, &review, &input).unwrap();
+    assert_eq!(
+        walkthrough_continuation(&completed),
+        WalkthroughContinuation::Complete
+    );
+    assert!(completed.implementation_complete());
+    assert_eq!(completed_action_summary(&completed).len(), 5);
+    assert!(current_action_summary(&completed).is_empty());
+}
+
+#[test]
+fn explicit_attachment_survives_restart_before_review_and_replacement_is_immutable_and_scoped() {
+    let (dir, mut store, mut session, project) = ui_walk_fixture();
+    let mut walk = support::fixture_walkthrough(&session);
+    let action = &mut walk.actions[0];
+    action.kind = GuidedActionKind::Command;
+    action.target = ActionTarget::Command {
+        argv: vec!["cargo".into(), "test".into()],
+        cwd: ".".into(),
+        expected_exit_codes: vec![0],
+    };
+    action.required_evidence = vec![RequiredActionEvidence::CommandReceipt];
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveWalkthrough { walkthrough: walk }],
+            ),
+        )
+        .unwrap();
+    let (input, guidance) = ui_capture(&dir, &store, &session, &project);
+    let captured = tandem_companion::capture_action_context(
+        &session,
+        &project,
+        &[],
+        &[],
+        &dir.path().join("explicit-attachment"),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    let draft = OutputAttachmentDraft {
+        command: "[\"cargo\",\"test\"]".into(),
+        cwd: ".".into(),
+        exit: "0".into(),
+        stdout: "complete first report".into(),
+        stderr: "".into(),
+    };
+    let first = tandem_companion::attach_action_output(
+        input.scope(),
+        &captured,
+        draft.attachment().unwrap(),
+    )
+    .unwrap();
+    let saved = store
+        .record_action_attachment(&session.id, &first, &input.binding)
+        .unwrap();
+    assert_eq!(saved.fingerprint(), first.fingerprint());
+    let duplicate = store
+        .record_action_attachment(&session.id, &first, &input.binding)
+        .unwrap();
+    assert_eq!(duplicate.fingerprint(), first.fingerprint());
+    let mut changed = first.clone();
+    changed.output = CommandOutput::Combined {
+        text: "rewritten under the same ID".into(),
+    };
+    assert!(
+        store
+            .record_action_attachment(&session.id, &changed, &input.binding)
+            .is_err()
+    );
+    let mut second_draft = draft;
+    second_draft.stdout = "complete corrected report".into();
+    let second = tandem_companion::attach_action_output(
+        input.scope(),
+        &captured,
+        second_draft.attachment().unwrap(),
+    )
+    .unwrap();
+    store
+        .record_action_attachment(&session.id, &second, &input.binding)
+        .unwrap();
+    let retry_old = store
+        .record_action_attachment(&session.id, &first, &input.binding)
+        .unwrap();
+    assert_eq!(
+        retry_old.id, second.id,
+        "retrying an old submit never rolls back a replacement"
+    );
+    let id = session.id.clone();
+    let sequence = session.sequence;
+    drop(store);
+    let mut store = Store::open(&dir.path().join("state")).unwrap();
+    let session = store.load_session(&id).unwrap().unwrap();
+    let restored = store.current_action_attachment(&session).unwrap().unwrap();
+    assert_eq!(restored.fingerprint(), second.fingerprint());
+    let restored_form = OutputAttachmentDraft::from_evidence(&restored);
+    assert_eq!(restored_form.stdout, "complete corrected report");
+    assert_eq!(restored_form.command, "[\"cargo\",\"test\"]");
+    assert_eq!(session.sequence, sequence);
+    assert_eq!(session.current_action().unwrap().0.cursor, 0);
+    assert!(store.current_action_review(&session).unwrap().is_none());
+    assert!(store.model_runs(project.key()).unwrap().is_empty());
+    assert!(store.active_session_operation(&id).unwrap().is_none());
+    let mut wrong_scope = restored.clone();
+    wrong_scope.id = new_id();
+    wrong_scope.scope.action_id = "another-action".into();
+    assert!(
+        store
+            .record_action_attachment(&id, &wrong_scope, &input.binding)
+            .is_err()
+    );
+    std::fs::write(
+        project.root.join("greeting.rs"),
+        "// source edited after attachment\n",
+    )
+    .unwrap();
+    let (fresh, _) = ui_capture(&dir, &store, &session, &project);
+    assert!(
+        store
+            .record_action_attachment(&id, &restored, &fresh.binding)
+            .is_err(),
+        "old output cannot be rebound to a fresh source capture"
+    );
+    let old_snapshot = restored.snapshot.as_ref().unwrap().id.clone();
+    let stale = ActionReviewInput::capture(
+        &session,
+        fresh.context,
+        fresh.targets,
+        vec![restored],
+        "rust",
+        &guidance,
+    )
+    .unwrap();
+    assert_eq!(
+        stale.evidence_gate(session.current_action().unwrap().1).0,
+        ActionReviewOutcome::InsufficientEvidence
+    );
+    assert_eq!(
+        store
+            .current_action_attachment(&session)
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .unwrap()
+            .id,
+        old_snapshot
+    );
 }

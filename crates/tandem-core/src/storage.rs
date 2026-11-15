@@ -1288,6 +1288,129 @@ impl Store {
         data.map(|data| serde_json::from_str(&data).context("Action review is damaged"))
             .transpose()
     }
+    /// Read the latest immutable result and its durable terminal outcome. A
+    /// result written before cancellation/terminal publication is not a pass.
+    pub fn current_action_review(
+        &self,
+        session: &TaskSession,
+    ) -> Result<Option<(ActionReview, Option<OperationOutcome>)>> {
+        let Ok((walk, action)) = session.current_action() else {
+            return Ok(None);
+        };
+        let row: Option<(String, Option<String>)> = self.connection.query_row(
+            "SELECT r.review,o.outcome FROM action_review r LEFT JOIN session_operation o ON o.id=r.operation_id AND o.session_id=r.session_id WHERE r.session_id=?1 AND r.walkthrough_id=?2 AND r.action_id=?3 ORDER BY r.rowid DESC LIMIT 1",
+            params![session.id,walk.id,action.id], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).optional()?;
+        row.map(|(review, outcome)| {
+            Ok((
+                serde_json::from_str(&review)?,
+                outcome.map(|s| serde_json::from_str(&s)).transpose()?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// Explicit human output save, independent of review/model/progress. The
+    /// host supplies a fresh capture; old output can never acquire its snapshot.
+    pub fn record_action_attachment(
+        &mut self,
+        session_id: &str,
+        evidence: &ActionCommandEvidence,
+        current: &ActionReviewBinding,
+    ) -> Result<ActionCommandEvidence> {
+        evidence.validate()?;
+        ensure!(
+            matches!(evidence.provenance, CommandProvenance::UserAttachedOutput)
+                && evidence.status == CheckStatus::Unvalidated,
+            "Only deliberate unvalidated user output can be attached"
+        );
+        let transaction = self.connection.transaction()?;
+        let data: String = transaction.query_row(
+            "SELECT data FROM task_session WHERE id=?1",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        let session: TaskSession = serde_json::from_str(&data)?;
+        session.validate_action_binding(current)?;
+        ensure!(
+            session.id == current.workflow.session_id && evidence.scope == current.scope(),
+            "Attached output belongs to another action or generation"
+        );
+        ensure!(
+            session.current_action()?.1.kind == GuidedActionKind::Command,
+            "Attach output to the current command action"
+        );
+        ensure!(
+            evidence.snapshot.as_ref().is_some_and(
+                |s| s.project == session.project && s.id == current.project_fingerprint
+            ) && evidence.snapshot_unchanged
+                && !evidence.truncated
+                && evidence.exit_code.is_some()
+                && evidence.started_at_ms >= 0
+                && !matches!(evidence.output, crate::CommandOutput::Withheld { .. })
+                && evidence
+                    .completed_at_ms
+                    .is_some_and(|t| t >= evidence.started_at_ms && t <= now_ms()),
+            "Output does not match the fresh current input snapshot; run and attach the command again"
+        );
+        let scope = serde_json::to_string(&evidence.scope)?;
+        let encoded = serde_json::to_string(evidence)?;
+        let previous: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT scope,data FROM action_evidence WHERE session_id=?1 AND id=?2 LIMIT 1",
+                params![session_id, evidence.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((old_scope, old_data)) = previous {
+            ensure!(
+                old_scope == scope && old_data == encoded,
+                "Attached output identity is immutable; save a new receipt"
+            );
+        } else {
+            transaction.execute(
+                "INSERT INTO action_evidence(session_id,scope,id,data) VALUES(?1,?2,?3,?4)",
+                params![session_id, scope, evidence.id, encoded],
+            )?;
+        }
+        // An idempotent retry of an old submit never rolls back a replacement.
+        let latest = read_action_attachment(&transaction, session_id, &evidence.scope)?
+            .context("Attachment was not saved")?;
+        transaction.commit()?;
+        Ok(latest)
+    }
+    pub fn current_action_attachment(
+        &self,
+        session: &TaskSession,
+    ) -> Result<Option<ActionCommandEvidence>> {
+        let Ok((walk, action)) = session.current_action() else {
+            return Ok(None);
+        };
+        let scope = crate::ActionEvidenceScope {
+            workflow: session.authorize(WorkflowAction::ReviewAction)?,
+            walkthrough_id: walk.id.clone(),
+            action_id: action.id.clone(),
+            action_hash: action.definition_hash(),
+        };
+        read_action_attachment(&self.connection, &session.id, &scope)
+    }
+
+    /// Origin is captured before dispatch by save_check, never inferred from
+    /// the action being reviewed later.
+    pub fn check_action_scope(&self, check_id: &str) -> Result<Option<crate::ActionEvidenceScope>> {
+        let scope: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT scope FROM check_action_origin WHERE check_id=?1",
+                [check_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        scope
+            .map(|s| serde_json::from_str(&s).context("Check action origin is damaged"))
+            .transpose()
+    }
     pub fn action_review_input(
         &self,
         session_id: &str,
@@ -1894,6 +2017,15 @@ fn apply_session_command(
                 );
                 return Ok(None);
             }
+            if let Some(latest) = read_action_attachment(connection, &session.id, &input.scope())? {
+                ensure!(
+                    input
+                        .commands
+                        .iter()
+                        .any(|c| c.id == latest.id && c.fingerprint() == latest.fingerprint()),
+                    "Attached output changed during review; review the saved current evidence again"
+                );
+            }
             for command in &input.commands {
                 ensure!(
                     command
@@ -1997,6 +2129,17 @@ fn apply_session_command(
             }
             let mut review: ActionReview = serde_json::from_str(&review_data)?;
             let input: ActionReviewInput = serde_json::from_str(&input_data)?;
+            if let Some(latest) =
+                read_action_attachment(connection, &session.id, &current_binding.scope())?
+            {
+                ensure!(
+                    input
+                        .commands
+                        .iter()
+                        .any(|c| c.id == latest.id && c.fingerprint() == latest.fingerprint()),
+                    "Attached output changed; review the current evidence again before Next"
+                );
+            }
             ensure!(
                 review.binding == *current_binding,
                 "Review inputs changed; review the current action again"
@@ -2129,6 +2272,16 @@ fn apply_session_command(
         }
     };
     Ok(Some(event))
+}
+
+fn read_action_attachment(
+    connection: &Connection,
+    session_id: &str,
+    scope: &crate::ActionEvidenceScope,
+) -> Result<Option<ActionCommandEvidence>> {
+    let data:Option<String>=connection.query_row("SELECT data FROM action_evidence WHERE session_id=?1 AND scope=?2 AND json_extract(data,'$.provenance.type')='UserAttachedOutput' ORDER BY rowid DESC LIMIT 1",params![session_id,serde_json::to_string(scope)?],|r|r.get(0)).optional()?;
+    data.map(|s| serde_json::from_str(&s).context("Attached output is damaged"))
+        .transpose()
 }
 
 fn authenticate_local_evidence(

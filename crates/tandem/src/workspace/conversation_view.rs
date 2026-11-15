@@ -13,6 +13,21 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 
 impl Workspace {
+    fn control_button(&self, id: &'static str, label: &str) -> gpui_kit::component::button::Button {
+        let presentation = self
+            .companion
+            .foreground
+            .as_ref()
+            .map(|op| op.control_button(id, label));
+        path_button(
+            Button::new(id),
+            presentation
+                .as_ref()
+                .map(|p| p.label.clone())
+                .unwrap_or_else(|| label.into()),
+        )
+        .loading(presentation.as_ref().is_some_and(|p| p.loading))
+    }
     pub(super) fn companion_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.companion.busy || self.agent.busy;
         let mut body = panel_body(cx)
@@ -58,9 +73,11 @@ impl Workspace {
                             for c in this.companion.cancel.iter().chain(this.agent.cancel.iter()) {
                                 c.store(true, Ordering::Relaxed);
                             }
+                            if let Some(op) = &mut this.companion.foreground {
+                                op.stop();
+                            }
                             this.companion.status =
-                                "Cancellation requested; saved input and staged work are retained."
-                                    .into();
+                                "Stopping… Saved input and staged work are retained.".into();
                             cx.notify();
                         })),
                 )
@@ -131,6 +148,30 @@ impl Workspace {
                 );
         }
         if self.companion.show_history {
+            if let Some(session) = &self.companion.session {
+                body = body.children(
+                    self.companion
+                        .runs
+                        .iter()
+                        .filter(|r| {
+                            r.request.conversation_id.as_ref() == Some(&session.id)
+                                && r.status == ModelStatus::Completed
+                                && matches!(r.response, Some(CompanionResponse::Solution(_)))
+                        })
+                        .map(|r| {
+                            let id = r.id.clone();
+                            path_button(
+                                Button::new(SharedString::from(format!("revealed-history:{id}"))),
+                                format!("Revealed suggestion history · {}", r.request.language),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.open_solution_history(&id, window, cx)
+                                },
+                            ))
+                        }),
+                );
+            }
             body = body.children(
                 self.companion
                     .runs
@@ -176,6 +217,11 @@ impl Workspace {
                     self.companion.catalog.as_ref()
                 )
             ))))
+            .when(busy, |d| {
+                d.child(note(
+                    "Another operation is active. Model selection is available when it settles.",
+                ))
+            })
             .when_some(self.companion.resolved_model.as_ref(), |d, m| {
                 d.child(panel_metadata(
                     note(format!("Last run: {} · {}", m.display_name, m.model)),
@@ -226,14 +272,54 @@ impl Workspace {
             ));
         }
         body.child(
-            path_button(Button::new("refresh-models"), "Connect / refresh models")
-                .disabled(busy)
-                .on_click(cx.listener(|this, _, _, cx| this.connect_companion(false, cx))),
+            path_button(
+                Button::new("refresh-models"),
+                if self
+                    .companion
+                    .foreground
+                    .as_ref()
+                    .is_some_and(|op| op.id.starts_with("models-"))
+                {
+                    super::companion_state::phase_label(
+                        self.companion.foreground.as_ref().unwrap().phase,
+                    )
+                } else {
+                    "Connect / refresh models"
+                },
+            )
+            .loading(
+                self.companion
+                    .foreground
+                    .as_ref()
+                    .is_some_and(|op| op.id.starts_with("models-")),
+            )
+            .disabled(busy)
+            .on_click(cx.listener(|this, _, _, cx| this.connect_companion(false, cx))),
         )
         .child(
-            path_button(Button::new("login-companion"), "ChatGPT sign in")
-                .disabled(busy)
-                .on_click(cx.listener(|this, _, _, cx| this.connect_companion(true, cx))),
+            path_button(
+                Button::new("login-companion"),
+                if self
+                    .companion
+                    .foreground
+                    .as_ref()
+                    .is_some_and(|op| op.id.starts_with("login-"))
+                {
+                    super::companion_state::phase_label(
+                        self.companion.foreground.as_ref().unwrap().phase,
+                    )
+                } else {
+                    "ChatGPT sign in"
+                },
+            )
+            .loading(
+                self.companion
+                    .foreground
+                    .as_ref()
+                    .is_some_and(|op| op.id.starts_with("login-")),
+            )
+            .disabled(busy)
+            .on_click(cx.listener(|this, _, _, cx| this.connect_companion(true, cx))),
         )
         .child(
             path_button(Button::new("disconnect-companion"), "Disconnect")
@@ -452,11 +538,22 @@ impl Workspace {
                 for choice in &question.choices {
                     let question = question.id.clone();
                     let choice_id = choice.id.clone();
+                    let control = format!("answer:{choice_id}");
+                    let label = format!("{} · {}", choice.label, choice.description);
+                    let presentation = self
+                        .companion
+                        .foreground
+                        .as_ref()
+                        .map(|op| op.control_button(&control, &label));
                     card = card.child(
                         path_button(
                             Button::new(SharedString::from(format!("answer:{choice_id}"))),
-                            format!("{} · {}", choice.label, choice.description),
+                            presentation
+                                .as_ref()
+                                .map(|p| p.label.clone())
+                                .unwrap_or(label),
                         )
+                        .loading(presentation.as_ref().is_some_and(|p| p.loading))
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, w, cx| {
                             this.answer_companion(&question, Some(choice_id.clone()), w, cx)
@@ -470,7 +567,7 @@ impl Workspace {
                             .aria_label("Custom clarification answer"),
                     )
                     .child(
-                        path_button(Button::new("custom-answer"), "Submit custom answer")
+                        self.control_button("custom-answer", "Submit custom answer")
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, w, cx| {
                                 this.answer_companion(&id, None, w, cx)
@@ -478,17 +575,7 @@ impl Workspace {
                     ),
                 );
             }
-            if let Ok((walkthrough, action)) = session.current_action() {
-                body = body
-                    .child(panel_heading(note(format!(
-                        "Current action {} of {}",
-                        walkthrough.cursor + 1,
-                        walkthrough.actions.len()
-                    ))))
-                    .child(note(action.what.clone()))
-                    .child(note(action.why.clone()))
-                    .child(note(format!("Expected: {}", action.expected_result)));
-            }
+            body = body.child(self.walkthrough_view(cx));
             if let Some(plan) = &session.plan {
                 body = body
                     .child(panel_heading(note("Plan outline · inspection only")))
@@ -503,16 +590,6 @@ impl Workspace {
                             cx.notify();
                         }))
                     }));
-                if let Some(step) = plan
-                    .task
-                    .steps
-                    .iter()
-                    .find(|s| Some(&s.id) == self.companion.inspected_step.as_ref())
-                {
-                    body = body
-                        .child(note(step.why.clone()))
-                        .child(note(format!("Done when: {}", step.done_when.join("; "))));
-                }
             }
         }
         body = body
@@ -568,8 +645,29 @@ impl Workspace {
                     ]
                     .into_iter()
                     .map(|(action, label)| {
-                        wrapping_button(Button::new(label), label)
-                            .disabled(busy || self.companion.session.is_none())
+                        let presentation = self
+                            .companion
+                            .foreground
+                            .as_ref()
+                            .map(|op| op.button(action, label));
+                        let loading = presentation.as_ref().is_some_and(|p| p.loading);
+                        let disabled = presentation.as_ref().is_some_and(|p| p.disabled);
+                        let text = presentation.map(|p| p.label).unwrap_or_else(|| {
+                            if busy {
+                                format!("{label} · Another operation is active")
+                            } else {
+                                label.into()
+                            }
+                        });
+                        let gate = super::companion_state::command_binding(
+                            self.companion.session.as_ref(),
+                            action,
+                            false,
+                        )
+                        .is_err();
+                        wrapping_button(Button::new(label), text)
+                            .loading(loading)
+                            .disabled(disabled || busy || gate)
                             .on_click(
                                 cx.listener(move |this, _, w, cx| {
                                     this.run_companion(action, w, cx)
@@ -579,7 +677,7 @@ impl Workspace {
                 ),
             )
             .child(
-                path_button(Button::new("continue-research"), "Continue research")
+                self.control_button("continue-research", "Continue research")
                     .disabled(busy || self.companion.session.is_none())
                     .on_click(cx.listener(|this, _, w, cx| {
                         this.start_conversation(
@@ -589,20 +687,34 @@ impl Workspace {
                             ),
                             w,
                             cx,
-                        )
+                        );
+                        if let Some(op) = &mut this.companion.foreground {
+                            op.control = Some("continue-research".into());
+                        }
                     })),
             );
-        if self.companion.solution_scope.as_ref().is_some_and(|scope| {
-            super::companion_state::solution_visible(
-                scope,
-                self.companion.session.as_ref(),
-                &self.companion.language,
-                &self.effective_guidance(),
-            )
-        }) && let Some((summary, editor)) = &self.companion.solution
+        let historical_solution = self
+            .companion
+            .solution_history_session
+            .as_ref()
+            .is_some_and(|id| self.companion.session.as_ref().is_some_and(|s| &s.id == id));
+        if (historical_solution
+            || self.companion.solution_scope.as_ref().is_some_and(|scope| {
+                super::companion_state::solution_visible(
+                    scope,
+                    self.companion.session.as_ref(),
+                    &self.companion.language,
+                    &self.effective_guidance(),
+                )
+            }))
+            && let Some((summary, editor)) = &self.companion.solution
         {
             body = body
-                .child(panel_heading(note("Revealed suggestion · read only")))
+                .child(panel_heading(note(if busy || historical_solution {
+                    "Historical revealed suggestion · read only"
+                } else {
+                    "Revealed suggestion · read only"
+                })))
                 .child(note(summary.clone()))
                 .child(
                     Editor::new(editor)
@@ -612,6 +724,30 @@ impl Workspace {
                 );
         }
         body.into_any_element()
+    }
+    fn open_solution_history(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = &self.companion.session else {
+            return;
+        };
+        let Some(run) = self.companion.runs.iter().find(|r| {
+            r.id == id
+                && r.status == ModelStatus::Completed
+                && r.request.conversation_id.as_ref() == Some(&session.id)
+        }) else {
+            return;
+        };
+        let Some(CompanionResponse::Solution(solution)) = &run.response else {
+            return;
+        };
+        let editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language(&solution.language)
+                .default_value(solution.code.clone())
+        });
+        self.companion.solution = Some((solution.summary.clone(), editor));
+        self.companion.solution_scope = None;
+        self.companion.solution_history_session = Some(session.id.clone());
+        cx.notify();
     }
     fn historical_row(&self, row: HistoricalRow, cx: &mut Context<Self>) -> AnyElement {
         let mut body = panel_body(cx).child(note(row.text));

@@ -13,9 +13,10 @@ pub fn workflow_action(action: CompanionAction) -> WorkflowAction {
     match action {
         CompanionAction::DraftSpec => WorkflowAction::DraftSpec,
         CompanionAction::DraftPlan => WorkflowAction::DraftPlan,
-        CompanionAction::Guide | CompanionAction::Hint | CompanionAction::PrepareWalkthrough => {
-            WorkflowAction::PrepareWalkthrough
-        }
+        CompanionAction::Guide
+        | CompanionAction::Hint
+        | CompanionAction::Explain
+        | CompanionAction::PrepareWalkthrough => WorkflowAction::PrepareWalkthrough,
         CompanionAction::Review | CompanionAction::ReviewAction => WorkflowAction::ReviewAction,
         CompanionAction::Reveal => WorkflowAction::Reveal,
         CompanionAction::Delegate => WorkflowAction::Takeover,
@@ -35,7 +36,42 @@ pub fn command_binding(
     let session = session.ok_or_else(|| {
         anyhow::anyhow!("Continue this legacy task in a conversation before implementation")
     })?;
+    if matches!(
+        action,
+        CompanionAction::Hint
+            | CompanionAction::Explain
+            | CompanionAction::Reveal
+            | CompanionAction::Review
+            | CompanionAction::ReviewAction
+    ) {
+        session.current_action()?;
+    }
     Ok(session.authorize(workflow_action(action))?)
+}
+
+pub fn current_action_summary(session: &TaskSession) -> Vec<String> {
+    let Ok((walk, action)) = session.current_action() else {
+        return vec![];
+    };
+    vec![
+        format!(
+            "Current action {} of {} · {:?}",
+            walk.cursor + 1,
+            walk.actions.len(),
+            action.kind
+        ),
+        format!("What: {}", action.what),
+        format!("Why: {}", action.why),
+        format!("Expected result: {}", action.expected_result),
+    ]
+}
+pub fn completed_action_summary(session: &TaskSession) -> Vec<String> {
+    session
+        .walkthroughs
+        .iter()
+        .flat_map(|w| w.actions.iter().take(w.cursor))
+        .map(|a| format!("Completed history: {} · {}", a.id, a.what))
+        .collect()
 }
 
 pub fn model_label(preference: &ModelPreference, catalog: Option<&ModelCatalog>) -> String {
@@ -130,3 +166,221 @@ mod companion_history;
 pub use companion_history::{
     HistoricalRow, historical_run, historical_task, linked_legacy_history,
 };
+
+/// UI ownership starts before capture/account setup and ends only for this ID.
+#[derive(Clone, Debug)]
+pub struct ForegroundOperation {
+    pub id: String,
+    pub session_id: String,
+    pub action: CompanionAction,
+    pub phase: OperationPhase,
+    pub stopping: bool,
+    pub control: Option<String>,
+}
+pub struct OperationButton {
+    pub label: String,
+    pub loading: bool,
+    pub disabled: bool,
+}
+fn canonical_action(action: CompanionAction) -> CompanionAction {
+    match action {
+        CompanionAction::Guide => CompanionAction::PrepareWalkthrough,
+        CompanionAction::Review => CompanionAction::ReviewAction,
+        other => other,
+    }
+}
+impl ForegroundOperation {
+    pub fn new(id: String, session_id: String, action: CompanionAction) -> Self {
+        Self {
+            id,
+            session_id,
+            action: canonical_action(action),
+            phase: OperationPhase::PreservingInput,
+            stopping: false,
+            control: None,
+        }
+    }
+    pub fn owns(&self, id: &str, session: &str) -> bool {
+        self.id == id && self.session_id == session
+    }
+    pub fn stop(&mut self) {
+        self.stopping = true;
+        self.phase = OperationPhase::Stopping;
+    }
+    pub fn button(&self, action: CompanionAction, label: &str) -> OperationButton {
+        let loading =
+            self.control.is_none() && canonical_action(action) == canonical_action(self.action);
+        self.presentation(loading, label)
+    }
+    pub fn control_button(&self, control: &str, label: &str) -> OperationButton {
+        self.presentation(self.control.as_deref() == Some(control), label)
+    }
+    fn presentation(&self, loading: bool, label: &str) -> OperationButton {
+        OperationButton {
+            label: if loading {
+                format!("{label} · {}", phase_label(self.phase))
+            } else {
+                format!("{label} · Another operation is active")
+            },
+            loading,
+            disabled: true,
+        }
+    }
+}
+pub fn phase_label(phase: OperationPhase) -> &'static str {
+    match phase {
+        OperationPhase::PreservingInput => "Preserving input…",
+        OperationPhase::CapturingContext => "Capturing current buffers…",
+        OperationPhase::CheckingAccount => "Checking account…",
+        OperationPhase::CheckingModels => "Checking models…",
+        OperationPhase::ReadingSource => "Reading source…",
+        OperationPhase::SearchingSource => "Searching source…",
+        OperationPhase::InspectingSource => "Inspecting source…",
+        OperationPhase::PublicSearch => "Searching public sources…",
+        OperationPhase::PublicRetrieval => "Reading public sources…",
+        OperationPhase::Discussing => "Discussing…",
+        OperationPhase::DraftingSpec => "Drafting Spec…",
+        OperationPhase::DraftingPlan => "Drafting Plan…",
+        OperationPhase::PreparingAction => "Preparing action…",
+        OperationPhase::Reviewing => "Reviewing current action…",
+        OperationPhase::Revealing => "Preparing requested suggestion…",
+        OperationPhase::Stopping => "Stopping…",
+    }
+}
+
+/// Automated execution is offered only for the identical registered command.
+/// Recipes with per-run substitutions cannot match an immutable action argv.
+pub fn matching_action_recipe<'a>(
+    action: &GuidedAction,
+    recipes: &'a [tandem_checks::Recipe],
+) -> Option<&'a str> {
+    let ActionTarget::Command { argv, cwd, .. } = &action.target else {
+        return None;
+    };
+    recipes
+        .iter()
+        .find(|r| {
+            cwd == "."
+                && r.argv == *argv
+                && !r
+                    .argv
+                    .iter()
+                    .any(|a| a.contains("{artifacts}") || a.contains("{harness}"))
+        })
+        .map(|r| r.id.as_str())
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutputAttachmentDraft {
+    pub command: String,
+    pub cwd: String,
+    pub exit: String,
+    pub stdout: String,
+    pub stderr: String,
+}
+impl OutputAttachmentDraft {
+    pub fn from_evidence(evidence: &ActionCommandEvidence) -> Self {
+        let (stdout, stderr) = match &evidence.output {
+            CommandOutput::Split { stdout, stderr } => (stdout.clone(), stderr.clone()),
+            _ => (evidence.output.text(), String::new()),
+        };
+        Self {
+            command: serde_json::to_string(&evidence.argv).expect("String argv serializes"),
+            cwd: evidence.cwd.clone(),
+            exit: evidence
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
+            stdout,
+            stderr,
+        }
+    }
+    pub fn attachment(&self) -> Result<tandem_companion::UserCommandAttachment> {
+        let argv: Vec<String> = serde_json::from_str(&self.command).map_err(|_| {
+            anyhow::anyhow!("Enter the exact command as a JSON argv array; no shell is run")
+        })?;
+        validate_action_command(&argv)?;
+        if self.cwd != "." {
+            normalized_relative(std::path::Path::new(&self.cwd))?;
+        }
+        let exit_code = self
+            .exit
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| anyhow::anyhow!("Enter the command's numeric exit status"))?;
+        let time = now_ms();
+        Ok(tandem_companion::UserCommandAttachment {
+            argv,
+            cwd: self.cwd.clone(),
+            exit_code,
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            started_at_ms: time,
+            completed_at_ms: time,
+        })
+    }
+}
+
+pub fn current_review_candidate(
+    session: &TaskSession,
+    review: &ActionReview,
+    outcome: Option<&OperationOutcome>,
+    language: &str,
+    guidance: &EffectiveGuidance,
+) -> bool {
+    review.outcome == ActionReviewOutcome::Passed
+        && matches!(outcome, Some(OperationOutcome::Completed { .. }))
+        && session.validate_action_binding(&review.binding).is_ok()
+        && review.binding.language == language
+        && review.binding.guidance_fingerprint == guidance.fingerprint()
+}
+/// Both bindings are captured by the real evidence adapter. No initial/frozen
+/// review snapshot can be used to authorize Next after source/evidence changes.
+pub fn advance_review(
+    store: &mut Store,
+    session: &TaskSession,
+    review: &ActionReview,
+    current: &ActionReviewInput,
+) -> Result<TaskSession> {
+    review_matches_capture(session, review, current)?;
+    store.advance_action(
+        &session.id,
+        &review.binding.action_id,
+        &review.id,
+        &current.binding,
+    )
+}
+pub fn review_matches_capture(
+    session: &TaskSession,
+    review: &ActionReview,
+    current: &ActionReviewInput,
+) -> Result<()> {
+    current.validate(session)?;
+    ensure!(
+        review.binding == current.binding,
+        "Inputs changed. Review the current action again before Next"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WalkthroughContinuation {
+    DisplayAction,
+    PrepareAction,
+    Complete,
+    AwaitApproval,
+}
+pub fn walkthrough_continuation(session: &TaskSession) -> WalkthroughContinuation {
+    if session.implementation_complete() {
+        WalkthroughContinuation::Complete
+    } else if session.current_action().is_ok() {
+        WalkthroughContinuation::DisplayAction
+    } else if session
+        .authorize(WorkflowAction::PrepareWalkthrough)
+        .is_ok()
+    {
+        WalkthroughContinuation::PrepareAction
+    } else {
+        WalkthroughContinuation::AwaitApproval
+    }
+}

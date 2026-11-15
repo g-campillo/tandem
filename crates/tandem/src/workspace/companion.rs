@@ -83,12 +83,16 @@ type Runner = ConversationRunner<SharedBackend, PublicRuntime>;
 pub struct CaptureMailbox {
     project: String,
     session_id: String,
+    operation_id: String,
     requested: bool,
+    code_epoch: u64,
+    source_generation: u64,
     response: Option<std::result::Result<Vec<Document>, String>>,
 }
 struct FreshCapture {
     capture: ProjectConversationCapture,
     mailbox: Arc<Mutex<CaptureMailbox>>,
+    store: Arc<Mutex<Store>>,
 }
 impl ConversationCapture for FreshCapture {
     fn capture(
@@ -113,9 +117,114 @@ impl ConversationCapture for FreshCapture {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        self.capture
-            .capture(session, action, language, guidance, checks, cancel)
+        let checks = if matches!(
+            action,
+            CompanionAction::ReviewAction | CompanionAction::Reveal
+        ) {
+            action_checks(&self.store.lock().unwrap(), session, checks)?
+        } else {
+            checks.to_vec()
+        };
+        if matches!(
+            action,
+            CompanionAction::ReviewAction | CompanionAction::Reveal
+        ) {
+            self.capture.attachments = self
+                .store
+                .lock()
+                .unwrap()
+                .current_action_attachment(session)?
+                .into_iter()
+                .collect();
+        }
+        let mut captured = self
+            .capture
+            .capture(session, action, language, guidance, &checks, cancel)?;
+        if let Some(review) = captured.review.take() {
+            captured.review = Some(authenticate_capture(
+                &self.store.lock().unwrap(),
+                session,
+                review,
+                language,
+                guidance,
+            )?);
+        }
+        Ok(captured)
     }
+}
+
+fn eligible_check_origin(
+    session: &TaskSession,
+    scope: &ActionEvidenceScope,
+    origin: &ActionEvidenceScope,
+) -> bool {
+    origin == scope
+        || (matches!(
+            session.current_action().map(|(_, a)| a.kind),
+            Ok(GuidedActionKind::ValidateStep | GuidedActionKind::ValidateTask)
+        ) && origin.workflow == scope.workflow
+            && session.walkthroughs.iter().any(|w| {
+                w.id == origin.walkthrough_id
+                    && w.actions[..w.cursor].iter().any(|a| {
+                        a.id == origin.action_id && a.definition_hash() == origin.action_hash
+                    })
+            }))
+}
+pub(super) fn action_checks(
+    store: &Store,
+    session: &TaskSession,
+    checks: &[CheckRecord],
+) -> Result<Vec<CheckRecord>> {
+    let (walk, action) = session.current_action()?;
+    let scope = ActionEvidenceScope {
+        workflow: session.authorize(WorkflowAction::ReviewAction)?,
+        walkthrough_id: walk.id.clone(),
+        action_id: action.id.clone(),
+        action_hash: action.definition_hash(),
+    };
+    let mut scoped = vec![];
+    for check in checks {
+        if store
+            .check_action_scope(&check.id)?
+            .is_some_and(|origin| eligible_check_origin(session, &scope, &origin))
+        {
+            scoped.push(check.clone());
+        }
+    }
+    Ok(scoped)
+}
+
+/// Retain authenticated execution origins, including completed action history
+/// for cumulative validation. Never relabel an old check as a new action run.
+pub(super) fn authenticate_capture(
+    store: &Store,
+    session: &TaskSession,
+    mut input: ActionReviewInput,
+    language: &str,
+    guidance: &EffectiveGuidance,
+) -> Result<ActionReviewInput> {
+    let scope = input.scope();
+    let mut commands = vec![];
+    for mut command in input.commands.drain(..) {
+        if let CommandProvenance::LocalCheck { check_id, .. } = &command.provenance {
+            let Some(origin) = store.check_action_scope(check_id)? else {
+                continue;
+            };
+            if !eligible_check_origin(session, &scope, &origin) {
+                continue;
+            }
+            command.scope = origin;
+        }
+        commands.push(command);
+    }
+    ActionReviewInput::capture(
+        session,
+        input.context,
+        input.targets,
+        commands,
+        language,
+        guidance,
+    )
 }
 
 pub struct CompanionUi {
@@ -133,6 +242,7 @@ pub struct CompanionUi {
     pub status: String,
     pub cancel: Option<Arc<AtomicBool>>,
     pub operation_id: Option<String>,
+    pub foreground: Option<companion_state::ForegroundOperation>,
     pub progress: Arc<Mutex<Option<ActiveOperation>>>,
     pub capture: Option<Arc<Mutex<CaptureMailbox>>>,
     pub question: Entity<TextareaState>,
@@ -157,6 +267,7 @@ pub struct CompanionUi {
     pub document_drafts: companion_state::SessionDocumentDrafts,
     pub solution: Option<(String, Entity<EditorState>)>,
     pub solution_scope: Option<companion_state::SolutionScope>,
+    pub solution_history_session: Option<String>,
     pub auto_requests: BTreeSet<String>,
     pub inspected_step: Option<String>,
     pub model_preference: ModelPreference,
@@ -164,6 +275,16 @@ pub struct CompanionUi {
     pub model_error: Option<String>,
     pub resolved_model: Option<ResolvedModel>,
     pub document_fingerprint: String,
+    pub review: Option<(ActionReview, Option<OperationOutcome>)>,
+    pub review_commands: Vec<ActionCommandEvidence>,
+    pub review_epoch: Option<u64>,
+    pub review_source_generation: Option<u64>,
+    pub review_stale: bool,
+    pub review_refresh_pending: bool,
+    pub local_action: Option<super::walkthrough_view::LocalAction>,
+    pub attachments: HashMap<String, ActionCommandEvidence>,
+    pub attachment_drafts: HashMap<String, companion_state::OutputAttachmentDraft>,
+    pub attachment_fields: Option<super::walkthrough_view::AttachmentFields>,
 }
 impl CompanionUi {
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
@@ -182,6 +303,7 @@ impl CompanionUi {
             status: "Discuss your goal. Editing works offline.".into(),
             cancel: None,
             operation_id: None,
+            foreground: None,
             progress: Arc::new(Mutex::new(None)),
             capture: None,
             question: cx.new(|cx| {
@@ -218,6 +340,7 @@ impl CompanionUi {
             document_drafts: Default::default(),
             solution: None,
             solution_scope: None,
+            solution_history_session: None,
             auto_requests: BTreeSet::new(),
             inspected_step: None,
             model_preference: ModelPreference::Automatic,
@@ -225,6 +348,16 @@ impl CompanionUi {
             model_error: None,
             resolved_model: None,
             document_fingerprint: String::new(),
+            review: None,
+            review_commands: vec![],
+            review_epoch: None,
+            review_source_generation: None,
+            review_stale: false,
+            review_refresh_pending: false,
+            local_action: None,
+            attachments: HashMap::new(),
+            attachment_drafts: HashMap::new(),
+            attachment_fields: None,
         }
     }
     pub fn reset_project(
@@ -238,7 +371,11 @@ impl CompanionUi {
         let runner = self.runner.clone();
         let connection = self.connection.clone();
         let catalog = self.catalog.clone();
+        let attachment_drafts = std::mem::take(&mut self.attachment_drafts);
+        let attachments = std::mem::take(&mut self.attachments);
         *self = Self::new(window, cx);
+        self.attachment_drafts = attachment_drafts;
+        self.attachments = attachments;
         self.runtime = runtime;
         self.runner = runner;
         self.connection = connection;
@@ -278,6 +415,9 @@ impl Workspace {
         )
     }
     pub(super) fn invalidate_companion(&mut self, cx: &mut Context<Self>) {
+        if self.companion.review.is_some() {
+            self.companion.review_stale = true;
+        }
         self.companion.code_epoch = self.companion.code_epoch.saturating_add(1);
         self.companion.context = None;
         cx.notify();
@@ -312,6 +452,11 @@ impl Workspace {
             self.companion
                 .document_drafts
                 .preserve(&session.id, fields.snapshot(cx));
+        }
+        if let Some(fields) = &self.companion.attachment_fields {
+            self.companion
+                .attachment_drafts
+                .insert(fields.scope.clone(), fields.snapshot(cx));
         }
         let text = self.companion.question.read(cx).value().to_string();
         if text != self.companion.composer.text {
@@ -371,6 +516,12 @@ impl Workspace {
                 self.companion.document_events.clear();
                 self.companion.legacy_history.clear();
                 self.companion.session = Some(session);
+                self.companion.review = None;
+                self.companion.review_commands.clear();
+                self.companion.review_epoch = None;
+                self.companion.review_stale = true;
+                self.companion.review_source_generation = None;
+                self.companion.attachment_fields = None;
                 self.companion.documents = None;
                 self.companion.composer = draft.clone();
                 self.companion
@@ -387,6 +538,7 @@ impl Workspace {
                 self.companion.status =
                     "Conversation restored. Approvals belong to the displayed saved versions."
                         .into();
+                self.companion.review_refresh_pending = true;
             }
             Err(e) => self.companion.status = e.to_string(),
         }
@@ -412,6 +564,15 @@ impl Workspace {
             let events = store.conversation_events(id, None, 100)?;
             let document_events = store.document_editor_events(id)?;
             let legacy_history = companion_state::linked_legacy_history(&store, &session)?;
+            let review = store.current_action_review(&session)?;
+            let attachment = store.current_action_attachment(&session)?;
+            let commands = review
+                .as_ref()
+                .map(|(r, _)| store.action_review_input(id, &r.id))
+                .transpose()?
+                .flatten()
+                .map(|i| i.commands)
+                .unwrap_or_default();
             let mut receipts = vec![];
             for event in &events {
                 if let ConversationPayload::ResearchReceiptRecorded { receipt_id } = &event.payload
@@ -422,6 +583,9 @@ impl Workspace {
             }
             Ok((
                 session,
+                review,
+                attachment,
+                commands,
                 events,
                 document_events,
                 legacy_history,
@@ -430,13 +594,39 @@ impl Workspace {
             ))
         })();
         match result {
-            Ok((session, events, document_events, legacy_history, receipts, sessions)) => {
+            Ok((
+                session,
+                review,
+                attachment,
+                commands,
+                events,
+                document_events,
+                legacy_history,
+                receipts,
+                sessions,
+            )) => {
                 self.dev.selected_task = session
                     .plan
                     .as_ref()
                     .map(|p| p.task.id.clone())
                     .or_else(|| session.legacy_task.as_ref().map(|l| l.task_id.clone()));
                 self.companion.session = Some(session);
+                self.companion.review = review;
+                self.companion.review_commands = commands.clone();
+                if let Some(attachment) = attachment {
+                    self.companion.attachments.insert(
+                        serde_json::to_string(&attachment.scope).unwrap(),
+                        attachment,
+                    );
+                }
+                for command in commands {
+                    if matches!(command.provenance, CommandProvenance::UserAttachedOutput) {
+                        self.companion
+                            .attachments
+                            .entry(serde_json::to_string(&command.scope).unwrap())
+                            .or_insert(command);
+                    }
+                }
                 self.companion.document_events = document_events;
                 self.companion.legacy_history = legacy_history;
                 for event in events {
@@ -454,6 +644,7 @@ impl Workspace {
                 if documents {
                     self.load_document_fields(window, cx);
                 }
+                self.load_attachment_fields(window, cx);
             }
             Err(e) => self.companion.status = e.to_string(),
         }
@@ -559,6 +750,7 @@ impl Workspace {
                 let in_scope = {
                     let m = mailbox.lock().unwrap();
                     self.project.as_ref().is_some_and(|p| p.key() == m.project)
+                        && self.companion.operation_id.as_ref() == Some(&m.operation_id)
                         && self
                             .companion
                             .session
@@ -572,6 +764,8 @@ impl Workspace {
                 };
                 let mut m = mailbox.lock().unwrap();
                 m.response = Some(result);
+                m.code_epoch = self.companion.code_epoch;
+                m.source_generation = self.source_generation.load(Ordering::Relaxed);
                 m.requested = false;
             }
         }
@@ -584,7 +778,14 @@ impl Workspace {
                 .as_ref()
                 .is_some_and(|s| s.id == progress.session_id)
         {
-            self.companion.status = format!("{:?}", progress.phase);
+            if let Some(op) = &mut self.companion.foreground {
+                op.phase = if op.stopping {
+                    OperationPhase::Stopping
+                } else {
+                    progress.phase
+                };
+                self.companion.status = companion_state::phase_label(op.phase).into();
+            }
             self.reload_conversation(false, window, cx);
         }
         let fingerprint = self
@@ -599,6 +800,18 @@ impl Workspace {
         }
         if self.companion.busy || self.agent.busy || self.loading {
             return;
+        }
+        if self.companion.review_refresh_pending {
+            // Project restore supplies its editor buffers and discovers local
+            // tools before a saved review can be compared with current inputs.
+            if self.dev.discovering {
+                return;
+            }
+            self.companion.review_refresh_pending = false;
+            self.refresh_saved_review(window, cx);
+            if self.companion.busy {
+                return;
+            }
         }
         let Some(session) = &self.companion.session else {
             return;
@@ -646,6 +859,9 @@ impl Workspace {
             CompanionAction::Hint => ConversationIntent::GatedDiscussion(format!(
                 "Give one conceptual hint for the current action. Keep full implementations hidden. {typed}"
             )),
+            CompanionAction::Explain => ConversationIntent::GatedDiscussion(format!(
+                "Explain only the current action at the selected language and explanation level. Keep implementations hidden. {typed}"
+            )),
             CompanionAction::ImproveClarity
             | CompanionAction::ImproveSpeed
             | CompanionAction::ImproveBalanced => ConversationIntent::Improve {
@@ -667,6 +883,9 @@ impl Workspace {
             _ => ConversationIntent::Discuss,
         };
         self.start_conversation(intent, window, cx);
+        if let Some(op) = &mut self.companion.foreground {
+            op.action = action;
+        }
     }
     pub(super) fn answer_companion(
         &mut self,
@@ -675,6 +894,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.companion.busy || self.agent.busy || self.loading {
+            return;
+        }
+        let control = choice
+            .as_ref()
+            .map(|id| format!("answer:{id}"))
+            .unwrap_or_else(|| "custom-answer".into());
         let custom = self
             .companion
             .custom_answer
@@ -700,6 +926,9 @@ impl Workspace {
             return;
         }
         self.start_conversation(ConversationIntent::Answer(answer), window, cx);
+        if let Some(op) = &mut self.companion.foreground {
+            op.control = Some(control);
+        }
     }
     pub(super) fn start_conversation(
         &mut self,
@@ -710,6 +939,49 @@ impl Workspace {
         if self.companion.busy || self.agent.busy || self.loading {
             return;
         }
+        let initial_action = match &intent {
+            ConversationIntent::DraftSpec => CompanionAction::DraftSpec,
+            ConversationIntent::DraftPlan => CompanionAction::DraftPlan,
+            ConversationIntent::PrepareWalkthrough => CompanionAction::PrepareWalkthrough,
+            ConversationIntent::ReviewAction => CompanionAction::ReviewAction,
+            ConversationIntent::Reveal | ConversationIntent::AutomaticPreview(_) => {
+                CompanionAction::Reveal
+            }
+            _ => CompanionAction::Discuss,
+        };
+        let id = if matches!(intent, ConversationIntent::AutomaticPreview(_)) {
+            let Some(key) = self.companion.session.as_ref().and_then(|s| {
+                companion_state::preview_key(
+                    s,
+                    &self.companion.language,
+                    &self.effective_guidance(),
+                )
+            }) else {
+                return;
+            };
+            format!("preview-{}", content_hash(key.as_bytes()))
+        } else {
+            new_id()
+        };
+        let session_id = self
+            .companion
+            .session
+            .as_ref()
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        self.companion.foreground = Some(companion_state::ForegroundOperation::new(
+            id.clone(),
+            session_id.clone(),
+            initial_action,
+        ));
+        self.companion.operation_id = Some(id.clone());
+        self.companion.busy = true;
+        self.companion.status =
+            companion_state::phase_label(OperationPhase::PreservingInput).into();
+        if initial_action == CompanionAction::ReviewAction {
+            self.companion.review_stale = true;
+        }
+        cx.notify();
         let result = (|| -> Result<_> {
             self.flush(cx)?;
             self.preserve_composer(cx)?;
@@ -719,22 +991,6 @@ impl Workspace {
                 .session
                 .as_ref()
                 .context("Continue the legacy task in a conversation first")?;
-            let id = if matches!(intent, ConversationIntent::AutomaticPreview(_)) {
-                format!(
-                    "preview-{}",
-                    content_hash(
-                        companion_state::preview_key(
-                            session,
-                            &self.companion.language,
-                            &self.effective_guidance()
-                        )
-                        .context("No current action is authorized for preview")?
-                        .as_bytes()
-                    )
-                )
-            } else {
-                new_id()
-            };
             let session_id = session.id.clone();
             let input = ConversationInput {
                 id: id.clone(),
@@ -749,6 +1005,9 @@ impl Workspace {
         let (project, id, session_id, input) = match result {
             Ok(v) => v,
             Err(e) => {
+                self.companion.busy = false;
+                self.companion.foreground = None;
+                self.companion.operation_id = None;
                 self.companion.status = e.to_string();
                 cx.notify();
                 return;
@@ -769,6 +1028,7 @@ impl Workspace {
         let mailbox = Arc::new(Mutex::new(CaptureMailbox {
             project: project.key().into(),
             session_id: session_id.clone(),
+            operation_id: id.clone(),
             ..Default::default()
         }));
         // Bind research to the same selected tools and saved trust as this UI
@@ -788,14 +1048,14 @@ impl Workspace {
                 cache: companion_cache(),
                 check_environment,
                 recipe_ids: self.dev.recipes.iter().map(|r| r.id.clone()).collect(),
-                attachments: vec![],
+                attachments: self.current_attachments(),
             },
             mailbox: mailbox.clone(),
+            store: self.store.clone(),
         };
-        self.companion.capture = Some(mailbox);
+        self.companion.capture = Some(mailbox.clone());
         self.companion.busy = true;
         self.companion.operation_id = Some(id.clone());
-        self.companion.solution = None;
         let cancel = Arc::new(AtomicBool::new(false));
         self.companion.cancel = Some(cancel.clone());
         let runner = self.companion.runner.clone();
@@ -833,15 +1093,19 @@ impl Workspace {
         window.spawn(cx,async move |cx| {
             let result=operation.await;
             let _=weak.update_in(cx,|view,window,cx| {
-                if view.epoch!=epoch || view.project.as_ref().is_none_or(|p|p.key()!=project_key) || view.companion.operation_id.as_ref()!=Some(&id) || view.companion.session.as_ref().is_none_or(|s|s.id!=session_id) { return; }
-                view.companion.busy=false; view.companion.cancel=None; view.companion.capture=None; view.companion.operation_id=None;
+                if view.epoch!=epoch || view.project.as_ref().is_none_or(|p|p.key()!=project_key) || view.companion.operation_id.as_ref()!=Some(&id) || view.companion.foreground.as_ref().is_none_or(|op|!op.owns(&id,&session_id)) || view.companion.session.as_ref().is_none_or(|s|s.id!=session_id) { return; }
+                let captured_epoch=mailbox.lock().unwrap().code_epoch;
+                let captured_source=mailbox.lock().unwrap().source_generation;
+                view.companion.busy=false; view.companion.cancel=None; view.companion.capture=None; view.companion.operation_id=None; view.companion.foreground=None;
                 let document_proposal=result.as_ref().is_ok_and(|r|matches!(r.outcome,OperationOutcome::Completed{..})&&!r.historical&&matches!(r.response,Some(CompanionResponse::SpecDraft(_)|CompanionResponse::PlanDraft(_))));
                 view.reload_conversation(document_proposal,window,cx);
+                if matches!(initial_action, CompanionAction::ReviewAction) || result.as_ref().is_ok_and(|r|r.review.is_some()) { view.companion.review_epoch=Some(captured_epoch); view.companion.review_source_generation=Some(captured_source); view.companion.review_stale=captured_epoch!=view.companion.code_epoch || captured_source!=view.source_generation.load(Ordering::Relaxed) || !result.as_ref().is_ok_and(|r|matches!(r.outcome,OperationOutcome::Completed{..})&&!r.historical&&r.review.is_some()); }
                 match result {
                     Ok(result)=>{
                         let completed=matches!(result.outcome,OperationOutcome::Completed{..}) && !result.historical;
                         view.companion.status=match result.outcome {OperationOutcome::Completed{summary}=>summary,OperationOutcome::Failed{detail}|OperationOutcome::Cancelled{detail}|OperationOutcome::Interrupted{detail}=>detail};
                         if completed && view.companion.language==requested_language && view.effective_guidance().fingerprint()==requested_guidance && let Some(CompanionResponse::Solution(solution))=result.response {
+                            view.companion.solution_history_session=None;
                             let editor=cx.new(|cx|EditorState::new(window,cx).language(&solution.language).default_value(solution.code));
                             view.companion.solution_scope=view.companion.session.as_ref().and_then(|s|s.authorize(WorkflowAction::Reveal).ok().zip(s.current_action().ok())).map(|(workflow,_)|companion_state::SolutionScope{workflow,action_scope:DelegationActionScope::current(view.companion.session.as_ref().unwrap()).unwrap(),language:requested_language.clone(),guidance:requested_guidance.clone()});
                             view.companion.solution=Some((solution.summary,editor));
@@ -865,31 +1129,56 @@ impl Workspace {
             return;
         }
         self.companion.busy = true;
-        let id = new_id();
+        let id = format!("{}-{}", if login { "login" } else { "models" }, new_id());
         self.companion.operation_id = Some(id.clone());
+        let session_id = self
+            .companion
+            .session
+            .as_ref()
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        self.companion.foreground = Some(companion_state::ForegroundOperation::new(
+            id.clone(),
+            session_id.clone(),
+            CompanionAction::Discuss,
+        ));
+        self.companion.foreground.as_mut().unwrap().phase = OperationPhase::CheckingAccount;
+        self.companion.status = "Checking account and available models…".into();
         let cancel = Arc::new(AtomicBool::new(false));
         self.companion.cancel = Some(cancel.clone());
         let runtime = SharedBackend(self.companion.runtime.clone());
+        let epoch = self.epoch;
         let operation = cx.background_spawn(async move {
             runtime.with(|s| {
+                anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Connection cancelled");
                 let state = if login {
                     s.login(&cancel)?
                 } else {
                     s.refresh()?
                 };
+                anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Connection cancelled");
                 let catalog = s.list_models();
+                anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Connection cancelled");
                 Ok((state, catalog))
             })
         });
         cx.spawn(async move |view, cx| {
             let result = operation.await;
             let _ = view.update(cx, |view, cx| {
-                if view.companion.operation_id.as_ref() != Some(&id) {
+                if view.epoch != epoch
+                    || view.companion.operation_id.as_ref() != Some(&id)
+                    || view
+                        .companion
+                        .foreground
+                        .as_ref()
+                        .is_none_or(|op| !op.owns(&id, &session_id))
+                {
                     return;
                 }
                 view.companion.busy = false;
                 view.companion.operation_id = None;
                 view.companion.cancel = None;
+                view.companion.foreground = None;
                 match result {
                     Ok((state, catalog)) => {
                         view.companion.status = state.detail.clone();
@@ -1106,7 +1395,7 @@ impl Workspace {
         cx.notify();
     }
 }
-fn companion_cache() -> PathBuf {
+pub(super) fn companion_cache() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
         .join("Library/Caches/Tandem/companion-context")
 }
