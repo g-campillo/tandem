@@ -3,8 +3,8 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::{Context as _, Result, ensure};
-use gpui_kit::component::StyledExt;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, Sizable, StyledExt};
 use gpui_kit::*;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -330,37 +330,56 @@ impl Render for TerminalView {
             }))
             .v_flex()
             .w_full()
+            .min_w_0()
             .h(px(230.0))
             .flex_shrink_0()
             .overflow_hidden()
             .p_2()
-            .bg(rgb(0x17191e))
-            .text_color(rgb(0xe5e7eb))
-            .font_family("Menlo")
-            .text_size(px(12.0))
-            .line_height(px(18.0))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             .child(
                 div()
                     .h_flex()
-                    .gap_2()
+                    .flex_wrap()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .gap_1()
                     .mb_1()
+                    .font_family(".SystemUIFont")
                     .child(
                         Button::new("terminal-interrupt")
-                            .label("Interrupt")
+                            .small()
+                            .compact()
+                            .h(px(28.))
+                            .ghost()
+                            .accessibility_label("Interrupt")
+                            .child(div().text_size(px(13.)).child("Interrupt"))
                             .on_click(cx.listener(|this, _, _, _| {
                                 let _ = this.terminal.send(&[3]);
                             })),
                     )
                     .child(
                         Button::new("terminal-copy")
-                            .label("Copy Visible Output")
+                            .small()
+                            .compact()
+                            .h(px(28.))
+                            .ghost()
+                            .accessibility_label("Copy Visible Output")
+                            .child(div().text_size(px(13.)).child("Copy Visible Output"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(this.text.clone()))
                             })),
                     )
                     .child(
                         Button::new("terminal-bottom")
-                            .label("Latest Output")
+                            .small()
+                            .compact()
+                            .h(px(28.))
+                            .ghost()
+                            .accessibility_label("Latest Output")
+                            .child(div().text_size(px(13.)).child("Latest Output"))
                             .on_click(
                                 cx.listener(|this, _, _, _| this.terminal.scroll(Scroll::Bottom)),
                             ),
@@ -371,6 +390,9 @@ impl Render for TerminalView {
                     .id("terminal-output")
                     .role(Role::Label)
                     .aria_label(self.text.clone())
+                    .font_family("Menlo")
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
                     .children(
                         self.text
                             .lines()

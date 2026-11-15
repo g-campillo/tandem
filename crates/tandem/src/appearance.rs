@@ -1,10 +1,78 @@
 //! Application-owned semantic colors, reapplied after the toolkit loads a mode.
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_kit::component::{Selectable, Theme, ThemeMode, ThemeTokens};
+use gpui_kit::component::{Selectable, Sizable, Theme, ThemeMode, ThemeTokens};
 use gpui_kit::prelude::FluentBuilder;
-use gpui_kit::{App, Hsla, Subscription, Window, rgb};
+use gpui_kit::{App, Hsla, ParentElement, SharedString, Subscription, Window, div, rgb};
 use gpui_kit::{FontWeight, Styled, px};
 use std::sync::Arc;
+
+/// Pane widths include their separators. Keep the editor and terminal on the
+/// same available-width calculation as the visible navigation panes.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkspaceGeometry {
+    pub sidebar: f32,
+    pub utility: f32,
+    pub content: f32,
+}
+
+impl WorkspaceGeometry {
+    pub fn for_width(width: f32, utility_visible: bool) -> Self {
+        let width = width.max(0.);
+        let progress = ((width - 900.) / (1280. - 900.)).clamp(0., 1.);
+        let sidebar = 210. + 40. * progress;
+        let utility = if utility_visible {
+            320. + 70. * progress
+        } else {
+            0.
+        };
+        Self {
+            sidebar,
+            utility,
+            content: (width - sidebar - utility).max(0.),
+        }
+    }
+
+    pub fn terminal_available_width(self) -> f32 {
+        // TerminalView retains p_2: 8px on either side with the 16px rem basis.
+        (self.content - 16.).max(0.)
+    }
+}
+
+/// Toolkit buttons retain their keyboard/accessibility behavior; a child label
+/// lets chrome use 13px type independently of the toolkit's 16px spacing basis.
+pub fn compact_button(button: Button, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    button
+        .small()
+        .h(px(28.))
+        .rounded(px(6.))
+        .font_family(".SystemUIFont")
+        .accessibility_label(label.clone())
+        .child(div().text_size(px(13.)).child(label))
+}
+
+/// Long paths stay visible and retain their complete accessible name.
+pub fn path_button(button: Button, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    button
+        .small()
+        .h_auto()
+        .min_h(px(28.))
+        .py_1()
+        .w_full()
+        .min_w_0()
+        .justify_start()
+        .rounded(px(6.))
+        .accessibility_label(label.clone())
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .text_size(px(13.))
+                .child(label),
+        )
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {

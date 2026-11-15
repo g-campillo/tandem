@@ -1,8 +1,56 @@
-use super::{palette, project};
+use super::{WorkspaceGeometry, palette, project};
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::{Theme, ThemeConfig, ThemeMode};
 use gpui_kit::{Hsla, Rgba, WindowAppearance, px, rgb};
 use std::rc::Rc;
+
+#[test]
+fn appearance_workspace_geometry_interpolates_and_clamps_panes() {
+    for (width, sidebar, utility) in [
+        (900., 210., 320.),
+        (1090., 230., 355.),
+        (1280., 250., 390.),
+        (1600., 250., 390.),
+    ] {
+        let shown = WorkspaceGeometry::for_width(width, true);
+        assert_eq!(shown.sidebar, sidebar);
+        assert_eq!(shown.utility, utility);
+        assert_eq!(shown.content, width - sidebar - utility);
+        assert!(
+            shown.content >= 360.,
+            "the minimum window keeps a useful editor"
+        );
+
+        let hidden = WorkspaceGeometry::for_width(width, false);
+        assert_eq!(hidden.sidebar, sidebar);
+        assert_eq!(hidden.utility, 0.);
+        assert_eq!(hidden.content, shown.content + utility);
+    }
+}
+
+#[test]
+fn appearance_workspace_geometry_keeps_terminal_width_inside_content() {
+    for width in [-10., 0., 400., 900., 1090., 1280., 1600.] {
+        for visible in [false, true] {
+            let geometry = WorkspaceGeometry::for_width(width, visible);
+            assert!(geometry.content >= 0.);
+            assert!(geometry.terminal_available_width() >= 0.);
+            assert!(geometry.terminal_available_width() <= geometry.content);
+            assert_eq!(
+                geometry.terminal_available_width(),
+                (geometry.content - 16.).max(0.),
+                "terminal columns exclude the existing 8px inset on each side"
+            );
+        }
+    }
+    let narrow = WorkspaceGeometry::for_width(900., true);
+    let wide = WorkspaceGeometry::for_width(1280., true);
+    assert_eq!(
+        (narrow.terminal_available_width() / 7.3).max(40.) as u16,
+        48
+    );
+    assert_eq!((wide.terminal_available_width() / 7.3).max(40.) as u16, 85);
+}
 
 fn assert_projection(theme: &Theme, mode: ThemeMode) {
     let p = palette(mode);

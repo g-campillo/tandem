@@ -5,10 +5,10 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 
 impl Workspace {
-    pub(super) fn development_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn development_panel(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
         div()
             .v_flex()
-            .w(px(410.0))
+            .w(px(width))
             .flex_shrink_0()
             .min_h_0()
             .border_l_1()
