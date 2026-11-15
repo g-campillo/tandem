@@ -64,6 +64,7 @@ struct Peer {
     fail: Option<String>,
     model: String,
     tool: bool,
+    informational: Vec<(String, Value)>,
     raw: Option<String>,
 }
 #[derive(Clone)]
@@ -110,6 +111,14 @@ impl ProtocolExchange for Wire {
                     peer.answers.pop_front().expect("unexpected model dispatch")(&params)
                         .to_string()
                 };
+                for (event_turn, item) in std::mem::take(&mut peer.informational) {
+                    let event_turn = if event_turn == "current" {
+                        turn.clone()
+                    } else {
+                        event_turn
+                    };
+                    peer.events.push_back(json!({"method":"item/completed","params":{"threadId":thread,"turnId":event_turn,"item":item}}));
+                }
                 let item = if peer.tool {
                     json!({"type":"commandExecution"})
                 } else {
@@ -1458,6 +1467,51 @@ fn every_preparation_model_and_research_phase_can_cancel_without_followup_or_stu
                     }
                 )));
             }
+        }
+    }
+}
+
+#[test]
+fn context_compaction_waits_for_current_final_output_without_tool_authority_or_content() {
+    for (kind, current, succeeds) in [
+        ("contextCompaction", true, true),
+        ("commandExecution", true, false),
+        ("unknownTool", true, false),
+        ("commandExecution", false, true),
+        ("contextCompaction", false, true),
+    ] {
+        let mut f = Fixture::new();
+        f.peer.lock().unwrap().informational.push((
+            if current { "current" } else { "unrelated-turn" }.into(),
+            json!({"id":"compaction-id","type":kind,"startedAtMs":1,"completedAtMs":2,"text":"PRIVATE_COMPACTION_SENTINEL"}),
+        ));
+        f.reply(reply("Final current response."));
+        let mut runner = f.runner();
+        let result = f.run(&mut runner, "compaction", ConversationIntent::Discuss);
+        assert_eq!(
+            matches!(result.outcome, OperationOutcome::Completed { .. }),
+            succeeds,
+            "{kind} current={current}"
+        );
+        let runs = f
+            .store
+            .lock()
+            .unwrap()
+            .model_runs(f.capture.project.key())
+            .unwrap();
+        assert_eq!(runs[0].tool_items, usize::from(!succeeds));
+        assert_eq!(runs[0].response.is_some(), succeeds);
+        assert!(
+            !serde_json::to_string(&f.events())
+                .unwrap()
+                .contains("PRIVATE_COMPACTION_SENTINEL")
+        );
+        if succeeds {
+            assert!(
+                serde_json::to_string(&runs[0].response)
+                    .unwrap()
+                    .contains("Final current response.")
+            );
         }
     }
 }

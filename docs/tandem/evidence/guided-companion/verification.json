@@ -2,7 +2,7 @@
   "task": 10,
   "date": "2026-11-15",
   "base_sha": "b7e24ff111bbdab14d3cc2e14fe088d5e2e05a50",
-  "status": "blocked_real_python_partial_native_partial",
+  "status": "real_journeys_passed_native_partial",
   "runtime": {
     "version": "codex-cli 0.169.0",
     "sha256": "739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002",
@@ -18,34 +18,35 @@
   "source_hashes": {
     "crates/tandem-core/src/companion.rs": "3c9dc93a5ab29e7a99a2d4e0915395b686dc6483ab7ebef00be190c1ce9f2b4e",
     "crates/tandem-core/src/walkthrough.rs": "e75997fc810a74c867058351d913835b1330252314a7cb2308b937da58df9c04",
-    "crates/tandem-companion/src/runtime.rs": "92eb2d7a638b196e6efac401352e60bcce431b6bfd925033fd849381e7b3c8a7",
-    "crates/tandem-companion/examples/guided_journeys.rs": "3a3ee3f4a6b624af3608a5bb7383f2dfbc976067746c7f74bff44f4c981fa9df",
-    "crates/tandem-companion/examples/guided_support/mod.rs": "61734b926d34203675c5a9807bd72a0cc841b1ee227e355273806db8070079e6",
-    "crates/tandem-companion/tests/guided_journey.rs": "7a32bf75fff3c8e8f8617a7b66020f4de304df6a6e7a734fd29236f1624147cd",
+    "crates/tandem-companion/src/runtime.rs": "d2a62264d75920a7951f1f24d2152ae680467530f8e6cf8126653b55007a6892",
+    "crates/tandem-companion/examples/guided_journeys.rs": "79e646478c07a3e1c1e896973425692daf77a8877b4864efda936147e3514aeb",
+    "crates/tandem-companion/examples/guided_support/mod.rs": "220fb88cd2c1e7394b4657f68628b6fd514e2c39a2ad0f1020ec22582acf43a8",
+    "crates/tandem-companion/tests/guided_journey.rs": "3d51db64e82bddffbf6b0d1e092606add9f34727e83623f89b63c300fa31afcc",
     "crates/tandem-codex/src/lib.rs": "f154e71fbbe0f75455a1a04fd4c75b252c92cd3718727ade0c8c761f966a0d09",
     "crates/tandem-core/src/conversation.rs": "f834d913b518d7cd972f8822e01c1ebc2e9ae98b9c97d0ca220f88a86f37cd9b",
-    "crates/tandem-companion/examples/guided_support/supplemental.rs": "5e0096d789c7abec39598d7ad5b7f560184c107b0ce8588d90e1692404abef01"
+    "crates/tandem-companion/examples/guided_support/supplemental.rs": "5e0096d789c7abec39598d7ad5b7f560184c107b0ce8588d90e1692404abef01",
+    "crates/tandem-companion/tests/guided_session.rs": "4859536eefd443ce742c69c6a5ea22145a613848e3433ffe2df91a74eca08cb0"
   },
   "turn_usage": {
     "probe": 1,
-    "python": 51,
+    "python": 68,
     "rust": 52,
-    "total": 104
+    "total": 121
   },
   "authorized_caps": {
     "probe": 4,
     "rust": 56,
-    "python": 56,
-    "aggregate": 116
+    "python": 72,
+    "aggregate": 132
   },
   "automated": {
     "class": "D/S",
     "workspace": {
-      "passed": 293,
+      "passed": 297,
       "failed": 0,
       "ignored": 2
     },
-    "guided_journey_tests": 20,
+    "guided_journey_tests": 23,
     "clippy_all_targets": "passed",
     "format": "passed",
     "build": "passed",
@@ -58,8 +59,22 @@
       "Actual protocol serialization puts tagged discriminator first only in outputSchema; ordinary JSON/storage identity and semantic schema unchanged; works with both serde_json map configurations",
       "Clarification choice schema matches host2..5 bound; live fixture facts report absence/presence/exact7casecoverage/installedargv and refuse mutated originals",
       "Bounded retest recognizes duplicate PublicPages and requests ordinary cancellation without another broker/model round",
-      "Snapshot-only supplemental oracle is captured identically for checks/reviews; missing/changed overlay rejects earlier evidence, mutated oracle refuses harness dispatch"
-    ]
+      "Snapshot-only supplemental oracle is captured identically for checks/reviews; missing/changed overlay rejects earlier evidence, mutated oracle refuses harness dispatch",
+      "Additive Python-only72/132 authorization binds immutable v2/model files and49/96/104 prefixes; canonical hash stable with either JSON map representation; oldcap/lane/reopen/tampering rejected",
+      "Correlated pinned contextCompaction ignored without content exposure or terminal authority; final message required, unrelated turn ignored, actual/unknown tools quarantined",
+      "Exact generated Git command targets retained; checkout refused, captured metadata strips malicious fsmonitor/externaldiff configuration; cumulative baseline commands rerun under current scope",
+      "Stored current attachments retain exact IDs/hashes across capture/publication/Next; late replacement and newly relevant incomplete journal still rejected"
+    ],
+    "guided_session_tests": 34,
+    "observed_transient_failure": {
+      "command": "cargo test -p tandem-companion --test guided_journey --test guided_session",
+      "test": "mixed_research_and_question_researches_first_publishes_one_question_and_no_artifact",
+      "error": "called Result::unwrap() on an Err value: Another Tandem instance is using this state directory\n\nCaused by:\n    lock acquisition failed because the operation would block",
+      "classification": "Observed transient/unclassified; no baseline or causal evidence establishes preexistence",
+      "retained_full_log": ".tandem-local/guided-companion/approved-suite/v3-targeted-tests.log",
+      "focused_recheck": "23 journey and34 session tests passed",
+      "latest_full_workspace": "297passed,0failed,2ignored; strictClippy/fmt/build passed"
+    }
   },
   "real": {
     "probe": {
@@ -141,8 +156,8 @@
       "legacy_receipt_field_note": "Historical live_source_unchanged asserts protected originals and last explicit human-owned module baseline, not equality to the pre-implementation tree"
     },
     "python": {
-      "outcome": "Turn51 quarantined: A question needs2\u20135 choices and also allows a custom answer",
-      "stage": "Saved approved original two-step plan/Start unchanged; actual local research and domain structured answer observed; no actions/reviews/Next",
+      "outcome": "Passed all approved steps and final full-spec validation",
+      "stage": "Complete",
       "structured_answers": 2,
       "actual_research_kinds": [
         "dependencies",
@@ -151,9 +166,9 @@
         "other",
         "public"
       ],
-      "implementation_complete": false,
+      "implementation_complete": true,
       "last_continuation_receipt": ".tandem-local/guided-companion/approved-suite/python/receipt.json",
-      "status": "partial_stopped_with_insufficient_remaining_allowance",
+      "status": "passed",
       "saved_and_approved_spec_ref": {
         "revision": 1,
         "hash": "f29a8c5d0af71fdddb7d27e9d7f74f5931d1edcaa1c8aa5c103a5d37edf4303d"
@@ -164,14 +179,14 @@
       },
       "plan_steps": 2,
       "started_generation": 1,
-      "real_action_reviews": 0,
-      "consumed_action_transitions": 0,
-      "next_stage": "PrepareWalkthrough unresolved; actual live file absence and supplemental direct-check source need truthful clarification; actions/reviews/Next/full-spec unverified",
-      "remaining_turns": 5,
+      "real_action_reviews": 12,
+      "consumed_action_transitions": 9,
+      "next_stage": null,
+      "remaining_turns": 4,
       "repeated_public_page_requests": "Two bounded private operations requested PublicPage while prose described missing local research; no cause established; not rerun merely to spend remaining allowance",
       "schema_diagnostic": "All12 local/public anyOf variants and clarification fields retained; pinned provider passes schema unchanged; no evidenced public/private thread crossover",
       "additional_zero_turn_diagnosis": "Both bounded8-round operations retain explicit human request/current captured contract and all seven complete receipt batches. No demonstrated host routing defect or public/private thread crossover. Missing module snapshot explains a request for more evidence but not the repeated wrong PublicPage kind.",
-      "structured_answer_qualification": "First answer confirms domain; second generic harness domain answer did not answer new existence/check-coverage prerequisites",
+      "structured_answer_qualification": "First answer confirms domain; second generic harness domain answer did not answer new existence/check-coverage prerequisites; append-only truthful fixture correction preceded turn52",
       "approved_documents_approvals_start_and_session_unchanged": {
         "id": true,
         "spec": true,
@@ -185,23 +200,97 @@
         "Provide and independently validate the limits module",
         "Verify the unchanged caller and contract suite"
       ],
-      "walkthrough_count": 0,
-      "remaining_call_lower_bound": {
-        "prepare_first_walkthrough": 1,
-        "create_symbol_command_and_cumulative_validation_reviews": 4,
-        "wrong_and_missing_evidence_additional_negative_reviews": 2,
-        "first_step_only_minimum": 7,
-        "second_step_and_final_spec": "additional preparation and reviews required; no legitimate action count exists yet"
-      },
-      "last_contract_fix": "Empty choices51 quarantined; wire minItems2/maxItems5 added with failing/passing regression, no real retest",
-      "harness_answer_fix": "Subsequent answers now distinguish observed live module state, installed argv, original seven cases, supplied nine-case check-input overlay, and missing executed real-journey evidence; no model retest after this fix",
+      "walkthrough_count": 3,
+      "last_contract_fix": "Pinned informational contextCompaction is now recognized; actual/unknown tools remain failclosed",
+      "harness_answer_fix": "Actual retest produced four tiny step1 actions; original caller/oracle/manifest bytes retained",
       "remaining_call_estimate": {
-        "first_step_minimum": 7,
-        "second_step_minimum": 3,
-        "final_spec_minimum": 2,
-        "minimum_total": 12,
-        "caveat": "No real atomic actions exist yet; actual model research/clarifications may add turns. Five remaining turns are insufficient; no additional usage has been authorized."
-      }
+        "status": "No required real journey work remains",
+        "remaining_authorized_python": 4
+      },
+      "history_before_v3": {
+        "outcome": "Turn51 quarantined: A question needs2\u20135 choices and also allows a custom answer",
+        "stage": "Saved approved original two-step plan/Start unchanged; actual local research and domain structured answer observed; no actions/reviews/Next",
+        "status": "partial_stopped_with_insufficient_remaining_allowance",
+        "next_stage": "PrepareWalkthrough unresolved; actual live file absence and supplemental direct-check source need truthful clarification; actions/reviews/Next/full-spec unverified",
+        "remaining_turns": 5,
+        "last_contract_fix": "Empty choices51 quarantined; wire minItems2/maxItems5 added with failing/passing regression, no real retest",
+        "harness_answer_fix": "Subsequent answers now distinguish observed live module state, installed argv, original seven cases, supplied nine-case check-input overlay, and missing executed real-journey evidence; no model retest after this fix",
+        "remaining_call_estimate": {
+          "first_step_minimum": 7,
+          "second_step_minimum": 3,
+          "final_spec_minimum": 2,
+          "minimum_total": 12,
+          "caveat": "No real atomic actions exist yet; actual model research/clarifications may add turns. Five remaining turns are insufficient; no additional usage has been authorized."
+        },
+        "remaining_call_lower_bound": {
+          "prepare_first_walkthrough": 1,
+          "create_symbol_command_and_cumulative_validation_reviews": 4,
+          "wrong_and_missing_evidence_additional_negative_reviews": 2,
+          "first_step_only_minimum": 7,
+          "second_step_and_final_spec": "additional preparation and reviews required; no legitimate action count exists yet"
+        }
+      },
+      "review_outcomes": {
+        "Passed": 9,
+        "NeedsChanges": 3
+      },
+      "exactly_once_next_checks": 9,
+      "assertions": {
+        "command": true,
+        "create_file": true,
+        "immutable_originals_and_human_save_baseline_match": true,
+        "implementation_complete": true,
+        "missing_evidence_rejected": true,
+        "named_symbol": true,
+        "owned_module_last_human_save_hash": "cdc7f90f7726c6508212402fc28dcc3a20222be8588fd04ba5775eda5e63fba1",
+        "wrong_rejected": true
+      },
+      "final_spec_assessments": [
+        {
+          "criterion_ref": {
+            "type": "SpecAcceptance",
+            "id": "A1"
+          },
+          "satisfied": true
+        },
+        {
+          "criterion_ref": {
+            "type": "SpecAcceptance",
+            "id": "A2"
+          },
+          "satisfied": true
+        },
+        {
+          "criterion_ref": {
+            "type": "SpecAcceptance",
+            "id": "A3"
+          },
+          "satisfied": true
+        },
+        {
+          "criterion_ref": {
+            "type": "SpecAcceptance",
+            "id": "A4"
+          },
+          "satisfied": true
+        }
+      ],
+      "original_saved_spec_plan_unchanged": true,
+      "immutable_originals_and_last_human_save_baseline_match": true,
+      "owned_module_last_human_save_hash": "cdc7f90f7726c6508212402fc28dcc3a20222be8588fd04ba5775eda5e63fba1",
+      "current_binding_supplemental_check_inputs": "Actual isolated checks included the fixed nine-case overlay, captured identically for review; live overlay file remains absent",
+      "new_failure_history": [
+        "Python60 informational contextCompaction misclassified and quarantined; exact thread/read diagnosis retained",
+        "Python64 current exact-baseline evidence missing; NeedsChanges persisted, no Next",
+        "Python65 model Passed but Store rejected publication for omitted saved attachment; no accepted review/Next",
+        "Python66 Passed persisted; Next rejected changing attachment set; subsequent fresh exact-binding normal Next reused this accepted review with zero additional model turn"
+      ],
+      "limitations": [
+        "Git output remains UserAttachedOutput/Unvalidated, not authenticated local-check provenance",
+        "No-installer statement is labelled fixture operator testimony backed by logged choices and unchanged source/manifests, not machine-wide history proof",
+        "Execution used Python3.14.6; Python3.10 syntax compatibility was source-reviewed",
+        "Native verification remains partial; no native subscription calls"
+      ]
     },
     "python_actual_input_diagnostics": {
       "actual_turn_has_explicit_draft_spec_intent": true,
@@ -282,7 +371,7 @@
       "native_model_turns": 0
     },
     "supplemental_direct_evidence_proposal": {
-      "status": "implemented and actual isolated kernel proof passed; not exercised in saved real Python journey",
+      "status": "Separate zero-model kernel proof passed; later real journey verified independently",
       "class": "R actual isolated validation kernel; workflow setup is deterministic simulated data, no AI reviews",
       "model_turns": 0,
       "real_journey_progress": false,
@@ -300,7 +389,120 @@
       "ledger_bytes_unchanged": true,
       "receipt": ".tandem-local/guided-companion/approved-suite/supplemental-kernel-proof-14298936-1bd0-4252-affa-24348240c6fb/receipt.json",
       "integration": "Same fixed overlay follows harness context, checks, module overlay/save and Store restart; no original-source write or new recipe",
-      "remaining": "Saved real Python session still needs actual implementation, isolated checks and AI reviews; kernel workflow is only simulated"
+      "remaining": null,
+      "saved_real_journey_status": "Actual saved Python journey passed isolated checks and cumulative/full-spec AI validation with the same nine-case snapshot overlay; separate zero-model proof retained",
+      "scope": "All kernel proof fields describe the separate disposable zero-model fixture; saved real journey results are recorded separately"
+    },
+    "python_final_check_inputs": [
+      {
+        "id": "397432ac-5312-46cc-8032-d9f8551e3211",
+        "status": "Failed",
+        "exit_code": 1,
+        "snapshot_id": "d5e4394d7f91134ee8e6bf697e44a9fcf268f2db88492f19c15851144e2e8bab",
+        "supplemental_overlay": {
+          "path": "test_tandem_direct_evidence.py",
+          "hash": "629f738da90bbcd296a580417b4ba1859a97bbac55c8c5082157e7f40eeac69f",
+          "bytes": 649,
+          "executable": false,
+          "buffer_revision": 1,
+          "original_hash": null
+        },
+        "snapshot_unchanged": true,
+        "output_truncated": false
+      },
+      {
+        "id": "b487d417-2d95-4376-9815-3a2d2e6dcae2",
+        "status": "Passed",
+        "exit_code": 0,
+        "snapshot_id": "c69aa92d9c7f5f28369c0df17f893a41fa760b3c0c6159731c2913328f9475eb",
+        "supplemental_overlay": {
+          "path": "test_tandem_direct_evidence.py",
+          "hash": "629f738da90bbcd296a580417b4ba1859a97bbac55c8c5082157e7f40eeac69f",
+          "bytes": 649,
+          "executable": false,
+          "buffer_revision": 1,
+          "original_hash": null
+        },
+        "snapshot_unchanged": true,
+        "output_truncated": false
+      },
+      {
+        "id": "ced48445-7715-4fe9-b0dc-e7cc70f40c75",
+        "status": "Passed",
+        "exit_code": 0,
+        "snapshot_id": "c69aa92d9c7f5f28369c0df17f893a41fa760b3c0c6159731c2913328f9475eb",
+        "supplemental_overlay": {
+          "path": "test_tandem_direct_evidence.py",
+          "hash": "629f738da90bbcd296a580417b4ba1859a97bbac55c8c5082157e7f40eeac69f",
+          "bytes": 649,
+          "executable": false,
+          "buffer_revision": 1,
+          "original_hash": null
+        },
+        "snapshot_unchanged": true,
+        "output_truncated": false
+      },
+      {
+        "id": "d5a366e9-7d55-43a4-a37f-df515c7a22c0",
+        "status": "Passed",
+        "exit_code": 0,
+        "snapshot_id": "c69aa92d9c7f5f28369c0df17f893a41fa760b3c0c6159731c2913328f9475eb",
+        "supplemental_overlay": {
+          "path": "test_tandem_direct_evidence.py",
+          "hash": "629f738da90bbcd296a580417b4ba1859a97bbac55c8c5082157e7f40eeac69f",
+          "bytes": 649,
+          "executable": false,
+          "buffer_revision": 1,
+          "original_hash": null
+        },
+        "snapshot_unchanged": true,
+        "output_truncated": false
+      },
+      {
+        "id": "37e532d8-f5f5-4c65-8619-d7cdfcbad5a0",
+        "status": "Passed",
+        "exit_code": 0,
+        "snapshot_id": "c69aa92d9c7f5f28369c0df17f893a41fa760b3c0c6159731c2913328f9475eb",
+        "supplemental_overlay": {
+          "path": "test_tandem_direct_evidence.py",
+          "hash": "629f738da90bbcd296a580417b4ba1859a97bbac55c8c5082157e7f40eeac69f",
+          "bytes": 649,
+          "executable": false,
+          "buffer_revision": 1,
+          "original_hash": null
+        },
+        "snapshot_unchanged": true,
+        "output_truncated": false
+      }
+    ],
+    "informational_compaction": {
+      "pinned_type": "contextCompaction",
+      "historical_run_status": "Quarantined, unchanged",
+      "official_thread_read_item_hash": "48fe3edf47ca54f0b9d3a330e17606fd6eda60a42179e79357aeb46ebe0bc0fe",
+      "misclassified_tool_items": 1,
+      "actual_executable_tool_activity_observed": false,
+      "fix_scope": "Only known informational item ignored; no payload emitted; normal final-output/turn correlation required",
+      "real_retest": "Remaining integration reviews and fullspec completed"
+    },
+    "command_restoration": {
+      "original_step1_actions_exactly_equal_saved_actions": true,
+      "original_step1_run": "e9d227b9-6f5c-435b-8747-05d37a1089cb",
+      "unfinished_step2_old_artifact_archived": true,
+      "restored_exact_provider_actions": true,
+      "cursor_at_restore": 0,
+      "new_walkthrough_id": "53e42ef6-1cde-4d3b-be16-71ba6b95396f",
+      "no_approved_document_or_started_generation_change": true,
+      "proof": ".tandem-local/guided-companion/approved-suite/python/command-restoration-53e42ef6-1cde-4d3b-be16-71ba6b95396f.json",
+      "git_outputs": "Actual allowlisted read-only commands with sanitized captured Git metadata; always labelled UserAttachedOutput/Unvalidated",
+      "cumulative_inputs": "Fresh exact original-baseline comparisons, not retagged historical output"
+    },
+    "accepted_review_resume": {
+      "review_id": "1fc52ed1-3db2-4315-9e58-27ba5fe62761",
+      "model_turns": 0,
+      "fresh_exact_binding_match": true,
+      "all_current_sources_overlays_latest_attachment_and_relevant_check_journal_revalidated": true,
+      "ordinary_next_and_duplicate_checked": true,
+      "proof": ".tandem-local/guided-companion/approved-suite/python/resumed-passing-review-1fc52ed1-3db2-4315-9e58-27ba5fe62761.json"
     }
   },
   "native": {
@@ -361,12 +563,11 @@
   ],
   "receipts_root": ".tandem-local/guided-companion/approved-suite",
   "remaining_verification": [
-    "Real Python: truthful existence/check-source clarification and supplemental independent direct evidence; valid walkthrough, all file/symbol/command actions, wrong/missingevidence rejection, validalternative acceptance, exactly-once Next, secondstep and fullspec validation",
     "Native Rust/Python: command attachment/review/Next, all live AI and cancellation phases, busy model picker, complete long-panel scrolling and spoken VoiceOver; observed subset documented"
   ],
   "diagnostic_redaction": "Known schema errors retained; unclassified runtime messages, credentials and login URLs withheld with hashes",
-  "updated_at_utc": "2026-11-15T18:05:53.367668+00:00",
-  "verification_worktree_head_before_commit": "8a4515dc645a20e2b9d338fb648b5bc9ed221ef2",
+  "updated_at_utc": "2026-11-15T18:48:05.085176+00:00",
+  "verification_worktree_head_before_commit": "c428bb299fc03cca7330bb9a7d36eca9d8144359",
   "default_caps": {
     "probe": 4,
     "rust": 24,
@@ -385,15 +586,16 @@
     "authorization_hash": "24b89a3e3f6c617898b19b9c3db22d238271ac8e4e4abbf18bb9870110c62c70",
     "original_reservation_prefix_hash": "371529452abf6e3a98e235928e6e69f2840c529cdbd15d3ef9f5d3b77a5c9288",
     "original_reservations_preserved": 49,
-    "total_reservations": 104,
+    "total_reservations": 121,
     "no_refunds_or_reset": true,
     "scope": "Same suite and durable sessions; explicit later Astra selection only, no provider/billingfallback",
     "remaining": {
       "probe": 3,
       "rust": 4,
-      "python": 5,
-      "total": 12
-    }
+      "python": 4,
+      "total": 11
+    },
+    "remaining_dispatch_scope": "Only existing Python continuation permitted by v3; completed Rust/probe not rerun"
   },
   "resumed_stages": [
     {
@@ -437,6 +639,34 @@
       "rust": 52,
       "python": 51,
       "total": 104
+    },
+    {
+      "stage": "V3truthfulfacts; step1complete; step2compaction quarantine",
+      "probe": 1,
+      "rust": 52,
+      "python": 60,
+      "total": 113
+    },
+    {
+      "stage": "Exactstep2commands restored; currentbaseline evidence gap retained",
+      "probe": 1,
+      "rust": 52,
+      "python": 64,
+      "total": 117
+    },
+    {
+      "stage": "Store attachment-publication/Next guards retained; accepted66review reused by fresh exact-binding Next",
+      "probe": 1,
+      "rust": 52,
+      "python": 66,
+      "total": 119
+    },
+    {
+      "stage": "Final fullspec validated; complete Python journey",
+      "probe": 1,
+      "rust": 52,
+      "python": 68,
+      "total": 121
     }
   ],
   "model_selection": {
@@ -459,12 +689,37 @@
       "total": 96
     },
     "caps_unchanged": true,
-    "new_charged_python_reservations": 8,
-    "observed_dispatched_turns": 7,
+    "new_charged_python_reservations": 25,
+    "observed_dispatched_turns": 24,
     "predispatch_failure_reservations": 1,
     "reservation_prefix_hash": "f31c27d011a9f2156152a51975a5d7586b01ec6fc09c869d215cf3de527fc56d",
     "normal_fresh_instruction_model_binding": true,
     "original96reservations_preserved": true,
-    "scope": "Explicit user choice for existing Python session; no automatic model/provider/billing fallback"
+    "scope": "Explicit user choice for existing Python session; no automatic model/provider/billing fallback",
+    "caps_unchanged_at_initial_model_selection": true,
+    "later_additive_cap_authorization": "authorization_extension_v3"
+  },
+  "authorization_extension_v3": {
+    "version": 3,
+    "user_message": "Approved",
+    "additional_python_turns": 16,
+    "authorization_hash": "0bdc7a7fd8926cf755733967b35fc620092c139878cf66cb3856246112a6bc32",
+    "parents_preserved": true,
+    "initial_consumed": {
+      "probe": 1,
+      "python": 51,
+      "rust": 52,
+      "total": 104
+    },
+    "caps": {
+      "probe": 4,
+      "rust": 56,
+      "python": 72,
+      "total": 132
+    },
+    "original104reservationprefix": "8719c46e4507fb733671cc659083d74d7f79b90fcbb5ba7929076a20f06749b0",
+    "all_original_reservations_preserved": true,
+    "usable_python_remaining": 4,
+    "scope": "Existing Python only; explicit Astra at supported defaultmedium; no refunds/new suite/fallback"
   }
 }

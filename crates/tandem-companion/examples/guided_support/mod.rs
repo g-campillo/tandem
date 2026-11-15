@@ -33,6 +33,8 @@ struct Ledger {
     amendments: Vec<BudgetAmendment>,
     #[serde(default)]
     model_selections: Vec<ModelSelectionAmendment>,
+    #[serde(default)]
+    additional_authorizations: Vec<AdditionalAmendment>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +115,43 @@ struct ModelSelectionAmendment {
     authorization_hash: String,
     reservation_prefix_hash: String,
 }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizationParent {
+    path: PathBuf,
+    sha256: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdditionalAuthorization {
+    version: u32,
+    authorized_at_utc: String,
+    user_message: String,
+    interpretation: String,
+    plan_path: PathBuf,
+    repo: PathBuf,
+    suite_directory: PathBuf,
+    ledger_path: PathBuf,
+    parent_budget_authorization: AuthorizationParent,
+    parent_model_authorization: AuthorizationParent,
+    previous_caps: Caps,
+    authorized_caps: Caps,
+    additional_python_turns: usize,
+    consumed_at_authorization: Caps,
+    selected_model: AuthorizedModel,
+    allowed_continuation_languages: Vec<String>,
+    reservation_prefix_count: usize,
+    reservation_prefix_semantic_sha256: String,
+    reservation_prefix_hash_encoding: String,
+    ledger_at_authorization_sha256: String,
+    constraints: Vec<String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdditionalAmendment {
+    authorization: AdditionalAuthorization,
+    authorization_hash: String,
+}
 pub struct TurnBudget {
     path: PathBuf,
     ledger: Ledger,
@@ -126,7 +165,7 @@ impl Drop for TurnBudget {
 }
 impl TurnBudget {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_inner(path, None)
+        Self::open_inner(path, None, None)
     }
     pub fn open_authorized(
         path: &Path,
@@ -136,7 +175,23 @@ impl TurnBudget {
     ) -> Result<Self> {
         let bytes =
             fs::read(authorization_path).context("Explicit budget authorization unavailable")?;
-        let authorization: BudgetAuthorization = serde_json::from_slice(&bytes)?;
+        let additional = if serde_json::from_slice::<serde_json::Value>(&bytes)?["version"] == 3 {
+            let extra: AdditionalAuthorization = serde_json::from_slice(&bytes)?;
+            Some((extra, content_hash(&bytes)))
+        } else {
+            None
+        };
+        let base_bytes = if let Some((extra, _)) = &additional {
+            let parent = fs::read(&extra.parent_budget_authorization.path)?;
+            ensure!(
+                content_hash(&parent) == extra.parent_budget_authorization.sha256,
+                "Parent budget authorization changed"
+            );
+            parent
+        } else {
+            bytes
+        };
+        let authorization: BudgetAuthorization = serde_json::from_slice(&base_bytes)?;
         ensure!(
             authorization.version == 2
                 && authorization.user_message == "Continue on"
@@ -165,11 +220,16 @@ impl TurnBudget {
                     },
             "Authorization does not match this approved suite, plan, caps and consumed ledger"
         );
-        Self::open_inner(path, Some((authorization, content_hash(&bytes))))
+        Self::open_inner(
+            path,
+            Some((authorization, content_hash(&base_bytes))),
+            additional,
+        )
     }
     fn open_inner(
         path: &Path,
         authorization: Option<(BudgetAuthorization, String)>,
+        additional: Option<(AdditionalAuthorization, String)>,
     ) -> Result<Self> {
         fs::create_dir_all(path.parent().context("Budget directory missing")?)?;
         let lock = path.with_extension("lock");
@@ -240,6 +300,132 @@ impl TurnBudget {
             ensure!(
                 budget.ledger.amendments.is_empty(),
                 "Extended ledger requires its explicit matching authorization; defaults remain 24/52"
+            );
+        }
+        if let Some((extra, hash)) = additional {
+            ensure!(
+                extra.version == 3
+                    && extra.user_message == "Approved"
+                    && !extra.authorized_at_utc.is_empty()
+                    && !extra.interpretation.is_empty()
+                    && !extra.constraints.is_empty()
+                    && extra.repo == budget.ledger.amendments[0].authorization.repo
+                    && extra.plan_path == budget.ledger.amendments[0].authorization.plan_path
+                    && extra.suite_directory
+                        == budget
+                            .path
+                            .parent()
+                            .context("Suite missing")?
+                            .canonicalize()?
+                    && extra.ledger_path == budget.path
+                    && extra.previous_caps == budget.caps
+                    && extra.authorized_caps
+                        == Caps {
+                            probe: 4,
+                            rust: 56,
+                            python: 72,
+                            total: 132
+                        }
+                    && extra.additional_python_turns == 16
+                    && extra.consumed_at_authorization
+                        == Caps {
+                            probe: 1,
+                            rust: 52,
+                            python: 51,
+                            total: 104
+                        }
+                    && extra.reservation_prefix_count == 104
+                    && extra.reservation_prefix_hash_encoding
+                        == "SHA256 compact UTF8JSON, recursivelysortedobjectkeys, arrayorderpreserved, noASCIIescaping"
+                    && extra.allowed_continuation_languages == ["python"]
+                    && extra.selected_model.catalog_id == "gpt-6-astra"
+                    && extra.selected_model.effort == "model_supported_default"
+                    && budget.ledger.model_selections.len() == 1,
+                "Additional authorization does not match the approved Python-only continuation"
+            );
+            ensure!(
+                content_hash(&fs::read(&extra.parent_model_authorization.path)?)
+                    == extra.parent_model_authorization.sha256
+                    && budget.ledger.model_selections[0].authorization_hash
+                        == extra.parent_model_authorization.sha256
+                    && budget.ledger.amendments[0].authorization_hash
+                        == extra.parent_budget_authorization.sha256,
+                "Additional authorization parent records changed"
+            );
+            // Revalidate the original 96-reservation model prefix before adding caps.
+            let original = &budget.ledger.amendments[0].authorization;
+            budget.model_preference(
+                Some((
+                    &extra.parent_model_authorization.path,
+                    &extra.parent_budget_authorization.path,
+                )),
+                &original.repo.clone(),
+                &original.plan_path.clone(),
+                "python",
+            )?;
+            let baseline = extra.reservation_prefix_count;
+            ensure!(
+                budget.ledger.reservations.len() >= baseline,
+                "Additional authorization history was refunded or reset"
+            );
+            let prefix = &budget.ledger.reservations[..baseline];
+            let mut counts = BTreeMap::<String, usize>::new();
+            for r in prefix {
+                *counts.entry(r.language.clone()).or_default() += 1;
+            }
+            // Explicit sorted maps keep the external compact-UTF8 hash stable
+            // with either serde_json map implementation. Reservation leaves are scalars.
+            let semantic_prefix = prefix
+                .iter()
+                .map(|reservation| {
+                    BTreeMap::from([
+                        ("at_ms", json!(reservation.at_ms)),
+                        ("language", json!(reservation.language)),
+                        ("worker", json!(reservation.worker)),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            ensure!(
+                counts
+                    == BTreeMap::from([
+                        ("probe".into(), 1),
+                        ("rust".into(), 52),
+                        ("python".into(), 51)
+                    ])
+                    && content_hash(&serde_json::to_vec(&semantic_prefix)?)
+                        == extra.reservation_prefix_semantic_sha256
+                    && budget.ledger.reservations[baseline..]
+                        .iter()
+                        .all(|r| r.language == "python"),
+                "Additional authorization reservation prefix changed"
+            );
+            if let Some(recorded) = budget.ledger.additional_authorizations.first() {
+                ensure!(
+                    budget.ledger.additional_authorizations.len() == 1
+                        && recorded.authorization_hash == hash
+                        && serde_json::to_value(&recorded.authorization)?
+                            == serde_json::to_value(&extra)?,
+                    "Immutable additional authorization changed"
+                );
+            } else {
+                ensure!(
+                    budget.total() == baseline
+                        && content_hash(&fs::read(path)?) == extra.ledger_at_authorization_sha256,
+                    "Initial additional authorization must match the exact consumed ledger"
+                );
+                budget
+                    .ledger
+                    .additional_authorizations
+                    .push(AdditionalAmendment {
+                        authorization: extra.clone(),
+                        authorization_hash: hash,
+                    });
+            }
+            budget.caps = extra.authorized_caps;
+        } else {
+            ensure!(
+                budget.ledger.additional_authorizations.is_empty(),
+                "Expanded ledger requires its explicit matching additional authorization"
             );
         }
         let mut actual_counts = BTreeMap::<String, usize>::new();
@@ -315,13 +501,23 @@ impl TurnBudget {
                         .context("Suite missing")?
                         .canonicalize()?
                 && selected.ledger_path == self.path
-                && selected.budget_authorization_path == budget_path
+                && (selected.budget_authorization_path == budget_path
+                    || self
+                        .ledger
+                        .additional_authorizations
+                        .first()
+                        .is_some_and(|extra| selected.budget_authorization_path
+                            == extra.authorization.parent_budget_authorization.path
+                            && fs::read(budget_path).is_ok_and(
+                                |bytes| content_hash(&bytes) == extra.authorization_hash
+                            )))
                 && self.ledger.amendments.len() == 1
                 && self.ledger.amendments[0].authorization_hash
-                    == content_hash(&fs::read(budget_path)?)
+                    == content_hash(&fs::read(&selected.budget_authorization_path)?)
                 && selected.selected_model.catalog_id == "gpt-6-astra"
                 && selected.selected_model.effort == "model_supported_default"
-                && selected.authorized_caps == self.caps
+                && selected.authorized_caps
+                    == self.ledger.amendments[0].authorization.authorized_caps
                 && selected.consumed_at_authorization
                     == Caps {
                         probe: 1,
@@ -399,6 +595,10 @@ impl TurnBudget {
     /// this ledger; retries cannot acquire a fresh allowance.
     pub fn reserve(&mut self, language: &str, worker: &str) -> Result<()> {
         let cap = self.cap(language)?;
+        ensure!(
+            self.ledger.additional_authorizations.is_empty() || language == "python",
+            "Additional authorization permits only the existing Python continuation"
+        );
         ensure!(matches!(worker, "private" | "public"), "Unknown worker");
         ensure!(
             self.ledger.counts.get(language).copied().unwrap_or(0) < cap
@@ -798,6 +998,22 @@ impl ConversationCapture for StoredCapture {
         } else {
             checks.to_vec()
         };
+        if matches!(
+            action,
+            CompanionAction::ReviewAction | CompanionAction::Reveal
+        ) && let Some(saved) = self
+            .store
+            .lock()
+            .unwrap()
+            .current_action_attachment(session)?
+            && !self
+                .inner
+                .attachments
+                .iter()
+                .any(|command| command.id == saved.id)
+        {
+            self.inner.attachments.push(saved);
+        }
         let mut captured = self
             .inner
             .capture(session, action, language, guidance, &checks, cancel)?;
@@ -820,6 +1036,13 @@ pub fn authenticate_review(
     language: &str,
     guidance: &EffectiveGuidance,
 ) -> Result<ActionReviewInput> {
+    // Native capture restores the latest immutable current-scope attachment.
+    // Keep it alongside fresh harness receipts; never retag or rewrite it.
+    if let Some(saved) = store.current_action_attachment(session)?
+        && !input.commands.iter().any(|command| command.id == saved.id)
+    {
+        input.commands.push(saved);
+    }
     let mut commands = vec![];
     for mut command in input.commands.drain(..) {
         if let CommandProvenance::LocalCheck { check_id, .. } = &command.provenance {
@@ -1124,4 +1347,167 @@ fn tree_hashes(project: &Project) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     visit(&project.root, &project.root, &mut out)?;
     Ok(out)
+}
+
+/// These are explicit human harness choices, not model execution authority.
+pub fn fixture_git_command(argv: &[String], task: &FixtureTask) -> bool {
+    if argv == ["/usr/bin/git", "status", "--short", "--untracked-files=all"] {
+        return true;
+    }
+    if argv == ["/usr/bin/git", "diff", "--exit-code", "HEAD", "--"] {
+        return true;
+    }
+    argv.len() > 5
+        && argv[..3] == ["/usr/bin/git", "diff", "--exit-code"]
+        && argv[3].len() == 40
+        && argv[3].bytes().all(|b| b.is_ascii_hexdigit())
+        && argv[4] == "--"
+        && argv[5..]
+            .iter()
+            .all(|p| task.original_hashes.contains_key(p))
+}
+pub fn select_fixture_command(
+    action: &mut GuidedAction,
+    recipe: &tandem_checks::Recipe,
+    task: &FixtureTask,
+) -> Result<bool> {
+    let ActionTarget::Command {
+        argv,
+        cwd,
+        expected_exit_codes,
+    } = &action.target
+    else {
+        return Ok(false);
+    };
+    ensure!(
+        cwd == "." && expected_exit_codes == &[0],
+        "Unsupported fixture command location or exit contract"
+    );
+    if argv == &recipe.argv {
+        let receipt = RequiredActionEvidence::CheckReceipt {
+            recipe_id: recipe.id.clone(),
+        };
+        if !action.required_evidence.contains(&receipt) {
+            action.required_evidence.push(receipt);
+            return Ok(true);
+        }
+    } else {
+        ensure!(
+            fixture_git_command(argv, task),
+            "No explicit harness authority for this command"
+        );
+    }
+    Ok(false)
+}
+/// Execute only the fixed read-only fixture forms. Captured Git data excludes
+/// repo config/hooks/helpers; the live source is hash-checked before and after.
+pub fn fixture_git_output(
+    task: &FixtureTask,
+    argv: &[String],
+    directory: &Path,
+) -> Result<std::process::Output> {
+    ensure!(
+        fixture_git_command(argv, task),
+        "Unsupported fixture Git command"
+    );
+    task.verify_originals()?;
+    let git_dir = directory.join(format!("human-git-{}", new_id()));
+    let captured = tandem_checks::capture_git(&task.project, &git_dir, &AtomicBool::new(false))?
+        .context("Fixture Git metadata missing")?;
+    let mut command = std::process::Command::new("/usr/bin/git");
+    command
+        .args(&argv[1..])
+        .current_dir(&task.project.root)
+        .env_clear()
+        .envs([
+            ("PATH", "/usr/bin:/bin"),
+            ("LANG", "C.UTF-8"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_SYSTEM", "/dev/null"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_NO_REPLACE_OBJECTS", "1"),
+            ("GIT_ATTR_NOSYSTEM", "1"),
+            ("GIT_CONFIG_COUNT", "5"),
+            ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
+            ("GIT_CONFIG_VALUE_0", "false"),
+            ("GIT_CONFIG_KEY_1", "core.hooksPath"),
+            ("GIT_CONFIG_VALUE_1", "/dev/null"),
+            ("GIT_CONFIG_KEY_2", "core.attributesFile"),
+            ("GIT_CONFIG_VALUE_2", "/dev/null"),
+            ("GIT_CONFIG_KEY_3", "diff.external"),
+            ("GIT_CONFIG_VALUE_3", ""),
+            ("GIT_CONFIG_KEY_4", "core.pager"),
+            ("GIT_CONFIG_VALUE_4", "cat"),
+        ])
+        .env("GIT_DIR", &git_dir)
+        .env("GIT_WORK_TREE", &task.project.root);
+    let output = command.output()?;
+    ensure!(
+        captured.unchanged(),
+        "Git metadata changed during inspection"
+    );
+    ensure!(
+        output.stdout.len() + output.stderr.len() <= 64 * 1024,
+        "Fixture Git output exceeds evidence bound"
+    );
+    task.verify_originals()?;
+    Ok(output)
+}
+
+/// Preserve the historical quarantine; classify it only from immutable official
+/// thread/read diagnostic bytes, never from a model's assertion about tools.
+pub fn historical_compaction_only(run: &ModelRun, directory: &Path) -> Result<bool> {
+    if run.status != ModelStatus::Quarantined || run.tool_items == 0 {
+        return Ok(false);
+    }
+    let items: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(
+        directory.join(format!("diagnosed-tool-items-private-{}.json", run.id)),
+    )?)?;
+    let diagnostics: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(
+        directory.join(format!("diagnosed-contract-{}.json", run.id)),
+    )?)?;
+    Ok(items.len() == run.tool_items
+        && items.iter().all(|item| {
+            item["type"] == "contextCompaction"
+                && item["id"].as_str().is_some_and(|id| !id.is_empty())
+                && item.as_object().is_some_and(|object| {
+                    object.keys().all(|key| {
+                        ["id", "type", "startedAtMs", "completedAtMs"].contains(&key.as_str())
+                    })
+                })
+                && serde_json::to_vec(item).is_ok_and(|bytes| {
+                    diagnostics.iter().any(|diagnostic| {
+                        diagnostic["run_id"] == run.id
+                            && diagnostic["unexpected_item_type"] == "contextCompaction"
+                            && diagnostic["item_hash"] == content_hash(&bytes)
+                    })
+                })
+        }))
+}
+
+/// Re-run the approved baseline comparisons for each cumulative action scope;
+/// attachments from consumed actions are historical and cannot be retagged.
+pub fn fixture_preservation_commands(
+    walkthroughs: &[Walkthrough],
+    task: &FixtureTask,
+) -> Vec<Vec<String>> {
+    let mut commands = vec![
+        ["/usr/bin/git", "diff", "--exit-code", "HEAD", "--"]
+            .map(str::to_owned)
+            .to_vec(),
+        ["/usr/bin/git", "status", "--short", "--untracked-files=all"]
+            .map(str::to_owned)
+            .to_vec(),
+    ];
+    for action in walkthroughs.iter().flat_map(|walk| &walk.actions) {
+        if let ActionTarget::Command { argv, .. } = &action.target
+            && fixture_git_command(argv, task)
+            && !commands.contains(argv)
+        {
+            commands.push(argv.clone());
+        }
+    }
+    commands
 }

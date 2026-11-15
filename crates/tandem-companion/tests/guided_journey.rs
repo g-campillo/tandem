@@ -449,6 +449,478 @@ fn explicit_model_authorization_preserves_budget_and_requires_same_selection_on_
 }
 
 #[test]
+fn store_aware_capture_retains_saved_current_attachment_and_rejects_late_replacement() {
+    let mut f = Journey::new("rust");
+    let mut runner = f.runner();
+    prepare_typed(&mut f, &mut runner, CompanionAction::PrepareWalkthrough);
+    let state = f.state();
+    let actions = actions(&state, &f.task.path, "rust")
+        .into_iter()
+        .skip(2)
+        .collect();
+    let walk = Walkthrough {
+        id: new_id(),
+        generation: state.execution_generation,
+        step_id: state
+            .plan
+            .as_ref()
+            .unwrap()
+            .task
+            .active_step
+            .clone()
+            .unwrap(),
+        plan_ref: state.plan.as_ref().unwrap().document_ref(),
+        actions,
+        cursor: 0,
+    };
+    f.store
+        .lock()
+        .unwrap()
+        .apply_session_transition(
+            &state.id,
+            state.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveWalkthrough { walkthrough: walk }],
+            )
+            .with_authorization(
+                WorkflowAction::PrepareWalkthrough,
+                state.authorize(WorkflowAction::PrepareWalkthrough).unwrap(),
+            ),
+        )
+        .unwrap();
+    let state = f.state();
+    let context = capture_action_context(
+        &state,
+        &f.task.project,
+        &[],
+        &[],
+        &f.temp.path().join("attachments"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let empty = ActionReviewInput::capture(
+        &state,
+        context.context.clone(),
+        context.targets.clone(),
+        vec![],
+        "rust",
+        &f.task.guidance(),
+    )
+    .unwrap();
+    let attach = |text: &str| {
+        attach_action_output(
+            empty.scope(),
+            &context,
+            UserCommandAttachment {
+                argv: vec!["cargo".into(), "test".into()],
+                cwd: ".".into(),
+                exit_code: 0,
+                stdout: text.into(),
+                stderr: String::new(),
+                started_at_ms: now_ms(),
+                completed_at_ms: now_ms(),
+            },
+        )
+        .unwrap()
+    };
+    let saved = attach("Earlier complete output");
+    f.store
+        .lock()
+        .unwrap()
+        .record_action_attachment(&state.id, &saved, &empty.binding)
+        .unwrap();
+    let fresh = attach("New additional output");
+    let input = ActionReviewInput::capture(
+        &state,
+        context.context.clone(),
+        context.targets.clone(),
+        vec![fresh.clone()],
+        "rust",
+        &f.task.guidance(),
+    )
+    .unwrap();
+    let input = support::authenticate_review(
+        &f.store.lock().unwrap(),
+        &state,
+        input,
+        "rust",
+        &f.task.guidance(),
+    )
+    .unwrap();
+    assert!(
+        input
+            .commands
+            .iter()
+            .any(|command| command.id == saved.id && command.fingerprint() == saved.fingerprint()),
+        "The immutable saved current attachment must accompany fresh outputs"
+    );
+    assert!(
+        input
+            .commands
+            .iter()
+            .any(|command| command.id == fresh.id && command.fingerprint() == fresh.fingerprint())
+    );
+    let mut stored = support::StoredCapture {
+        store: f.store.clone(),
+        inner: ProjectConversationCapture {
+            project: f.task.project.clone(),
+            overlays: vec![],
+            selected: vec![],
+            cache: f.temp.path().join("stored-capture"),
+            check_environment: None,
+            recipe_ids: vec![],
+            attachments: vec![fresh.clone()],
+        },
+    };
+    let first = stored
+        .capture(
+            &state,
+            CompanionAction::ReviewAction,
+            "rust",
+            &f.task.guidance(),
+            &[],
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .review
+        .unwrap();
+    f.store
+        .lock()
+        .unwrap()
+        .record_action_attachment(&state.id, &fresh, &empty.binding)
+        .unwrap();
+    let second = stored
+        .capture(
+            &state,
+            CompanionAction::ReviewAction,
+            "rust",
+            &f.task.guidance(),
+            &[],
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .review
+        .unwrap();
+    assert_eq!(
+        first.binding, second.binding,
+        "Review and Next must retain the same immutable attachment set after publication"
+    );
+    let replacement = attach("Later replacement output");
+    f.store
+        .lock()
+        .unwrap()
+        .record_action_attachment(&state.id, &replacement, &empty.binding)
+        .unwrap();
+    let review = ActionReview {
+        id: new_id(),
+        binding: input.binding.clone(),
+        outcome: ActionReviewOutcome::InsufficientEvidence,
+        summary: "Need matching evidence".into(),
+        findings: vec![],
+        evidence_used: vec![],
+        limitations: vec!["A required check is absent".into()],
+        assessments: vec![],
+        reviewed_at_ms: now_ms(),
+    };
+    let error = f
+        .store
+        .lock()
+        .unwrap()
+        .apply_session_transition(
+            &state.id,
+            state.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::RecordActionReview {
+                    review,
+                    input: Box::new(input),
+                }],
+            )
+            .with_authorization(
+                WorkflowAction::ReviewAction,
+                state.authorize(WorkflowAction::ReviewAction).unwrap(),
+            ),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Attached output changed during review"),
+        "{error:#}"
+    );
+    let mut adverse = CheckRecord::pending(
+        state.project.clone(),
+        f.task.recipe.clone(),
+        "pending-recipe".into(),
+    );
+    adverse.task_id = state.plan.as_ref().map(|plan| plan.task.id.clone());
+    adverse.step_id = state
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.task.active_step.clone());
+    adverse.plan_revision = state.plan.as_ref().map(|plan| plan.revision);
+    let ActionTarget::Command { argv, .. } = &state.current_action().unwrap().1.target else {
+        unreachable!()
+    };
+    adverse.command = argv.clone();
+    adverse.status = CheckStatus::Running;
+    adverse.started_at_ms = now_ms();
+    f.store.lock().unwrap().save_check(&adverse).unwrap();
+    let mut configured_context = first.context.clone();
+    configured_context
+        .validation_environments
+        .insert(f.task.recipe.clone(), "pending-recipe".into());
+    let configured_input = ActionReviewInput::capture(
+        &state,
+        configured_context,
+        first.targets,
+        first.commands,
+        "rust",
+        &f.task.guidance(),
+    )
+    .unwrap();
+    assert!(
+        f.store
+            .lock()
+            .unwrap()
+            .validate_action_check_journal(&state, &configured_input)
+            .is_err(),
+        "A newly queued adverse/incomplete journal entry must invalidate an older capture"
+    );
+}
+
+#[test]
+fn fixture_command_selection_preserves_exact_git_targets_and_refuses_arbitrary_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let task = support::FixtureTask::create(&temp.path().join("project"), "python").unwrap();
+    let env =
+        tandem_checks::CheckEnvironment::discover(&task.project.root, temp.path().join("checks"))
+            .unwrap();
+    let recipe = env.recipe("python-unittest").unwrap();
+    let mut action = GuidedAction {
+        id: "status".into(),
+        revision: 1,
+        kind: GuidedActionKind::Command,
+        what: "Capture repository status".into(),
+        why: "Assess preservation".into(),
+        expected_result: "Scope is recorded".into(),
+        target: ActionTarget::Command {
+            argv: vec![
+                "/usr/bin/git".into(),
+                "status".into(),
+                "--short".into(),
+                "--untracked-files=all".into(),
+            ],
+            cwd: ".".into(),
+            expected_exit_codes: vec![0],
+        },
+        required_evidence: vec![RequiredActionEvidence::CommandReceipt],
+    };
+    let original = action.clone();
+    assert!(!support::select_fixture_command(&mut action, &recipe, &task).unwrap());
+    assert_eq!(
+        action, original,
+        "A unittest invocation cannot replace a Git command or its evidence contract"
+    );
+    if let ActionTarget::Command { argv, .. } = &mut action.target {
+        *argv = vec![
+            "/usr/bin/git".into(),
+            "checkout".into(),
+            "--".into(),
+            "consumer.py".into(),
+        ];
+    }
+    let refused = action.clone();
+    assert!(support::select_fixture_command(&mut action, &recipe, &task).is_err());
+    assert_eq!(action, refused);
+    let mut baseline = original.clone();
+    baseline.target = ActionTarget::Command {
+        argv: vec![
+            "/usr/bin/git".into(),
+            "diff".into(),
+            "--exit-code".into(),
+            "a".repeat(40),
+            "--".into(),
+            "consumer.py".into(),
+        ],
+        cwd: ".".into(),
+        expected_exit_codes: vec![0],
+    };
+    let walk = Walkthrough {
+        id: "original".into(),
+        generation: 1,
+        step_id: "integration".into(),
+        plan_ref: DocumentRef {
+            revision: 1,
+            hash: "plan".into(),
+        },
+        actions: vec![original.clone(), baseline.clone(), refused],
+        cursor: 2,
+    };
+    let commands = support::fixture_preservation_commands(&[walk], &task);
+    let ActionTarget::Command {
+        argv: baseline_argv,
+        ..
+    } = baseline.target
+    else {
+        unreachable!()
+    };
+    assert!(
+        commands.contains(&baseline_argv),
+        "Cumulative evidence must rerun the exact original-baseline comparison"
+    );
+    assert_eq!(
+        commands.len(),
+        3,
+        "Deduplicate fixed status and reject unapproved checkout"
+    );
+    let sentinel = temp.path().join("must-not-run");
+    std::fs::write(task.project.root.join(".git/config"),format!("[core]\nrepositoryformatversion=0\nbare=false\nfsmonitor=/usr/bin/touch {}\n[diff]\nexternal=/usr/bin/touch {}\n",sentinel.display(),sentinel.display())).unwrap();
+    let ActionTarget::Command { argv, .. } = original.target else {
+        unreachable!()
+    };
+    let output = support::fixture_git_output(&task, &argv, temp.path()).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !sentinel.exists(),
+        "Repository helper configuration must never execute"
+    );
+}
+
+#[test]
+fn additive_python_authorization_preserves_parent_records_and_all_prefixes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let suite = root.join("approved-suite");
+    std::fs::create_dir(&suite).unwrap();
+    let path = suite.join("turn-budget.json");
+    let plan = root.join("plan.md");
+    let cap_path = root.join("caps.json");
+    let model_path = root.join("model.json");
+    let extra_path = root.join("extra.json");
+    let mut budget = support::TurnBudget::open(&path).unwrap();
+    budget.reserve("probe", "public").unwrap();
+    for language in ["rust", "python"] {
+        budget.claim(language).unwrap();
+        for _ in 0..24 {
+            budget.reserve(language, "private").unwrap();
+        }
+        budget.finish(language, "failed").unwrap();
+    }
+    drop(budget);
+    let caps = json!({"probe":4,"rust":56,"python":56,"total":116});
+    let cap_auth = json!({"version":2,"authorized_at_utc":"2026-11-15","user_message":"Continue on","interpretation":"Same suite","repo":root,"plan_path":plan,"suite_directory":suite,"ledger_path":path,"previous_caps":{"probe":4,"rust":24,"python":24,"total":52},"authorized_caps":caps,"consumed_at_authorization":{"probe":1,"rust":24,"python":24,"total":49},"constraints":["Preserve charges"]});
+    std::fs::write(&cap_path, serde_json::to_vec(&cap_auth).unwrap()).unwrap();
+    let mut budget = support::TurnBudget::open_authorized(&path, &cap_path, &root, &plan).unwrap();
+    for _ in 24..52 {
+        budget.reserve("rust", "private").unwrap();
+    }
+    for _ in 24..43 {
+        budget.reserve("python", "private").unwrap();
+    }
+    let model_auth = json!({"version":1,"authorized_at_utc":"2026-11-15","user_message":"Continue","interpretation":"Explicit Astra selection","repo":root,"plan_path":plan,"suite_directory":suite,"ledger_path":path,"budget_authorization_path":cap_path,"selected_model":{"catalog_id":"gpt-6-astra","effort":"model_supported_default"},"consumed_at_authorization":{"probe":1,"rust":52,"python":43,"total":96},"authorized_caps":caps,"scope":"Existing Python only","constraints":["No fallback or reset"]});
+    std::fs::write(&model_path, serde_json::to_vec(&model_auth).unwrap()).unwrap();
+    budget
+        .model_preference(Some((&model_path, &cap_path)), &root, &plan, "python")
+        .unwrap();
+    for _ in 43..51 {
+        budget.reserve("python", "private").unwrap();
+    }
+    drop(budget);
+    let before_bytes = std::fs::read(&path).unwrap();
+    let before: Value = serde_json::from_slice(&before_bytes).unwrap();
+    let hash_file = |p: &std::path::Path| content_hash(&std::fs::read(p).unwrap());
+    let canonical_reservations = before["reservations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.as_object()
+                .unwrap()
+                .iter()
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
+    let extra = json!({"version":3,"authorized_at_utc":"2026-11-15","user_message":"Approved","interpretation":"Sixteen additional Python turns","repo":root,"plan_path":plan,"suite_directory":suite,"ledger_path":path,"parent_budget_authorization":{"path":cap_path,"sha256":hash_file(&cap_path)},"parent_model_authorization":{"path":model_path,"sha256":hash_file(&model_path)},"previous_caps":caps,"authorized_caps":{"probe":4,"rust":56,"python":72,"total":132},"additional_python_turns":16,"consumed_at_authorization":{"probe":1,"rust":52,"python":51,"total":104},"selected_model":{"catalog_id":"gpt-6-astra","effort":"model_supported_default"},"allowed_continuation_languages":["python"],"reservation_prefix_count":104,"reservation_prefix_semantic_sha256":content_hash(&serde_json::to_vec(&canonical_reservations).unwrap()),"reservation_prefix_hash_encoding":"SHA256 compact UTF8JSON, recursivelysortedobjectkeys, arrayorderpreserved, noASCIIescaping","ledger_at_authorization_sha256":content_hash(&before_bytes),"constraints":["Preserve every charge and prior record"]});
+    for (field, value) in [
+        ("additional_python_turns", json!(17)),
+        ("allowed_continuation_languages", json!(["rust", "python"])),
+        ("reservation_prefix_semantic_sha256", json!("bad")),
+        ("ledger_at_authorization_sha256", json!("bad")),
+        (
+            "selected_model",
+            json!({"catalog_id":"other","effort":"model_supported_default"}),
+        ),
+        (
+            "parent_model_authorization",
+            json!({"path":model_path,"sha256":"bad"}),
+        ),
+    ] {
+        let mut wrong = extra.clone();
+        wrong[field] = value;
+        std::fs::write(&extra_path, serde_json::to_vec(&wrong).unwrap()).unwrap();
+        assert!(
+            support::TurnBudget::open_authorized(&path, &extra_path, &root, &plan).is_err(),
+            "{field}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    }
+    std::fs::write(&extra_path, serde_json::to_vec(&extra).unwrap()).unwrap();
+    let mut budget =
+        support::TurnBudget::open_authorized(&path, &extra_path, &root, &plan).unwrap();
+    assert_eq!(budget.total(), 104);
+    assert!(
+        budget
+            .model_preference(None, &root, &plan, "python")
+            .is_err()
+    );
+    assert!(
+        budget
+            .model_preference(Some((&model_path, &extra_path)), &root, &plan, "rust")
+            .is_err()
+    );
+    budget
+        .model_preference(Some((&model_path, &extra_path)), &root, &plan, "python")
+        .unwrap();
+    assert!(budget.reserve("rust", "private").is_err());
+    assert!(budget.reserve("probe", "public").is_err());
+    for _ in 51..72 {
+        budget.reserve("python", "private").unwrap();
+    }
+    assert!(budget.reserve("python", "public").is_err());
+    assert_eq!(budget.total(), 125);
+    drop(budget);
+    assert!(support::TurnBudget::open(&path).is_err());
+    assert!(support::TurnBudget::open_authorized(&path, &cap_path, &root, &plan).is_err());
+    let budget = support::TurnBudget::open_authorized(&path, &extra_path, &root, &plan).unwrap();
+    assert_eq!(budget.total(), 125);
+    drop(budget);
+    let after_bytes = std::fs::read(&path).unwrap();
+    let after: Value = serde_json::from_slice(&after_bytes).unwrap();
+    assert_eq!(after["amendments"], before["amendments"]);
+    assert_eq!(after["model_selections"], before["model_selections"]);
+    assert_eq!(
+        &after["reservations"].as_array().unwrap()[..104],
+        before["reservations"].as_array().unwrap()
+    );
+    let mut tampered = after.clone();
+    tampered["reservations"][100]["at_ms"] = json!(0);
+    std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(support::TurnBudget::open_authorized(&path, &extra_path, &root, &plan).is_err());
+    std::fs::write(&path, &after_bytes).unwrap();
+    let mut changed = extra;
+    changed["interpretation"] = json!("Changed provenance");
+    std::fs::write(&extra_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(support::TurnBudget::open_authorized(&path, &extra_path, &root, &plan).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), after_bytes);
+}
+
+#[test]
 fn explicit_budget_amendment_preserves_history_and_requires_matching_authorization() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

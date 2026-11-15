@@ -329,6 +329,49 @@ impl Harness {
         ensure!(next.sequence == duplicate.sequence, "Next advanced twice");
         Ok(())
     }
+    fn resume_current_passing_review(&mut self) -> Result<bool> {
+        let state = self.state()?;
+        let saved = self.store.lock().unwrap().current_action_review(&state)?;
+        let Some((review, Some(OperationOutcome::Completed { .. }))) = saved else {
+            return Ok(false);
+        };
+        if review.outcome != ActionReviewOutcome::Passed {
+            return Ok(false);
+        }
+        let input = self
+            .store
+            .lock()
+            .unwrap()
+            .action_review_input(&state.id, &review.id)?
+            .context("Saved review input missing")?;
+        let prior = std::mem::replace(
+            &mut self.capture.inner.attachments,
+            input
+                .commands
+                .into_iter()
+                .filter(|command| {
+                    matches!(command.provenance, CommandProvenance::UserAttachedOutput)
+                })
+                .collect(),
+        );
+        // This reads actual current source/overlays and the full relevant Store
+        // journal. The normal Next transaction independently revalidates both.
+        if self.current_input()?.binding != review.binding {
+            self.capture.inner.attachments = prior;
+            return Ok(false);
+        }
+        self.next(&review)?;
+        write_json(
+            &self
+                .directory
+                .join(format!("resumed-passing-review-{}.json", review.id)),
+            &json!({"model_turns":0,"review_id":review.id,"fresh_binding_exactly_matches":true,"ordinary_next_and_duplicate_checked":true,"old_receipt_bytes_unchanged":true}),
+        )?;
+        self.choices.push("Harness human resumes the accepted passing review after restoring its exact immutable attachment set; fresh current capture and ordinary exactly-once Next revalidate all sources, overlays, latest attachment and check journal without another model turn".into());
+        self.capture.inner.attachments.clear();
+        self.save_progress()?;
+        Ok(true)
+    }
     fn overlay(&mut self, text: String) -> Result<()> {
         self.choices.push("Harness human enters original fixture code in an unsaved overlay; live source/tests stay unchanged".into());
         let mut document = self.task.project.open_document(&self.task.path, true)?;
@@ -423,15 +466,9 @@ impl Harness {
             &AtomicBool::new(false),
         )?;
         let scope = self.current_input()?.scope();
-        for args in [
-            vec!["diff", "--exit-code", "HEAD", "--"],
-            vec!["status", "--short", "--untracked-files=all"],
-        ] {
+        for argv in fixture_preservation_commands(&state.walkthroughs, &self.task) {
             let start = now_ms();
-            let output = std::process::Command::new("/usr/bin/git")
-                .args(&args)
-                .current_dir(&self.task.project.root)
-                .output()?;
+            let output = fixture_git_output(&self.task, &argv, &self.directory)?;
             ensure!(
                 output.status.success(),
                 "Actual fixture preservation command failed"
@@ -440,10 +477,7 @@ impl Harness {
                 scope.clone(),
                 &capture,
                 UserCommandAttachment {
-                    argv: std::iter::once("/usr/bin/git")
-                        .chain(args)
-                        .map(str::to_owned)
-                        .collect(),
+                    argv,
                     cwd: ".".into(),
                     exit_code: output.status.code().unwrap_or(-1).into(),
                     stdout: String::from_utf8(output.stdout)?,
@@ -463,6 +497,127 @@ impl Harness {
         self.choices.push("Harness human runs fixed read-only Git diff/status in the owned fixture and explicitly attaches its real complete output as UserAttachedOutput/Unvalidated, not authenticated check evidence".into());
         self.task.verify_originals()
     }
+    fn attach_git_command(&mut self, argv: &[String]) -> Result<()> {
+        self.capture.inner.attachments.clear();
+        let state = self.state()?;
+        let capture = capture_action_context(
+            &state,
+            &self.task.project,
+            &self.capture.inner.overlays,
+            &self.capture.inner.selected,
+            &self.directory.join("captures"),
+            &AtomicBool::new(false),
+        )?;
+        let scope = self.current_input()?.scope();
+        let start = now_ms();
+        let output = fixture_git_output(&self.task, argv, &self.directory)?;
+        ensure!(output.status.success(), "Fixed fixture Git command failed");
+        let evidence = attach_action_output(
+            scope,
+            &capture,
+            UserCommandAttachment {
+                argv: argv.to_vec(),
+                cwd: ".".into(),
+                exit_code: output.status.code().unwrap_or(-1).into(),
+                stdout: String::from_utf8(output.stdout)?,
+                stderr: String::from_utf8(output.stderr)?,
+                started_at_ms: start,
+                completed_at_ms: now_ms(),
+            },
+        )?;
+        write_json(
+            &self
+                .directory
+                .join(format!("human-attached-git-{}.json", evidence.id)),
+            &evidence,
+        )?;
+        self.capture.inner.attachments.push(evidence);
+        self.choices.push("Harness human runs only the exact allowlisted read-only Git target with sanitized captured Git metadata and explicitly attaches real output as UserAttachedOutput/Unvalidated".into());
+        Ok(())
+    }
+    fn restore_unfinished_generated_commands(&mut self) -> Result<()> {
+        let state = self.state()?;
+        let (current, _) = state.current_action()?;
+        ensure!(
+            current.cursor == 0,
+            "Cannot repair a walkthrough with consumed actions"
+        );
+        let runs = self
+            .store
+            .lock()
+            .unwrap()
+            .model_runs(self.task.project.key())?;
+        let (run, actions) = runs
+            .iter()
+            .filter_map(|run| {
+                let Some(CompanionResponse::WalkthroughDraft(draft)) = &run.response else {
+                    return None;
+                };
+                let actions = draft.actions.as_ref()?;
+                (actions
+                    .iter()
+                    .map(|a| &a.id)
+                    .eq(current.actions.iter().map(|a| &a.id)))
+                .then_some((run, actions))
+            })
+            .max_by_key(|(run, _)| run.started_at_ms)
+            .context("Original provider draft missing")?;
+        let recipe = self.environment.recipe(&self.task.recipe)?;
+        let mut old_rewrite = actions.clone();
+        for action in &mut old_rewrite {
+            if let ActionTarget::Command {
+                argv,
+                cwd,
+                expected_exit_codes,
+            } = &mut action.target
+            {
+                *argv = recipe.argv.clone();
+                *cwd = ".".into();
+                *expected_exit_codes = vec![0];
+                let receipt = RequiredActionEvidence::CheckReceipt {
+                    recipe_id: recipe.id.clone(),
+                };
+                if !action.required_evidence.contains(&receipt) {
+                    action.required_evidence.push(receipt);
+                }
+            }
+        }
+        ensure!(
+            old_rewrite == current.actions && *actions != current.actions,
+            "Current artifact is not the diagnosed mechanical command rewrite"
+        );
+        let mut restored = current.clone();
+        restored.id = new_id();
+        restored.actions = actions.clone();
+        for action in &mut restored.actions {
+            ensure!(
+                !select_fixture_command(action, &recipe, &self.task)?,
+                "Restoration must retain exact provider actions"
+            );
+        }
+        write_json(
+            &self
+                .directory
+                .join(format!("command-restoration-{}.json", restored.id)),
+            &json!({"model_turns":0,"original_run":run.id,"old_walkthrough":current.id,"new_walkthrough":restored.id,"cursor":current.cursor,"mechanical_rewrite_matches":true,"restored_actions_hash":content_hash(&serde_json::to_vec(&restored.actions)?),"old_artifact_retained":true}),
+        )?;
+        self.choices.push("Harness human restores the exact provider-generated unfinished command definitions after proving the old recipe substitution; new walkthrough identity, old history retained".into());
+        self.store.lock().unwrap().apply_session_transition(
+            &state.id,
+            state.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveWalkthrough {
+                    walkthrough: restored,
+                }],
+            )
+            .with_authorization(
+                WorkflowAction::PrepareWalkthrough,
+                state.authorize(WorkflowAction::PrepareWalkthrough)?,
+            ),
+        )?;
+        self.save_progress()
+    }
     fn walkthrough(&mut self, runner: &mut Runner) -> Result<()> {
         let result = self.run(runner, ConversationIntent::PrepareWalkthrough)?;
         let mut walk = result
@@ -473,23 +628,7 @@ impl Harness {
         let recipe = self.environment.recipe(&self.task.recipe)?;
         let mut changed = false;
         for a in &mut walk.actions {
-            if let ActionTarget::Command {
-                argv,
-                cwd,
-                expected_exit_codes,
-            } = &mut a.target
-            {
-                *argv = recipe.argv.clone();
-                *cwd = ".".into();
-                *expected_exit_codes = vec![0];
-                let receipt = RequiredActionEvidence::CheckReceipt {
-                    recipe_id: self.task.recipe.clone(),
-                };
-                if !a.required_evidence.contains(&receipt) {
-                    a.required_evidence.push(receipt);
-                }
-                changed = true;
-            }
+            changed |= select_fixture_command(a, &recipe, &self.task)?;
         }
         if changed {
             walk.id = new_id(); // Changed definitions never reuse an immutable walk ID.
@@ -624,6 +763,22 @@ fn journey(
         h.choices.push(format!("User-authorized explicit {model} selection at the live catalog's supported default effort for the remaining Python allowance; original session/documents/approvals/progress and all prior reservations retained"));
         h.save_progress()?;
     }
+    if resume_kind == "authorized"
+        && std::env::args().any(|arg| arg == "--restore-generated-commands")
+    {
+        h.restore_unfinished_generated_commands()?;
+    }
+    if resume_kind == "authorized"
+        && language == "python"
+        && !h
+            .choices
+            .iter()
+            .any(|choice| choice == "Fixture command history attestation recorded")
+    {
+        h.human("Fixture command history attestation recorded",vec![SessionCommand::HumanMessage {
+            text:"Harness operator attestation for this disposable fixture: these runs invoked only file/context reads, recorded human saves of limits.py, the existing isolated python-unittest recipe, and fixed read-only Git inspection commands. No dependency installer was invoked for this fixture. The interpreter was already installed before the suite. This statement reports the operator's recorded actions; it is not an authenticated compiler/check receipt or a claim about unrelated host activity. Keep the original no-dependency constraint and require current exact-baseline Git evidence.".into(),
+        }])?;
+    }
     let mut r = h.runner(budget.clone())?;
     let recipe = h.environment.recipe(&h.task.recipe)?;
     let url = if language == "rust" {
@@ -666,6 +821,22 @@ fn journey(
             )?;
         } else {
             h.choices.push("No initial structured question was observed. Do not synthesize one; continue independent typed work and keep the final structured-answer criterion unmet until a real question is answered.".into());
+        }
+        if resume_kind == "authorized"
+            && language == "python"
+            && h.state()?.walkthroughs.is_empty()
+            && !h.choices.iter().any(|choice| {
+                choice == "Corrective Python fixture facts recorded before PrepareWalkthrough"
+            })
+        {
+            // Append a human correction; preserve the earlier answered question and history.
+            let facts = h.clarification_answer()?;
+            h.human(
+                "Corrective Python fixture facts recorded before PrepareWalkthrough",
+                vec![SessionCommand::HumanMessage {
+                    text: format!("Correction to my earlier generic fixture answer: {facts}"),
+                }],
+            )?;
         }
         h.task.verify_originals()?;
         if h.state()?.spec.is_none() {
@@ -756,6 +927,11 @@ fn journey(
             if h.state()?.current_action().is_err() {
                 h.walkthrough(&mut r)?;
             }
+            if h.resume_current_passing_review()? {
+                actions += 1;
+                h.task.verify_originals()?;
+                continue;
+            }
             let action = h.state()?.current_action()?.1.clone();
             match &action.target {
                 ActionTarget::File {
@@ -794,42 +970,47 @@ fn journey(
                         h.check(CheckStatus::Passed)?;
                     }
                 }
-                ActionTarget::Command { .. } => {
+                ActionTarget::Command { argv, .. } => {
                     h.saw_command = true;
-                    if !h.rejected_missing {
-                        let state = h.state()?;
-                        let saved = h.store.lock().unwrap().current_action_review(&state)?;
-                        let current = h.current_input()?;
-                        let missing = if let Some((
-                            review,
-                            Some(OperationOutcome::Completed { .. }),
-                        )) = saved.filter(|(review, _)| {
-                            review.binding == current.binding
-                                && matches!(
-                                    review.outcome,
-                                    ActionReviewOutcome::NeedsChanges
-                                        | ActionReviewOutcome::InsufficientEvidence
-                                )
-                                && current.evidence_gate(&action).0 != ActionReviewOutcome::Passed
-                        }) {
-                            h.choices.push("Resume the immutable current negative review against identical missing-evidence inputs; no duplicate model call or invented outcome".into());
-                            review
-                        } else {
-                            h.review(&mut r)?
-                        };
-                        ensure!(
-                            matches!(
-                                missing.outcome,
-                                ActionReviewOutcome::InsufficientEvidence
-                                    | ActionReviewOutcome::NeedsChanges
-                            ),
-                            "Command without action-bound evidence was not rejected: {:?}",
-                            missing.outcome
-                        );
-                        ensure!(h.next(&missing).is_err(), "Missing evidence advanced");
-                        h.rejected_missing = true;
+                    if fixture_git_command(argv, &h.task) {
+                        h.attach_git_command(argv)?;
+                    } else {
+                        if !h.rejected_missing {
+                            let state = h.state()?;
+                            let saved = h.store.lock().unwrap().current_action_review(&state)?;
+                            let current = h.current_input()?;
+                            let missing = if let Some((
+                                review,
+                                Some(OperationOutcome::Completed { .. }),
+                            )) = saved.filter(|(review, _)| {
+                                review.binding == current.binding
+                                    && matches!(
+                                        review.outcome,
+                                        ActionReviewOutcome::NeedsChanges
+                                            | ActionReviewOutcome::InsufficientEvidence
+                                    )
+                                    && current.evidence_gate(&action).0
+                                        != ActionReviewOutcome::Passed
+                            }) {
+                                h.choices.push("Resume the immutable current negative review against identical missing-evidence inputs; no duplicate model call or invented outcome".into());
+                                review
+                            } else {
+                                h.review(&mut r)?
+                            };
+                            ensure!(
+                                matches!(
+                                    missing.outcome,
+                                    ActionReviewOutcome::InsufficientEvidence
+                                        | ActionReviewOutcome::NeedsChanges
+                                ),
+                                "Command without action-bound evidence was not rejected: {:?}",
+                                missing.outcome
+                            );
+                            ensure!(h.next(&missing).is_err(), "Missing evidence advanced");
+                            h.rejected_missing = true;
+                        }
+                        h.check(CheckStatus::Passed)?;
                     }
-                    h.check(CheckStatus::Passed)?;
                 }
                 ActionTarget::Validation { .. } => {}
             }
@@ -891,7 +1072,9 @@ fn journey(
         let runs = h.store.lock().unwrap().model_runs(h.task.project.key())?;
         ensure!(
             runs.iter()
-                .all(|run| run.request.action != CompanionAction::Reveal && run.tool_items == 0),
+                .all(|run| run.request.action != CompanionAction::Reveal
+                    && (run.tool_items == 0
+                        || historical_compaction_only(run, &h.directory).unwrap_or(false))),
             "Unexpected solution request or model tool execution"
         );
         write_json(&h.directory.join("output-schemas.json"),&runs.iter().map(|run|json!({"action":run.request.action,"current_wire_schema_hash":content_hash(tandem_codex::output_schema_json(&run.request.schema()).unwrap().as_bytes()),"original_dispatch_schema_hash":"see immutable dispatch receipt; historical wire encodings are not rewritten","resolved_model":run.request.resolved_model,"thread_id":run.thread_id,"turn_id":run.turn_id,"status":run.status})).collect::<Vec<_>>())?;
@@ -1022,6 +1205,21 @@ fn main() -> Result<()> {
             if args.iter().any(|a| a == "--check-prerequisites") {
                 return Ok(());
             }
+        }
+        if args
+            .iter()
+            .any(|arg| arg == "--restore-generated-commands-only")
+        {
+            ensure!(
+                language == "python",
+                "Only diagnosed unfinished Python commands may be restored"
+            );
+            let mut harness = Harness::new(&directory.join(language), language, true)?;
+            harness.restore_unfinished_generated_commands()?;
+            println!(
+                "Restored exact unfinished provider commands with a new walkthrough ID; zero model turns"
+            );
+            return Ok(());
         }
         let receipt_path = directory
             .join(language)
@@ -1416,6 +1614,34 @@ fn diagnose_latest(directory: &Path, language: &str) -> Result<()> {
         std::time::Duration::from_secs(15),
     )?;
     let mut diagnostics = vec![];
+    let mut other_items = vec![];
+    for turn in thread["thread"]["turns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|turn| turn["id"].as_str() == run.turn_id.as_deref())
+    {
+        for item in turn["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| {
+                item["type"] != "agentMessage"
+                    && item["type"] != "userMessage"
+                    && item["type"] != "reasoning"
+                    && item["type"] != "plan"
+            })
+        {
+            other_items.push(item.clone());
+            diagnostics.push(json!({"run_id":run.id,"action":run.request.action,"status":run.status,"unexpected_item_type":item["type"],"item_status":item["status"],"exit_code":item["exitCode"],"item_hash":content_hash(&serde_json::to_vec(item)?),"model_turns":0}));
+        }
+    }
+    if !other_items.is_empty() {
+        write_json(
+            &root.join(format!("diagnosed-tool-items-private-{}.json", run.id)),
+            &other_items,
+        )?;
+    }
     for turn in thread["thread"]["turns"]
         .as_array()
         .into_iter()

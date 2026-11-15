@@ -549,6 +549,10 @@ impl<E: ProtocolExchange> CompanionSession<E> {
                                 }
                             }
                             Some("userMessage" | "reasoning" | "plan") => {}
+                            // Pinned informational protocol item: no content is exposed and
+                            // it cannot complete the turn or grant tool authority.
+                            Some("contextCompaction")
+                                if item["id"].as_str().is_some_and(|id| !id.is_empty()) => {}
                             _ => {
                                 run.tool_items += 1;
                                 return Err(UnexpectedTool.into());
