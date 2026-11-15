@@ -403,28 +403,37 @@ impl Workspace {
             })
             .collect::<Vec<_>>();
         let empty = div()
-            .v_flex()
+            .id("welcome-content")
             .size_full()
             .min_w_0()
-            .justify_center()
-            .items_center()
-            .gap_4()
-            .p_6()
-            .text_size(px(13.))
-            .text_color(p.secondary_foreground)
+            .min_h_0()
+            .overflow_y_scroll()
             .child(
                 div()
-                    .text_size(px(16.))
-                    .font_semibold()
-                    .text_color(p.foreground)
-                    .child(if self.project.is_some() {
-                        "Choose a file to start coding"
-                    } else {
-                        "Open your project"
-                    }),
-            )
-            .child("⌘P opens files · ⌘N creates a file · ⌘S saves")
-            .children(recent);
+                    .v_flex()
+                    .w_full()
+                    .min_h(relative(1.0))
+                    .min_w_0()
+                    .justify_center()
+                    .items_center()
+                    .gap_4()
+                    .p_6()
+                    .text_size(px(13.))
+                    .text_color(p.secondary_foreground)
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_semibold()
+                            .text_color(p.foreground)
+                            .child(if self.project.is_some() {
+                                "Choose a file to start coding"
+                            } else {
+                                "Open your project"
+                            }),
+                    )
+                    .child("⌘P opens files · ⌘N creates a file · ⌘S saves")
+                    .children(recent),
+            );
         div()
             .v_flex()
             .flex_1()
@@ -561,8 +570,13 @@ impl Render for Workspace {
             .when(self.show_recent, |d| {
                 d.child(
                     div()
+                        .id("recent-projects-list")
                         .v_flex()
                         .min_w_0()
+                        .min_h_0()
+                        .max_h(relative(0.25))
+                        .flex_shrink_0()
+                        .overflow_y_scroll()
                         .p_2()
                         .gap_1()
                         .border_b_1()
