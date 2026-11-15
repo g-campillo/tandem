@@ -148,6 +148,125 @@ fn manual_command_metadata_and_existing_recipe_shapes_do_not_grant_execution_aut
     }
 }
 
+#[test]
+fn command_metadata_rejects_scripts_behind_dispatch_wrappers() {
+    for argv in [
+        vec![
+            "env",
+            "python3",
+            "-c",
+            "open('greeting.py','w').write('answer = 42')",
+        ],
+        vec!["env", "sh", "-c", "touch greeting.py"],
+        vec![
+            "/usr/bin/env",
+            "LANG=C",
+            "/usr/bin/env",
+            "--",
+            "/usr/bin/python3",
+            "-Bcwrite_solution()",
+        ],
+        vec!["env", "-iu", "HOME", "node", "-ewriteSolution()"],
+        vec!["env", "--unset=HOME", "python3", "-cwrite_solution()"],
+        vec!["env", "-uHOME", "--chdir=src", "bash", "-c", "touch file"],
+        vec!["env", "-P", "/usr/bin", "ruby", "-e", "write_solution()"],
+        vec!["env", "-Csrc", "-aNAME", "python3", "-cwrite_solution()"],
+        vec!["env", "--argv0=python3", "/bin/sh", "-c", "touch file"],
+        vec!["env", "-S", "python3 -c write_solution()"],
+        vec!["env", "-Ssh -c 'touch greeting.py'"],
+        vec!["env", "-ivS", "python3 -c write_solution()"],
+        vec!["env", "--split-string", "python3 -c write_solution()"],
+        vec!["env", "--split-string=sh -c 'touch greeting.py'"],
+        vec!["env", "--unknown-option", "python3", "-cwrite_solution()"],
+        vec!["env", "nice", "python3", "-c", "write_solution()"],
+        vec!["/usr/bin/nohup", "env", "sh", "-c", "touch greeting.py"],
+    ] {
+        let argv: Vec<String> = argv.into_iter().map(String::from).collect();
+        assert!(validate_action_command(&argv).is_err(), "{argv:?}");
+    }
+    for wrapper in [
+        "command", "exec", "nice", "nohup", "time", "timeout", "gtimeout", "stdbuf", "gstdbuf",
+        "xargs", "watch", "setsid", "sudo", "doas", "su", "runuser", "chroot", "busybox", "toybox",
+    ] {
+        let argv = vec![
+            "env".into(),
+            format!("/usr/bin/{wrapper}"),
+            "python3".into(),
+            "-cwrite_solution()".into(),
+        ];
+        assert!(validate_action_command(&argv).is_err(), "{argv:?}");
+    }
+}
+
+#[test]
+fn benign_env_wrapped_commands_remain_manual_metadata() {
+    let (spec, plan) = documents();
+    for argv in [
+        vec!["env", "mkdir", "src"],
+        vec!["/usr/bin/env", "LANG=C", "touch", "greeting.py"],
+        vec!["env", "-i", "--", "cargo", "init", "--lib"],
+        vec!["env", "-iv", "-uHOME", "cargo", "check"],
+        vec![
+            "env",
+            "--unset",
+            "HOME",
+            "--chdir=src",
+            "touch",
+            "greeting.py",
+        ],
+        vec!["env", "-C", "src", "-P/usr/bin", "touch", "greeting.py"],
+        vec![
+            "env", "--argv0", "pytest", "python3", "-I", "-B", "-m", "pytest",
+        ],
+        vec!["env", "-aNAME", "python3", "-I", "-B", "-m", "pytest"],
+        vec!["env", "-u", "SHELL", "cc", "-c", "greeting.c"],
+        vec!["env", "-uSHELL", "rg", "-e", "greeting", "src"],
+        vec![
+            "env",
+            "--ignore-environment",
+            "LANG=C",
+            "/usr/bin/env",
+            "-",
+            "python3",
+            "-I",
+            "-B",
+            "-m",
+            "pytest",
+        ],
+    ] {
+        let mut action = command();
+        action.target = ActionTarget::Command {
+            argv: argv.into_iter().map(String::from).collect(),
+            cwd: ".".into(),
+            expected_exit_codes: vec![0],
+        };
+        action
+            .validate(&spec, &plan)
+            .unwrap_or_else(|error| panic!("{:?}: {error}", action.target));
+    }
+}
+
+#[test]
+fn env_wrapper_parsing_is_bounded_and_requires_option_operands() {
+    for argv in [
+        vec!["env", "-u"],
+        vec!["env", "--unset"],
+        vec!["env", "-C"],
+        vec!["env", "--chdir"],
+        vec!["env", "-P"],
+        vec!["env", "--argv0"],
+        vec!["env", "--ignore-environment=value", "touch", "file"],
+    ] {
+        let argv: Vec<String> = argv.into_iter().map(String::from).collect();
+        assert!(validate_action_command(&argv).is_err(), "{argv:?}");
+    }
+    let mut nested = vec!["env".to_owned(); 9];
+    nested.extend(["touch".into(), "greeting.py".into()]);
+    assert!(validate_action_command(&nested).is_err());
+    nested.remove(0);
+    assert!(validate_action_command(&nested).is_ok());
+}
+
 fn apply(store: &mut Store, session: &TaskSession, command: SessionCommand) -> TaskSession {
     store
         .apply_session_transition(

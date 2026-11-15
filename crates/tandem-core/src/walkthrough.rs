@@ -424,7 +424,30 @@ pub fn validate_action_command(argv: &[String]) -> Result<()> {
         !argv.is_empty() && argv.len() <= 64,
         "Use one bounded argv command"
     );
-    let executable = Path::new(&argv[0])
+    ensure!(
+        argv.iter().all(|arg| arg.len() <= 4096
+            && !arg.contains(['\0', '\n', '\r', ';', '|', '&', '`', '<', '>'])
+            && !arg.contains("$(")),
+        "Commands cannot contain shell scripts or redirection"
+    );
+    ensure!(
+        !argv.iter().any(
+            |arg| matches!(arg.as_str(), "--eval" | "--execute" | "--command")
+                || arg.starts_with("--eval=")
+                || arg.starts_with("--execute=")
+                || arg.starts_with("--command=")
+        ),
+        "Inline code is not guided command metadata"
+    );
+    ensure!(
+        !crate::contains_solution_code(&serde_json::to_value(argv)?),
+        "Implementation code is hidden in command metadata"
+    );
+    let command = unwrap_action_command_env(argv)?;
+    let Some((program, arguments)) = command.split_first() else {
+        return Ok(());
+    };
+    let executable = Path::new(program)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
@@ -446,20 +469,32 @@ pub fn validate_action_command(argv: &[String]) -> Result<()> {
             ),
         "Use one ordinary command, not a shell script"
     );
+    // Only env's bounded argv prefix is decoded here. Other dispatch wrappers
+    // must not hide an interpreter from the metadata check below.
     ensure!(
-        argv.iter().all(|arg| arg.len() <= 4096
-            && !arg.contains(['\0', '\n', '\r', ';', '|', '&', '`', '<', '>'])
-            && !arg.contains("$(")),
-        "Commands cannot contain shell scripts or redirection"
-    );
-    ensure!(
-        !argv.iter().any(
-            |arg| matches!(arg.as_str(), "--eval" | "--execute" | "--command")
-                || arg.starts_with("--eval=")
-                || arg.starts_with("--execute=")
-                || arg.starts_with("--command=")
+        !matches!(
+            executable,
+            "command"
+                | "exec"
+                | "nice"
+                | "nohup"
+                | "time"
+                | "timeout"
+                | "gtimeout"
+                | "stdbuf"
+                | "gstdbuf"
+                | "xargs"
+                | "watch"
+                | "setsid"
+                | "sudo"
+                | "doas"
+                | "su"
+                | "runuser"
+                | "chroot"
+                | "busybox"
+                | "toybox"
         ),
-        "Inline code is not guided command metadata"
+        "Use the underlying command without a dispatch wrapper"
     );
     let python = executable.starts_with("python") || executable.starts_with("pypy");
     let evaluator = python
@@ -469,7 +504,7 @@ pub fn validate_action_command(argv: &[String]) -> Result<()> {
         );
     ensure!(
         !evaluator
-            || !argv.iter().skip(1).any(|arg| {
+            || !arguments.iter().any(|arg| {
                 // Interpreters also accept attached/combined switches such as
                 // python -BcCODE or node -eCODE; those still disclose inline code.
                 (python && arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c'))
@@ -480,11 +515,72 @@ pub fn validate_action_command(argv: &[String]) -> Result<()> {
             }),
         "Inline interpreter code is not guided command metadata"
     );
-    ensure!(
-        !crate::contains_solution_code(&serde_json::to_value(argv)?),
-        "Implementation code is hidden in command metadata"
-    );
     Ok(())
+}
+
+/// Inspect argv without executing it or interpreting any command string. The
+/// normal metadata bounds have already limited the total argument count/bytes.
+fn unwrap_action_command_env(mut argv: &[String]) -> Result<&[String]> {
+    let mut depth = 0;
+    while argv
+        .first()
+        .is_some_and(|program| Path::new(program).file_name().is_some_and(|s| s == "env"))
+    {
+        ensure!(depth < 8, "Command dispatch wrappers exceed 8 levels");
+        depth += 1;
+        let mut index = 1;
+        let mut options = true;
+        while let Some(argument) = argv.get(index) {
+            if options && argument == "--" {
+                options = false;
+            } else if options && argument == "-" {
+                // env's legacy spelling of --ignore-environment.
+            } else if options && argument.starts_with("--") {
+                let (option, value) = argument
+                    .split_once('=')
+                    .map_or((argument.as_str(), None), |(option, value)| {
+                        (option, Some(value))
+                    });
+                match option {
+                    "--ignore-environment" | "--debug" => {
+                        ensure!(value.is_none(), "Unexpected env option value");
+                    }
+                    "--unset" | "--chdir" | "--argv0" => {
+                        if value.is_none() {
+                            index += 1;
+                            ensure!(argv.get(index).is_some(), "Missing env option value");
+                        }
+                    }
+                    _ => anyhow::bail!("Unsupported env option or split-string command"),
+                }
+            } else if options && argument.starts_with('-') {
+                for (offset, option) in argument[1..].char_indices() {
+                    match option {
+                        'i' | 'v' => {}
+                        'u' | 'C' | 'P' | 'a' => {
+                            // An operand consumes the rest of a combined option,
+                            // or the next argv entry (even if it begins with '-').
+                            if offset + 2 == argument.len() {
+                                index += 1;
+                                ensure!(argv.get(index).is_some(), "Missing env option value");
+                            }
+                            break;
+                        }
+                        _ => anyhow::bail!("Unsupported env option or split-string command"),
+                    }
+                }
+            } else if argument.contains('=') {
+                // Assignments follow options; remaining entries are the exact
+                // underlying argv, not further env options.
+                options = false;
+            } else {
+                break;
+            }
+            index += 1;
+        }
+        argv = &argv[index..];
+    }
+    Ok(argv)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
