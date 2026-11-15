@@ -126,6 +126,90 @@ fn plain_folder_index_honors_ignores_and_search_is_bounded_and_cancelable() {
 }
 
 #[test]
+#[cfg(unix)]
+fn store_releases_lock_after_drop_while_a_forked_child_waits_to_exec() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::{net::UnixStream, process::CommandExt};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(state.path()).unwrap();
+    let (mut parent, child) = UnixStream::pair().unwrap();
+    for socket in [&parent, &child] {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+    }
+    // A pre-exec hook forces Command's fork path and holds the child before
+    // CLOEXEC closes its inherited workspace.lock descriptor. Use only
+    // async-signal-safe calls in the child of this multithreaded test process.
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .arg("--list")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            let fd = child.as_raw_fd();
+            let pid = libc::getpid().to_ne_bytes();
+            if libc::write(fd, pid.as_ptr().cast(), pid.len()) != pid.len() as isize {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut release = 0_u8;
+            if libc::read(fd, (&mut release as *mut u8).cast(), 1) != 1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let process = std::thread::spawn(move || command.spawn()?.wait());
+    let mut child_pid = [0_u8; std::mem::size_of::<libc::pid_t>()];
+    let ready = parent.read_exact(&mut child_pid);
+    let child_pid = libc::pid_t::from_ne_bytes(child_pid);
+    let blocked_while_owned = Store::open(state.path()).is_err();
+    drop(store);
+    let reopened = Store::open(state.path());
+    let blocked_after_reopen = reopened
+        .as_ref()
+        .ok()
+        .map(|_| Store::open(state.path()).is_err());
+    eprintln!(
+        "forked child {child_pid}, state {}, live-owner blocked: {blocked_while_owned}, after-drop reopen: {reopened_result}",
+        state.path().display(),
+        reopened_result = reopened
+            .as_ref()
+            .map(|_| "opened".to_string())
+            .map_err(|e| format!("{e:#}"))
+            .unwrap_or_else(|e| e),
+    );
+    // Always release and reap our child before reporting a failed assertion.
+    let released = parent.write_all(&[1]);
+    let status = process.join().unwrap();
+    ready.unwrap();
+    released.unwrap();
+    assert!(status.unwrap().success());
+    assert!(
+        blocked_while_owned,
+        "a live Store must retain exclusive ownership"
+    );
+    let reopened = reopened.expect("a forked child must not extend a dropped Store's lock");
+    assert!(blocked_after_reopen.unwrap());
+    assert!(
+        Store::open(state.path()).is_err(),
+        "child exec must not release the reopened Store's new lock"
+    );
+    drop(reopened);
+    Store::open(state.path()).unwrap();
+}
+
+#[test]
 fn recovery_survives_restart_and_external_changes_without_writing_project() {
     let (_directory, project) = fixture();
     let state_dir = tempfile::tempdir().unwrap();

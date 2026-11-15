@@ -1382,7 +1382,10 @@ impl Journey {
     fn reopen(self) -> Self {
         let directory = self.temp.path().join("state");
         drop(self.capture.store);
-        drop(self.store);
+        let store = Arc::try_unwrap(self.store).unwrap_or_else(|_| {
+            panic!("Drop every runner and observer before restarting a journey")
+        });
+        drop(store);
         let store = Arc::new(Mutex::new(Store::open(&directory).unwrap()));
         let mut inner = self.capture.inner;
         inner.overlays = store

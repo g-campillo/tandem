@@ -43,8 +43,20 @@ impl WorkspaceState {
 
 pub struct Store {
     connection: Connection,
-    _lock: File,
+    // Drop the connection before releasing the state-directory lock.
+    _lock: StoreLock,
     pub directory: PathBuf,
+}
+
+struct StoreLock(File);
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        // A concurrent fork can inherit this descriptor before CLOEXEC runs.
+        // Closing only our descriptor would let that child extend the lock
+        // beyond the owning Store's lifetime.
+        let _ = self.0.unlock();
+    }
 }
 
 impl Store {
@@ -63,6 +75,7 @@ impl Store {
             .open(directory.join("workspace.lock"))?;
         lock.try_lock()
             .context("Another Tandem instance is using this state directory")?;
+        let lock = StoreLock(lock);
         let mut connection = Connection::open(directory.join("workspace.sqlite"))?;
         connection.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
