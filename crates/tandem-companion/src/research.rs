@@ -423,6 +423,10 @@ impl<E: InspectionExecutor> ResearchBroker<E> {
                         ConversationPayload::QuestionAnswered { answer } => {
                             serde_json::to_string(answer)?
                         }
+                        ConversationPayload::ResearchReceiptRecorded { .. }
+                        | ConversationPayload::ResearchFindings { .. } => {
+                            serde_json::to_string(&event.payload)?
+                        }
                         _ => {
                             result.omit("Non-discussion artifacts are available through their separate channels");
                             continue;
@@ -448,6 +452,9 @@ impl<E: InspectionExecutor> ResearchBroker<E> {
                         ResearchProvenance::Conversation,
                     );
                 }
+            }
+            ResearchRequestKind::ResearchReceipts { .. } => {
+                result.unavailable("Receipt bodies require the session-scoped host store")
             }
             ResearchRequestKind::PublicSearch { .. } | ResearchRequestKind::PublicPage { .. } => {
                 result.unavailable("Public research requires the separate public-only worker")

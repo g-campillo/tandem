@@ -76,6 +76,11 @@ pub enum ResearchRequestKind {
         before_sequence: Option<u64>,
         limit: u32,
     },
+    /// Host-scoped immutable receipt bodies, including research interrupted
+    /// before a final cited finding was produced.
+    ResearchReceipts {
+        receipt_ids: Vec<String>,
+    },
     PublicSearch {
         query: String,
     },
@@ -158,6 +163,15 @@ impl ResearchRequest {
                 }
             }
             ResearchRequestKind::ConversationEvents { limit, .. } => bounded_limit(*limit)?,
+            ResearchRequestKind::ResearchReceipts { receipt_ids } => {
+                ensure!(
+                    (1..=4).contains(&receipt_ids.len()),
+                    "Read 1–4 scoped research receipts"
+                );
+                for id in receipt_ids {
+                    stable_id(id)?;
+                }
+            }
             ResearchRequestKind::PublicSearch { query } => {
                 bounded_text(query, 4096, "Public search")?
             }

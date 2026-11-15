@@ -296,6 +296,9 @@ pub struct ConversationRunner<B, P, I = RuntimeInspectionExecutor> {
     // A process restart never resumes a possibly compacted/uncertain context.
     // Persisted transport bindings are independent from transcript history.
     threads: BTreeMap<String, ThreadBinding>,
+    // Retain every screened private input for transport reuse across operations,
+    // even when bounded receipt/history replay has since omitted it.
+    privacy: BTreeMap<String, PrivateResearchScreening>,
 }
 impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> ConversationRunner<B, P, I> {
     pub fn new(store: Arc<Mutex<Store>>, backend: B, public: P, broker: ResearchBroker<I>) -> Self {
@@ -306,6 +309,7 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
             broker,
             operations: OperationSlot::default(),
             threads: BTreeMap::new(),
+            privacy: BTreeMap::new(),
         }
     }
     pub fn run(
@@ -350,6 +354,9 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
         let mut historical = false;
         let mut result_review = None;
         let mut result_walkthrough = None;
+        let mut pending_transition = None;
+        let mut pending_thread = None;
+        let mut operation_thread = None;
         let operation = ActiveOperation {
             id: id.clone(),
             session_id: session_id.clone(),
@@ -520,6 +527,15 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                 receipts: historical_receipts(&self.store, &session_id, &events)?,
                 review: captured.review,
             };
+            let mut privacy = self.privacy.get(&session_id).cloned().unwrap_or_default();
+            privacy.include_identifiers(&captured.private_identifiers);
+            // Include older durable inputs too: a reused private transport may
+            // still know them even when the bounded replay window omits them.
+            for event in &events {
+                if replayable(event) {
+                    privacy.include(&event.payload)?;
+                }
+            }
             let mut research =
                 ResearchContext::new(&captured.research, &session_id, &id, environment, &events)?;
             let mut budget = ResearchBudget::default();
@@ -533,6 +549,7 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                 },
                 content_hash(&serde_json::to_vec(&model)?)
             );
+            operation_thread = Some((session.project.clone(), key.clone()));
             loop {
                 if budget.rounds >= MAX_RESEARCH_ROUNDS {
                     record_stop(&self.store, &session_id, &id)?;
@@ -563,6 +580,8 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                     delegation: None,
                 };
                 request.validate_guided()?;
+                privacy.include_request(&request)?;
+                self.privacy.insert(session_id.clone(), privacy.clone());
                 let original_request = request.clone();
                 let run = ModelRun::pending(session.project.clone(), request);
                 lock_store(&self.store)?.save_model_run(&run)?;
@@ -642,8 +661,10 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                                         _ => vec![],
                                     },
                                 };
-                                let screened =
-                                    screen_public_brief(brief, &captured.private_identifiers)?;
+                                // A preceding request in this very round may
+                                // have expanded files, receipts or older history.
+                                privacy.include_guided(&guided)?;
+                                let screened = privacy.screen(brief)?;
                                 if let Some(brief) = screened.brief {
                                     phase(
                                         &self.store,
@@ -734,8 +755,18 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                                         request: request.clone(),
                                     },
                                 )?;
-                                self.broker
-                                    .execute(request, &mut research, &cancel, |_| Ok(()))?
+                                if matches!(kind, ResearchRequestKind::ResearchReceipts { .. }) {
+                                    read_saved_receipts(
+                                        &self.store,
+                                        &session_id,
+                                        request,
+                                        &mut guided.receipts,
+                                        &mut budget,
+                                    )?
+                                } else {
+                                    self.broker
+                                        .execute(request, &mut research, &cancel, |_| Ok(()))?
+                                }
                             };
                             check_cancel(&cancel)?;
                             if budget.record_receipt(&receipt).is_err() {
@@ -761,7 +792,7 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                                 )
                                 .for_operation(&id),
                             )?;
-                            guided.receipts.push(receipt);
+                            include_receipt(&mut guided.receipts, receipt)?;
                         }
                         // Only confirmed complete subturns are reusable. No
                         // model/private context is ever reused by the public worker.
@@ -799,6 +830,7 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                         &checks,
                         &cancel,
                     )?;
+                    check_cancel(&cancel)?;
                     historical = live.review.as_ref().map(|r| &r.binding)
                         != guided.review.as_ref().map(|r| &r.binding);
                     if historical {
@@ -844,89 +876,76 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                         "Document draft is historical because the definition changed"
                     );
                 }
-                apply(&self.store, &session_id, transition)?;
-                if let Some(review) = &result_review {
-                    result_review =
-                        lock_store(&self.store)?.action_review(&session_id, &review.id)?;
-                }
-                if let Some(thread) = thread {
-                    lock_store(&self.store)?.save_companion_thread(
-                        &session.project,
-                        &key,
-                        &thread,
-                    )?;
-                    self.threads.insert(key.clone(), thread);
-                }
+                check_cancel(&cancel)?;
+                pending_transition = Some(transition);
+                pending_thread =
+                    thread.map(|thread| (session.project.clone(), key.clone(), thread));
                 return Ok(Some(response));
             }
         })();
-        let outcome = match &result {
-            Ok(_) => OperationOutcome::Completed {
-                summary: "Operation completed; proposals require explicit human save and approval."
-                    .into(),
-            },
-            Err(_) if cancel.load(Ordering::Acquire) => OperationOutcome::Cancelled {
-                detail: "Cancelled; no further model or research work was dispatched.".into(),
-            },
-            Err(error) => OperationOutcome::Failed {
-                detail: safe_error(error),
-            },
-        };
-        // Persist the terminal fence before releasing busy state. If persistence
-        // itself failed, restart reconciliation will record Interrupted. Never
-        // leave the UI stuck or let a cleanup error release another operation.
-        let terminal = (|| -> Result<()> {
-            if lock_store(&self.store)?
-                .active_session_operation(&session_id)?
-                .is_some_and(|o| o.id == id)
-            {
-                if cancel.load(Ordering::Acquire) {
-                    let _ = phase(
-                        &self.store,
-                        &self.operations,
-                        &session_id,
-                        &id,
-                        OperationPhase::Stopping,
-                        &cancel,
-                        &mut observe,
-                    );
+        // Nothing actionable is published before the terminal decision. Holding
+        // the slot lock across the Store transaction linearizes accepted Cancel
+        // against completion, and the transaction prevents provisional authority.
+        let terminal = self.operations.settle(&id, |cancelled| {
+            let outcome = if cancelled {
+                OperationOutcome::Cancelled {
+                    detail: "Cancelled; no further model or research work was dispatched.".into(),
                 }
-                apply(
-                    &self.store,
-                    &session_id,
-                    SessionTransition::new(
-                        format!("{id}-terminal"),
-                        vec![SessionCommand::FinishOperation {
-                            operation_id: id.clone(),
-                            outcome: outcome.clone(),
-                        }],
-                    )
-                    .for_operation(&id),
-                )?;
+            } else if let Err(error) = &result {
+                OperationOutcome::Failed {
+                    detail: safe_error(error),
+                }
+            } else {
+                OperationOutcome::Completed {
+                    summary:
+                        "Operation completed; proposals require explicit human save and approval."
+                            .into(),
+                }
+            };
+            let publication = publish_terminal(
+                &self.store,
+                &session_id,
+                &id,
+                outcome,
+                pending_transition.take(),
+                pending_thread.as_ref(),
+            );
+            if !publication
+                .as_ref()
+                .is_ok_and(|outcome| matches!(outcome, OperationOutcome::Completed { .. }))
+                && let Some((project, key)) = &operation_thread
+            {
+                lock_store(&self.store)?.forget_companion_thread(project, key)?;
             }
-            Ok(())
-        })();
-        self.operations.finish(&id);
-        if result.is_err() || terminal.is_err() {
+            publication
+        });
+        let completed = terminal
+            .as_ref()
+            .is_ok_and(|outcome| matches!(outcome, OperationOutcome::Completed { .. }));
+        if !completed {
             self.threads
                 .retain(|key, _| !key.starts_with(&format!("guided:{session_id}:")));
-        }
-        terminal?;
-        if result.is_err() {
             result_review = None;
             result_walkthrough = None;
+        } else {
+            if let Some(review) = &result_review {
+                result_review = lock_store(&self.store)?.action_review(&session_id, &review.id)?;
+            }
+            if let Some((_, key, thread)) = pending_thread {
+                self.threads.insert(key, thread);
+            }
         }
-        let cancelled = cancel.load(Ordering::Acquire);
+        let outcome = terminal?;
         Ok(ConversationResult {
             operation_id: id,
             outcome,
-            response: if cancelled {
-                None
-            } else {
+            response: if completed {
                 result.ok().flatten()
+            } else {
+                None
             },
             duplicate: false,
-            historical: historical || cancelled,
+            historical: historical || !completed,
             review: result_review,
             walkthrough: result_walkthrough,
         })
@@ -954,6 +973,66 @@ fn apply(
         .context("Unknown session")?
         .sequence;
     store.apply_session_transition(session, sequence, &transition)
+}
+/// Called with the operation slot locked. Artifacts and the Completed fence
+/// commit together, so a failed terminal write cannot leave usable reviews.
+fn publish_terminal(
+    store: &Mutex<Store>,
+    session: &str,
+    id: &str,
+    mut outcome: OperationOutcome,
+    pending: Option<SessionTransition>,
+    thread: Option<&(String, String, ThreadBinding)>,
+) -> Result<OperationOutcome> {
+    let active = lock_store(store)?
+        .active_session_operation(session)?
+        .is_some_and(|op| op.id == id);
+    if !active {
+        ensure!(
+            !matches!(outcome, OperationOutcome::Completed { .. }),
+            "Operation was superseded before publication"
+        );
+        return Ok(outcome);
+    }
+    let finish = |outcome: &OperationOutcome| SessionCommand::FinishOperation {
+        operation_id: id.into(),
+        outcome: outcome.clone(),
+    };
+    let empty = || SessionTransition::new(new_id(), vec![]).for_operation(id);
+    let completed = matches!(outcome, OperationOutcome::Completed { .. });
+    let mut transition = if completed {
+        pending.unwrap_or_else(empty)
+    } else {
+        empty()
+    };
+    if matches!(outcome, OperationOutcome::Cancelled { .. }) {
+        transition.commands.push(SessionCommand::OperationPhase {
+            operation_id: id.into(),
+            phase: OperationPhase::Stopping,
+        });
+    }
+    transition.commands.push(finish(&outcome));
+    let publication = (|| -> Result<()> {
+        if completed && let Some((project, key, thread)) = thread {
+            lock_store(store)?.save_companion_thread(project, key, thread)?;
+        }
+        apply(store, session, transition)?;
+        Ok(())
+    })();
+    if let Err(error) = publication {
+        outcome = OperationOutcome::Failed {
+            detail: safe_error(&error),
+        };
+        // Publication rolled back. If even this failure fence cannot persist,
+        // restart reconciles Interrupted rather than claiming completion.
+        apply(
+            store,
+            session,
+            SessionTransition::new(format!("{id}-terminal"), vec![finish(&outcome)])
+                .for_operation(id),
+        )?;
+    }
+    Ok(outcome)
 }
 fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     ensure!(!cancel.load(Ordering::Acquire), "Operation cancelled");
@@ -1163,6 +1242,7 @@ fn replayable(event: &ConversationEvent) -> bool {
             | ConversationPayload::QuestionAsked { .. }
             | ConversationPayload::QuestionAnswered { .. }
             | ConversationPayload::ResearchFindings { .. }
+            | ConversationPayload::ResearchReceiptRecorded { .. }
     )
 }
 fn historical_receipts(
@@ -1173,25 +1253,38 @@ fn historical_receipts(
     let store = lock_store(store)?;
     let mut receipts = vec![];
     let mut ids = BTreeSet::new();
-    let mut bytes = 0;
-    for event in events.iter().rev() {
-        if let ConversationPayload::ResearchFindings { findings } = &event.payload {
-            for citation in findings.iter().flat_map(|f| &f.citations) {
-                if ids.insert(citation.receipt_id.clone()) {
-                    let receipt = store
-                        .research_receipt(session, &citation.receipt_id)?
-                        .context("Saved citation receipt is missing")?;
-                    if receipts.len() >= 32
-                        || bytes + receipt.content.len() > MAX_RESEARCH_RETURNED_BYTES
-                    {
-                        return Ok(receipts);
-                    }
-                    bytes += receipt.content.len();
+    let mut bytes = 2;
+    'events: for event in events.iter().rev() {
+        let event_ids = match &event.payload {
+            ConversationPayload::ResearchReceiptRecorded { receipt_id } => {
+                vec![receipt_id.as_str()]
+            }
+            ConversationPayload::ResearchFindings { findings } => findings
+                .iter()
+                .flat_map(|finding| &finding.citations)
+                .map(|citation| citation.receipt_id.as_str())
+                .collect(),
+            _ => continue,
+        };
+        for id in event_ids {
+            if ids.len() >= MAX_RESEARCH_RECEIPTS as usize {
+                break 'events;
+            }
+            if ids.insert(id.to_string()) {
+                let receipt = store
+                    .research_receipt(session, id)?
+                    .context("Saved research receipt is missing")?;
+                let size = serde_json::to_vec(&receipt)?.len() + 1;
+                if receipts.len() < MAX_RESEARCH_RECEIPTS as usize
+                    && bytes + size <= MAX_RESEARCH_RETURNED_BYTES
+                {
+                    bytes += size;
                     receipts.push(receipt);
                 }
             }
         }
     }
+    receipts.reverse();
     Ok(receipts)
 }
 fn build_transcript(events: &[ConversationEvent]) -> Result<TranscriptContext> {
@@ -1257,4 +1350,169 @@ fn response_value(response: &CompanionResponse) -> Result<serde_json::Value> {
         CompanionResponse::Solution(r) => serde_json::to_value(r)?,
         _ => bail!("Unexpected managed response contract"),
     })
+}
+
+/// Local, conservative matching of concrete private inputs, not a semantic
+/// privacy classifier. Only the resulting screened brief crosses PublicWorker.
+/// Saturation withholds public work instead of silently dropping known inputs.
+#[derive(Clone, Default)]
+struct PrivateResearchScreening {
+    identifiers: BTreeSet<String>,
+    bytes: usize,
+    saturated: bool,
+}
+impl PrivateResearchScreening {
+    fn include_identifiers(&mut self, identifiers: &[String]) {
+        for identifier in identifiers {
+            self.insert(identifier.to_lowercase());
+        }
+    }
+    fn insert(&mut self, identifier: String) {
+        if identifier.trim().is_empty() || self.identifiers.contains(&identifier) {
+            return;
+        }
+        if self.identifiers.len() >= 32_768 || self.bytes + identifier.len() > 1024 * 1024 {
+            self.saturated = true;
+            return;
+        }
+        self.bytes += identifier.len();
+        self.identifiers.insert(identifier);
+    }
+    fn include_guided(&mut self, guided: &GuidedContext) -> Result<()> {
+        let mut private = guided.clone();
+        private.receipts.retain(|receipt| {
+            !matches!(
+                receipt.request.kind,
+                ResearchRequestKind::PublicSearch { .. } | ResearchRequestKind::PublicPage { .. }
+            )
+        });
+        self.include(&private)
+    }
+    fn include_request(&mut self, request: &ModelRequest) -> Result<()> {
+        let mut private = request.clone();
+        if let Some(guided) = private.guided.take() {
+            self.include_guided(&guided)?;
+        }
+        self.include(&private)
+    }
+    fn include(&mut self, value: &impl serde::Serialize) -> Result<()> {
+        self.include_value(&serde_json::to_value(value)?);
+        Ok(())
+    }
+    fn include_value(&mut self, value: &serde_json::Value) {
+        if self.saturated {
+            return;
+        }
+        match value {
+            serde_json::Value::String(text) => {
+                for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                    let word = word.to_lowercase();
+                    if word.len() < 4
+                        || generic_public_word(&word)
+                        || self.identifiers.contains(&word)
+                    {
+                        continue;
+                    }
+                    self.insert(word);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    self.include_value(value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                // Public source URLs are already screened at dispatch; they do
+                // not become private merely because the private model cites them.
+                if values.get("type").and_then(|v| v.as_str()) == Some("PublicUrl") {
+                    return;
+                }
+                for value in values.values() {
+                    self.include_value(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn screen(&self, brief: PublicResearchBrief) -> Result<PublicBriefScreening> {
+        if self.saturated {
+            return Ok(PublicBriefScreening {
+                brief: None,
+                omissions: vec!["Public research withheld because local private-input screening reached its bound".into()],
+            });
+        }
+        screen_public_brief(brief, &self.identifiers.iter().cloned().collect::<Vec<_>>())
+    }
+}
+fn generic_public_word(word: &str) -> bool {
+    // Common prose and generic technical vocabulary may form public topics.
+    // Distinctive names, identifiers, hashes and copied non-generic words remain
+    // local. This deliberately prefers a visible omission when uncertain.
+    const WORDS: &str = "about after also another before between both could does each from have into more only other same should some than that their them then there these they this those through using when where which while will with would your \
+        rust python javascript typescript iterator iterators documentation official reference standard library public technical programming language function functions type types string strings integer integers array arrays vector vectors hash hashmap list lists \
+        async await future futures thread threads mutex memory safety ownership borrow lifetime lifetimes sort sorting search algorithm algorithms complexity performance testing tests unit integration cargo dependency dependencies package packages version \
+        error errors handling result option trait traits method methods module modules struct enum impl const usize bool true false none null http https html json unicode encoding database migration migrations sqlite postgresql mysql linux macos windows tokio serde pytest";
+    WORDS.split_whitespace().any(|generic| generic == word)
+}
+
+/// Keep immutable historical identity/status and a bounded most-recent window.
+/// Omitted receipts remain available through the session-scoped typed read.
+fn include_receipt(receipts: &mut Vec<ResearchReceipt>, receipt: ResearchReceipt) -> Result<()> {
+    receipt.validate()?;
+    receipts.retain(|existing| existing.id != receipt.id);
+    receipts.push(receipt);
+    while receipts.len() > MAX_RESEARCH_RECEIPTS as usize
+        || serde_json::to_vec(receipts)?.len() > MAX_RESEARCH_RETURNED_BYTES
+    {
+        receipts.remove(0);
+    }
+    Ok(())
+}
+
+fn read_saved_receipts(
+    store: &Mutex<Store>,
+    session: &str,
+    request: ResearchRequest,
+    receipts: &mut Vec<ResearchReceipt>,
+    budget: &mut ResearchBudget,
+) -> Result<ResearchReceipt> {
+    let ResearchRequestKind::ResearchReceipts { receipt_ids } = &request.kind else {
+        bail!("Expected a scoped receipt read");
+    };
+    let store = lock_store(store)?;
+    let mut content =
+        String::from("Historical receipt bodies restored into the bounded receipt context:\n");
+    let mut omissions = vec![];
+    for id in receipt_ids {
+        let Some(receipt) = store.research_receipt(session, id)? else {
+            omissions.push(ResearchOmission {
+                locator: None,
+                reason: "Requested receipt is unavailable in this session".into(),
+            });
+            continue;
+        };
+        let size = serde_json::to_vec(&receipt)?.len();
+        // Reserve the complete original body/metadata plus the small retrieval
+        // receipt. Never truncate evidence or exceed this operation's return cap.
+        if budget.returned_bytes + size + 4096 > MAX_RESEARCH_RETURNED_BYTES {
+            omissions.push(ResearchOmission {
+                locator: None,
+                reason: "Receipt retrieval reached the operation byte budget; Continue explicitly"
+                    .into(),
+            });
+            continue;
+        }
+        budget.returned_bytes += size;
+        content.push_str(&format!(
+            "{}: {:?}; snapshot {:?}; original source identities and capture times retained.\n",
+            receipt.id, receipt.status, receipt.snapshot_id
+        ));
+        include_receipt(receipts, receipt)?;
+    }
+    let status = if omissions.is_empty() {
+        ResearchReceiptStatus::Complete
+    } else {
+        ResearchReceiptStatus::Partial
+    };
+    ResearchReceipt::new(request, vec![], status, content, omissions)
 }

@@ -1357,3 +1357,474 @@ fn artifact_and_terminal_persistence_failures_never_publish_and_restart_reconcil
         drop(_temp);
     }
 }
+
+struct CancelAfterCapture<'a> {
+    capture: &'a mut ProjectConversationCapture,
+    slot: OperationSlot,
+    operation: &'a str,
+    calls: usize,
+}
+impl ConversationCapture for CancelAfterCapture<'_> {
+    fn capture(
+        &mut self,
+        session: &TaskSession,
+        action: CompanionAction,
+        language: &str,
+        guidance: &EffectiveGuidance,
+        checks: &[CheckRecord],
+        cancel: &AtomicBool,
+    ) -> Result<CapturedConversation> {
+        let captured = self
+            .capture
+            .capture(session, action, language, guidance, checks, cancel)?;
+        self.calls += 1;
+        if self.calls == 2 {
+            assert!(self.slot.cancel(self.operation));
+        }
+        Ok(captured)
+    }
+}
+
+#[test]
+fn cancellation_during_final_recapture_cannot_publish_review_or_allow_next() {
+    let mut f = Fixture::new();
+    let mut runner = f.runner();
+    f.approved();
+    f.dynamic(|params| json!({"reply":reply("Prepare atomic actions."),"actions":actions(&guided(params).session)}));
+    completed(&f.run(
+        &mut runner,
+        "prepare",
+        ConversationIntent::PrepareWalkthrough,
+    ));
+    f.reply(assessment());
+    let input = f.input("review-cancel-recapture", ConversationIntent::ReviewAction);
+    let mut capture = CancelAfterCapture {
+        capture: &mut f.capture,
+        slot: runner.operations.clone(),
+        operation: "review-cancel-recapture",
+        calls: 0,
+    };
+    let result = runner
+        .run(
+            input,
+            &mut capture,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(matches!(result.outcome, OperationOutcome::Cancelled { .. }));
+    assert!(result.response.is_none() && result.review.is_none() && result.walkthrough.is_none());
+    assert!(result.historical);
+    assert!(matches!(
+        f.store
+            .lock()
+            .unwrap()
+            .session_operation_outcome("review-cancel-recapture")
+            .unwrap(),
+        Some(OperationOutcome::Cancelled { .. })
+    ));
+    let state = f.state();
+    let guidance = GuidanceSettings::default().effective(&state.project, "rust", None);
+    let captured = f
+        .capture
+        .capture(
+            &state,
+            CompanionAction::ReviewAction,
+            "rust",
+            &guidance,
+            &[],
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let binding = captured.review.unwrap().binding;
+    let db = rusqlite::Connection::open(f.store.lock().unwrap().directory.join("workspace.sqlite"))
+        .unwrap();
+    let review_ids = db
+        .prepare("SELECT id FROM action_review WHERE operation_id='review-cancel-recapture'")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for id in review_ids
+        .iter()
+        .chain(std::iter::once(&"missing-review".to_string()))
+    {
+        assert!(
+            f.store
+                .lock()
+                .unwrap()
+                .advance_action(&f.session, &binding.action_id, id, &binding)
+                .is_err()
+        );
+    }
+    assert!(review_ids.is_empty());
+    assert_eq!(f.state().current_action().unwrap().0.cursor, 0);
+    f.reply(reply("An explicit operation starts a fresh thread."));
+    completed(&f.run(
+        &mut runner,
+        "after-recapture-cancel",
+        ConversationIntent::Discuss,
+    ));
+    assert_eq!(f.peer.lock().unwrap().threads, 2);
+}
+
+#[test]
+fn public_screening_covers_chat_documents_and_expanded_private_receipts() {
+    for origin in ["chat", "document", "expanded", "history", "restored"] {
+        let mut f = Fixture::new();
+        let mut runner = f.runner();
+        let query = match origin {
+            "chat" => {
+                f.human(vec![SessionCommand::HumanMessage {
+                    text: "Our private customer is CobaltNebula.".into(),
+                }]);
+                "cObAlTnEbUlA migration"
+            }
+            "document" => {
+                let mut document = spec();
+                document.summary = "Migrate the CobaltNebula customer database".into();
+                f.human(vec![SessionCommand::SaveSpec { spec: document }]);
+                "CobaltNebula migration"
+            }
+            _ => {
+                std::fs::write(
+                    f.capture.project.root.join("customer.txt"),
+                    "Customer name: CobaltNebula\nInternal identifier: nebula4096\n",
+                )
+                .unwrap();
+                let mut value = reply("Read the customer context.");
+                value["research_requests"] = if origin == "history" {
+                    f.human(vec![SessionCommand::HumanMessage {
+                        text: "Our private customer is CobaltNebula.".into(),
+                    }]);
+                    json!([{"type":"ConversationEvents","before_sequence":null,"limit":200}])
+                } else {
+                    json!([{"type":"ReadFileRange","path":"customer.txt","start_line":1,"end_line":2}])
+                };
+                f.reply(value);
+                if origin == "restored" {
+                    f.reply(reply("The data has been read."));
+                    completed(&f.run(&mut runner, "read-private", ConversationIntent::Discuss));
+                    drop(runner);
+                    runner = f.runner();
+                }
+                if origin == "history" {
+                    "cobalt%4Eebula migration"
+                } else {
+                    "nebula4096 migration"
+                }
+            }
+        };
+        let mut value = reply("Find public guidance without exposing private inputs.");
+        value["research_requests"] = json!([
+            {"type":"PublicSearch","query":query},
+            {"type":"PublicSearch","query":"Rust Iterator documentation"}
+        ]);
+        f.reply(value);
+        f.reply(reply("Only generic public research was available."));
+        completed(&f.run(&mut runner, "screen-private", ConversationIntent::Discuss));
+        assert_eq!(f.public.lock().unwrap().turns, 1, "origin: {origin}");
+        let public = serde_json::to_string(&f.public.lock().unwrap().requests).unwrap();
+        assert!(!public.to_lowercase().contains("cobaltnebula"));
+        assert!(!public.contains("nebula4096"));
+        assert!(!public.contains("Our private customer"));
+        assert!(f.events().iter().any(|event| matches!(
+            event.payload,
+            ConversationPayload::ResearchReceiptRecorded { .. }
+        )));
+    }
+}
+
+#[test]
+fn budget_receipts_survive_restart_and_model_change_and_continue_uses_the_old_evidence() {
+    let mut f = Fixture::new();
+    let mut runner = f.runner();
+    for line in 1..=8 {
+        let mut value = reply("Read another bounded range.");
+        value["research_requests"] =
+            json!([{"type":"ReadFileRange","path":"lib.rs","start_line":line,"end_line":line}]);
+        f.reply(value);
+    }
+    completed(&f.run(&mut runner, "exhaust-receipts", ConversationIntent::Discuss));
+    let old = f
+        .events()
+        .iter()
+        .filter_map(|e| match &e.payload {
+            ConversationPayload::ResearchReceiptRecorded { receipt_id } => Some(receipt_id.clone()),
+            _ => None,
+        })
+        .map(|id| {
+            f.store
+                .lock()
+                .unwrap()
+                .research_receipt(&f.session, &id)
+                .unwrap()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(old.len(), 8);
+    drop(runner);
+    f.peer.lock().unwrap().model = "model-b".into();
+    let mut runner = f.runner();
+    let expected = old.clone();
+    f.dynamic(move |params| {
+        let restored = guided(params);
+        for receipt in &expected { assert!(restored.receipts.contains(receipt), "durable receipt missing after restart"); }
+        let receipt = &expected[0];
+        let source = &receipt.sources[0];
+        json!({"text":"The earlier captured source contains a constant.","question":null,"research_requests":[],"findings":[{"summary":"The earlier captured file defines a constant.","citations":[{"receipt_id":receipt.id,"source_id":source.id,"locator":source.locator}]}]})
+    });
+    completed(&f.run(
+        &mut runner,
+        "continue-after-restart",
+        ConversationIntent::Message("Continue using the old evidence".into()),
+    ));
+    assert_eq!(f.peer.lock().unwrap().threads, 2);
+}
+
+#[test]
+fn omitted_receipts_are_retrievable_only_in_the_current_session_with_bounded_context() {
+    let mut f = Fixture::new();
+    let mut originals = vec![];
+    for index in 0..36 {
+        let mut receipt = ResearchReceipt::new(
+            ResearchRequest::new(ResearchRequestKind::ReadFileRange {
+                path: "history.txt".into(),
+                start_line: 1,
+                end_line: 1,
+            })
+            .unwrap(),
+            vec![ResearchSource {
+                id: new_id(),
+                locator: SourceLocator::FileRange {
+                    path: "history.txt".into(),
+                    start_line: 1,
+                    end_line: 1,
+                },
+                source_hash: content_hash(b"original historical source"),
+                captured_at_ms: 17,
+                provenance: ResearchProvenance::ProjectFile,
+            }],
+            if index == 1 {
+                ResearchReceiptStatus::Unavailable
+            } else {
+                ResearchReceiptStatus::Complete
+            },
+            format!(
+                "OrchidPrism983 historical customer {index}: {}",
+                "captured text ".repeat(1000)
+            ),
+            vec![],
+        )
+        .unwrap();
+        receipt.snapshot_id = Some(content_hash(b"historical-snapshot"));
+        f.human(vec![SessionCommand::RecordResearchReceipt {
+            receipt: receipt.clone(),
+        }]);
+        originals.push(receipt);
+    }
+    let mut foreign = originals[0].clone();
+    foreign.id = new_id();
+    foreign.content = "FOREIGN_CUSTOMER_BODY_MUST_NOT_APPEAR".into();
+    foreign.content_hash = content_hash(foreign.content.as_bytes());
+    foreign.limits.returned_bytes = foreign.content.len();
+    let mut store = f.store.lock().unwrap();
+    let other = store.create_session(f.capture.project.key()).unwrap();
+    store
+        .apply_session_transition(
+            &other.id,
+            other.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::RecordResearchReceipt {
+                    receipt: foreign.clone(),
+                }],
+            ),
+        )
+        .unwrap();
+    drop(store);
+    let old = originals[0].clone();
+    let unavailable = originals[1].clone();
+    let old_id = old.id.clone();
+    let unavailable_id = unavailable.id.clone();
+    let foreign_id = foreign.id.clone();
+    f.dynamic(move |params| {
+        let context = guided(params);
+        assert!(!context.receipts.iter().any(|r| r.id == old_id));
+        assert!(context.receipts.len() <= 32);
+        assert!(serde_json::to_vec(&context.receipts).unwrap().len() <= MAX_RESEARCH_RETURNED_BYTES);
+        assert!(!params.to_string().contains("FOREIGN_CUSTOMER_BODY_MUST_NOT_APPEAR"));
+        let mut value = reply("Retrieve the omitted immutable historical receipts.");
+        value["research_requests"] = json!([{"type":"ResearchReceipts","receipt_ids":[old_id, unavailable_id, foreign_id, "unknown-receipt"]}]);
+        value
+    });
+    let expected = old.clone();
+    f.dynamic(move |params| {
+        let context = guided(params);
+        assert!(context.receipts.contains(&expected));
+        assert!(context.receipts.contains(&unavailable));
+        assert!(context.receipts.len() <= 32);
+        assert!(
+            serde_json::to_vec(&context.receipts).unwrap().len() <= MAX_RESEARCH_RETURNED_BYTES
+        );
+        assert!(
+            !params
+                .to_string()
+                .contains("FOREIGN_CUSTOMER_BODY_MUST_NOT_APPEAR")
+        );
+        let retrieval = context
+            .receipts
+            .iter()
+            .find(|r| matches!(r.request.kind, ResearchRequestKind::ResearchReceipts { .. }))
+            .unwrap();
+        assert_eq!(retrieval.status, ResearchReceiptStatus::Partial);
+        assert_eq!(retrieval.omissions.len(), 2);
+        let mut value = reply("Public work must screen restored historical data.");
+        value["research_requests"] = json!([
+            {"type":"PublicSearch","query":"orchidprism983 migration"},
+            {"type":"PublicSearch","query":"Rust Iterator documentation"}
+        ]);
+        value
+    });
+    f.dynamic(move |params| {
+        let context = guided(params);
+        let receipt = context.receipts.iter().find(|r| r.id == old.id).unwrap();
+        let mut value = reply("The historical receipt retains its original captured source.");
+        value["findings"] = json!([ResearchFinding {
+            summary: "A historical source was retrieved.".into(),
+            citations: vec![ResearchCitation {
+                receipt_id: receipt.id.clone(),
+                source_id: receipt.sources[0].id.clone(),
+                locator: receipt.sources[0].locator.clone(),
+            }]
+        }]);
+        value
+    });
+    let mut runner = f.runner();
+    completed(&f.run(&mut runner, "retrieve-omitted", ConversationIntent::Discuss));
+    assert_eq!(f.public.lock().unwrap().turns, 1);
+}
+
+#[test]
+fn successful_finalization_remains_completed_after_late_cancel() {
+    let mut f = Fixture::new();
+    let mut runner = f.runner();
+    f.reply(json!({"reply":reply("A specification proposal."),"spec":spec()}));
+    let result = f.run(
+        &mut runner,
+        "completed-draft",
+        ConversationIntent::DraftSpec,
+    );
+    completed(&result);
+    assert!(result.response.is_some());
+    assert!(!runner.operations.cancel("completed-draft"));
+    assert!(matches!(
+        f.store
+            .lock()
+            .unwrap()
+            .session_operation_outcome("completed-draft")
+            .unwrap(),
+        Some(OperationOutcome::Completed { .. })
+    ));
+    assert!(
+        f.events()
+            .iter()
+            .any(|e| matches!(e.payload, ConversationPayload::DocumentProposed { .. }))
+    );
+}
+
+#[test]
+fn terminal_persistence_failure_cannot_leave_a_provisional_review_for_next() {
+    let mut f = Fixture::new();
+    let mut runner = f.runner();
+    f.approved();
+    f.dynamic(|params| json!({"reply":reply("Prepare atomic actions."),"actions":actions(&guided(params).session)}));
+    completed(&f.run(
+        &mut runner,
+        "prepare-fence",
+        ConversationIntent::PrepareWalkthrough,
+    ));
+    let db = rusqlite::Connection::open(f.store.lock().unwrap().directory.join("workspace.sqlite"))
+        .unwrap();
+    db.execute_batch("CREATE TRIGGER reject_terminal BEFORE INSERT ON conversation_event WHEN json_extract(NEW.data,'$.payload.type')='OperationOutcome' BEGIN SELECT RAISE(FAIL,'injected terminal fence failure'); END;").unwrap();
+    f.reply(assessment());
+    assert!(
+        runner
+            .run(
+                f.input("review-fence", ConversationIntent::ReviewAction),
+                &mut f.capture,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                |_| Ok(())
+            )
+            .is_err()
+    );
+    let count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM action_review WHERE operation_id='review-fence'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(runner.operations.active().is_none());
+    assert!(
+        f.store
+            .lock()
+            .unwrap()
+            .active_session_operation(&f.session)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn reused_private_transport_keeps_screening_inputs_that_receipt_replay_has_omitted() {
+    let mut f = Fixture::new();
+    let mut runner = f.runner();
+    let receipt = |text: String| {
+        ResearchReceipt::new(
+            ResearchRequest::new(ResearchRequestKind::ReadFileRange {
+                path: "old.txt".into(),
+                start_line: 1,
+                end_line: 1,
+            })
+            .unwrap(),
+            vec![],
+            ResearchReceiptStatus::Complete,
+            text,
+            vec![],
+        )
+        .unwrap()
+    };
+    let original = receipt("Historical private customer: CobaltNebula".into());
+    f.human(vec![SessionCommand::RecordResearchReceipt {
+        receipt: original.clone(),
+    }]);
+    let original_id = original.id.clone();
+    f.dynamic(move |params| {
+        assert!(guided(params).receipts.iter().any(|r| r.id == original_id));
+        reply("The captured customer context is available.")
+    });
+    completed(&f.run(&mut runner, "read-original", ConversationIntent::Discuss));
+    for index in 0..32 {
+        f.human(vec![SessionCommand::RecordResearchReceipt {
+            receipt: receipt(format!("Other historical data {index}")),
+        }]);
+    }
+    f.dynamic(move |params| {
+        assert!(!guided(params).receipts.iter().any(|r| r.id == original.id));
+        let mut value = reply("Use generic public documentation.");
+        value["research_requests"] = json!([
+            {"type":"PublicSearch","query":"CobaltNebula migration"},
+            {"type":"PublicSearch","query":"Rust Iterator documentation"}
+        ]);
+        value
+    });
+    f.reply(reply("Only the generic query was dispatched."));
+    completed(&f.run(&mut runner, "after-omission", ConversationIntent::Discuss));
+    assert_eq!(f.public.lock().unwrap().turns, 1);
+    assert_eq!(f.peer.lock().unwrap().threads, 1);
+}

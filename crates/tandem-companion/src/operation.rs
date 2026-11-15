@@ -60,6 +60,21 @@ impl OperationSlot {
         };
         Ok(op.clone())
     }
+    /// Cancellation and durable terminal publication share this operation-ID
+    /// lock. A cancellation accepted first wins; cancellation after a committed
+    /// terminal result cannot retroactively revoke that result.
+    pub(crate) fn settle<T>(&self, id: &str, publish: impl FnOnce(bool) -> Result<T>) -> Result<T> {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (op, cancel) = slot
+            .as_ref()
+            .filter(|(op, _)| op.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Operation was superseded"))?;
+        let cancelled = op.cancel_requested || cancel.load(Ordering::Acquire);
+        let result = publish(cancelled);
+        *slot = None;
+        result
+    }
+    #[cfg(test)]
     pub(crate) fn finish(&self, id: &str) -> bool {
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if slot.as_ref().is_some_and(|(op, _)| op.id == id) {
@@ -95,5 +110,53 @@ mod tests {
         assert!(slot.phase("old", OperationPhase::Stopping).is_err());
         assert_eq!(slot.active().unwrap().id, "new");
         assert!(!slot.active().unwrap().cancel_requested);
+        assert!(
+            slot.settle("old", |_| -> Result<()> {
+                panic!("stale operation must never publish")
+            })
+            .is_err()
+        );
+        assert_eq!(slot.active().unwrap().id, "new");
+    }
+
+    #[test]
+    fn accepted_cancel_wins_and_terminal_commit_precedes_late_cancel() {
+        let slot = OperationSlot::default();
+        let operation = |id: &str| ActiveOperation {
+            id: id.into(),
+            session_id: "session".into(),
+            kind: SessionOperationKind::DraftSpec,
+            phase: OperationPhase::DraftingSpec,
+            started_at_ms: 0,
+            cancel_requested: false,
+        };
+        slot.begin(operation("cancelled"), Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        assert!(slot.cancel("cancelled"));
+        slot.settle("cancelled", |cancelled| {
+            assert!(cancelled);
+            Ok(())
+        })
+        .unwrap();
+
+        slot.begin(operation("completed"), Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        let late = slot.clone();
+        let cancel_thread = slot
+            .settle("completed", |cancelled| {
+                assert!(!cancelled);
+                let (started, ready) = std::sync::mpsc::channel();
+                let thread = std::thread::spawn(move || {
+                    started.send(()).unwrap();
+                    late.cancel("completed")
+                });
+                ready.recv().unwrap();
+                // The cancellation cannot be accepted while terminal publication
+                // owns this operation. Releasing the lock is the commit boundary.
+                Ok(thread)
+            })
+            .unwrap();
+        assert!(!cancel_thread.join().unwrap());
+        assert!(slot.active().is_none());
     }
 }
