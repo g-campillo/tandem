@@ -2061,8 +2061,7 @@ fn restart_reuses_completed_review_after_fresh_local_capture_without_replaying_m
     assert!(review_matches_capture(&session, &review, &fresh).is_err());
 }
 
-#[test]
-fn all_steps_queue_final_task_validation_and_only_its_reviewed_next_completes_implementation() {
+fn ui_final_validation_fixture() -> (tempfile::TempDir, Store, TaskSession, Project) {
     let (dir, mut store, mut session, project) = ui_walk_fixture();
     for _ in 0..2 {
         assert_eq!(
@@ -2135,6 +2134,12 @@ fn all_steps_queue_final_task_validation_and_only_its_reviewed_next_completes_im
             ),
         )
         .unwrap();
+    (dir, store, session, project)
+}
+
+#[test]
+fn all_steps_queue_final_task_validation_and_only_its_reviewed_next_completes_implementation() {
+    let (dir, mut store, session, project) = ui_final_validation_fixture();
     let (input, guidance) = ui_capture(&dir, &store, &session, &project);
     let (session, review, _) = ui_review(
         &mut store,
@@ -2314,5 +2319,278 @@ fn explicit_attachment_survives_restart_before_review_and_replacement_is_immutab
             .unwrap()
             .id,
         old_snapshot
+    );
+}
+
+fn ui_pending_check(store: &mut Store, session: &TaskSession) -> CheckRecord {
+    let mut record = CheckRecord::pending(
+        session.project.clone(),
+        "cargo-check".into(),
+        "recipe".into(),
+    );
+    bind_check_record(
+        &mut record,
+        Some(session),
+        session.plan.as_ref().map(|p| &p.task),
+    );
+    store.save_check(&record).unwrap();
+    record
+}
+fn ui_finish_check(
+    dir: &tempfile::TempDir,
+    store: &mut Store,
+    session: &TaskSession,
+    project: &Project,
+    record: &mut CheckRecord,
+    status: CheckStatus,
+) {
+    let captured = tandem_companion::capture_action_context(
+        session,
+        project,
+        &[],
+        &[],
+        &dir.path().join("check-inputs"),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    record.sequence += 1;
+    record.command = vec!["/tools/cargo".into(), "check".into()];
+    record.snapshot = Some(captured.snapshot);
+    record.snapshot_unchanged = Some(true);
+    record.status = status.clone();
+    record.exit_code = Some(if status == CheckStatus::Passed { 0 } else { 1 });
+    record.output = "complete deterministic local result".into();
+    record.completed_at_ms = Some(now_ms());
+    store.save_check(record).unwrap();
+}
+fn ui_check_capture(
+    dir: &tempfile::TempDir,
+    store: &Store,
+    session: &TaskSession,
+    project: &Project,
+) -> ActionReviewInput {
+    let (mut input, guidance) = ui_capture(dir, store, session, project);
+    let recipes = vec![("cargo-check".into(), "recipe".into())];
+    input
+        .context
+        .validation_environments
+        .extend(recipes.clone());
+    let checks = super::super::companion::action_checks(
+        store,
+        session,
+        &store.checks(project.key()).unwrap(),
+    )
+    .unwrap();
+    let commands = tandem_companion::collect_action_check_evidence(
+        input.scope(),
+        &input.context,
+        &checks,
+        &recipes,
+    );
+    let input = ActionReviewInput::capture(
+        session,
+        input.context,
+        input.targets,
+        commands,
+        "rust",
+        &guidance,
+    )
+    .unwrap();
+    super::super::companion::authenticate_capture(store, session, input, "rust", &guidance).unwrap()
+}
+
+#[test]
+fn fresh_check_during_final_validation_has_its_actual_origin_and_enables_reviewed_next() {
+    let (dir, mut store, session, project) = ui_final_validation_fixture();
+    assert!(session.plan.as_ref().unwrap().task.active_step.is_none());
+    let mut walk = session.current_action().unwrap().0.clone();
+    walk.id = new_id();
+    walk.actions[0]
+        .required_evidence
+        .push(RequiredActionEvidence::CheckReceipt {
+            recipe_id: "cargo-check".into(),
+        });
+    let session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveWalkthrough { walkthrough: walk }],
+            ),
+        )
+        .unwrap();
+    std::fs::write(
+        project.root.join("greeting.rs"),
+        "// corrected implementation before final acceptance\n",
+    )
+    .unwrap();
+    let mut record = ui_pending_check(&mut store, &session);
+    let (empty, _) = ui_capture(&dir, &store, &session, &project);
+    assert_eq!(
+        store.check_action_scope(&record.id).unwrap(),
+        Some(empty.scope()),
+        "fresh final check must originate at ValidateTask, whose walkthrough still has a step ID"
+    );
+    ui_finish_check(
+        &dir,
+        &mut store,
+        &session,
+        &project,
+        &mut record,
+        CheckStatus::Passed,
+    );
+    let input = ui_check_capture(&dir, &store, &session, &project);
+    assert_eq!(input.commands.len(), 1);
+    assert_eq!(input.commands[0].scope, input.scope());
+    assert_eq!(
+        input.evidence_gate(session.current_action().unwrap().1).0,
+        ActionReviewOutcome::Passed
+    );
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Final acceptance with fresh check".into(),
+        }),
+    );
+    assert_eq!(review.outcome, ActionReviewOutcome::Passed);
+    let fresh = ui_check_capture(&dir, &store, &session, &project);
+    assert!(
+        advance_review(&mut store, &session, &review, &fresh)
+            .unwrap()
+            .implementation_complete()
+    );
+}
+
+#[test]
+fn next_atomically_rejects_checks_journaled_after_capture_in_either_order() {
+    for status in [
+        CheckStatus::Preparing,
+        CheckStatus::Running,
+        CheckStatus::Failed,
+    ] {
+        for journal_before_capture in [false, true] {
+            let (dir, mut store, session, project) = ui_walk_fixture();
+            let mut walk = support::fixture_walkthrough(&session);
+            walk.actions[0]
+                .required_evidence
+                .push(RequiredActionEvidence::CheckReceipt {
+                    recipe_id: "cargo-check".into(),
+                });
+            let session = store
+                .apply_session_transition(
+                    &session.id,
+                    session.sequence,
+                    &SessionTransition::new(
+                        new_id(),
+                        vec![SessionCommand::SaveWalkthrough { walkthrough: walk }],
+                    ),
+                )
+                .unwrap();
+            let mut passed = ui_pending_check(&mut store, &session);
+            ui_finish_check(
+                &dir,
+                &mut store,
+                &session,
+                &project,
+                &mut passed,
+                CheckStatus::Passed,
+            );
+            let input = ui_check_capture(&dir, &store, &session, &project);
+            let (session, review, _) = ui_review(
+                &mut store,
+                &session,
+                &input,
+                Some(OperationOutcome::Completed {
+                    summary: "Initial check passed".into(),
+                }),
+            );
+            assert_eq!(review.outcome, ActionReviewOutcome::Passed);
+            let mut queued = journal_before_capture.then(|| ui_pending_check(&mut store, &session));
+            let captured = ui_check_capture(&dir, &store, &session, &project);
+            let mut pending = queued
+                .take()
+                .unwrap_or_else(|| ui_pending_check(&mut store, &session));
+            if status != CheckStatus::Preparing {
+                ui_finish_check(
+                    &dir,
+                    &mut store,
+                    &session,
+                    &project,
+                    &mut pending,
+                    status.clone(),
+                );
+                if status == CheckStatus::Running {
+                    pending.exit_code = None;
+                    pending.completed_at_ms = None;
+                    pending.sequence += 1;
+                    store.save_check(&pending).unwrap();
+                }
+            }
+            let result = advance_review(&mut store, &session, &review, &captured);
+            assert!(
+                result.is_err(),
+                "Next accepted old pass while newer {status:?} receipt was not reviewed (journal_before_capture={journal_before_capture})"
+            );
+            assert!(
+                store
+                    .advance_action(
+                        &session.id,
+                        &review.binding.action_id,
+                        &review.id,
+                        &review.binding
+                    )
+                    .is_err(),
+                "the atomic Store transition also refuses the stale binding, independent of controller recapture"
+            );
+            assert_eq!(
+                store
+                    .load_session(&session.id)
+                    .unwrap()
+                    .unwrap()
+                    .current_action()
+                    .unwrap()
+                    .0
+                    .cursor,
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn check_dispatch_fences_local_transitions_and_preserves_independent_offline_checks() {
+    assert!(check_dispatch_allowed(false, false, false, false));
+    // Next/freshness capture blocks every dispatch route until its UI commit.
+    assert!(!check_dispatch_allowed(false, false, false, true));
+    // A check journaled first owns the check slot before its worker is spawned.
+    assert!(!check_dispatch_allowed(false, true, false, false));
+    assert!(!check_dispatch_allowed(true, false, false, false));
+    assert!(!check_dispatch_allowed(false, false, true, false));
+    let (_dir, _store, session) = approved();
+    let task = &session.plan.as_ref().unwrap().task;
+    let mut legacy = CheckRecord::pending(
+        session.project.clone(),
+        "recipe".into(),
+        "fingerprint".into(),
+    );
+    bind_check_record(&mut legacy, None, Some(task));
+    assert_eq!(legacy.task_id.as_ref(), Some(&task.id));
+    assert_eq!(legacy.step_id, task.active_step);
+    assert_eq!(legacy.plan_revision, Some(task.revision));
+    let unapproved = TaskSession::new(session.project.clone()).unwrap();
+    let mut independent = CheckRecord::pending(
+        session.project.clone(),
+        "recipe".into(),
+        "fingerprint".into(),
+    );
+    bind_check_record(&mut independent, Some(&unapproved), Some(task));
+    assert!(
+        independent.task_id.is_none()
+            && independent.step_id.is_none()
+            && independent.plan_revision.is_none(),
+        "managed sessions without approval/current action keep independent check authority, never legacy action authority"
     );
 }

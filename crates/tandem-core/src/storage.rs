@@ -2149,6 +2149,7 @@ fn apply_session_command(
                 latest == *review_id,
                 "A newer review supersedes this result"
             );
+            ensure_action_checks_captured(connection, session, &input)?;
             for command in &input.commands {
                 authenticate_local_evidence(connection, command)?;
             }
@@ -2282,6 +2283,50 @@ fn read_action_attachment(
     let data:Option<String>=connection.query_row("SELECT data FROM action_evidence WHERE session_id=?1 AND scope=?2 AND json_extract(data,'$.provenance.type')='UserAttachedOutput' ORDER BY rowid DESC LIMIT 1",params![session_id,serde_json::to_string(scope)?],|r|r.get(0)).optional()?;
     data.map(|s| serde_json::from_str(&s).context("Attached output is damaged"))
         .transpose()
+}
+
+/// A capture is a read, not a reservation. Recheck the relevant journal rows in
+/// the same transaction that consumes Next, including runs queued after capture.
+fn ensure_action_checks_captured(
+    connection: &Connection,
+    session: &TaskSession,
+    input: &ActionReviewInput,
+) -> Result<()> {
+    let rows = connection.prepare(
+        "SELECT c.data,o.scope FROM check_run c JOIN check_action_origin o ON o.check_id=c.id WHERE c.root=?1 AND o.scope IS NOT NULL",
+    )?.query_map([&session.project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (data, scope) in rows {
+        let origin: crate::ActionEvidenceScope = serde_json::from_str(&scope)?;
+        if !origin.is_eligible_check_origin(session) {
+            continue;
+        }
+        let check: CheckRecord = serde_json::from_str(&data)?;
+        if input.context.validation_environments.get(&check.recipe_id)
+            != Some(&check.recipe_fingerprint)
+            || check
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.id != input.binding.project_fingerprint)
+        {
+            continue;
+        }
+        // An already completed pass may be omitted by a manual attachment or
+        // cumulative review. It adds no adverse evidence and grants no authority
+        // here. Pending, failed, incomplete or later runs must never be hidden.
+        if check.status == CheckStatus::Passed
+            && check.exit_code == Some(0)
+            && input
+                .complete_current_command(&ActionCommandEvidence::from_local_check(origin, &check)?)
+        {
+            continue;
+        }
+        ensure!(
+            input.commands.iter().any(|c| matches!(&c.provenance, CommandProvenance::LocalCheck {check_id,..} if check_id == &check.id)),
+            "Local checks changed during capture; review the current evidence again before Next"
+        );
+    }
+    Ok(())
 }
 
 fn authenticate_local_evidence(

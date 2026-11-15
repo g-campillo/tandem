@@ -192,14 +192,14 @@ impl Workspace {
             .child(note("Checks include unsaved buffers. Each run records its own snapshot; a pass is evidence about that version, not a verdict on later edits."))
             .when(!self.dev.check_error.is_empty(),|d|d.child(panel_error(note(self.dev.check_error.clone()), cx)))
             .when(self.dev.discovering,|d|d.child(note("Preparing installed check recipes…")))
-            .children(self.dev.recipes.iter().map(|r|{let id=r.id.clone();path_button(Button::new(SharedString::from(format!("recipe:{id}"))), r.title.clone()).disabled(busy||self.loading).on_click(cx.listener(move|this,_,_,cx|this.prepare_recipe(&id,cx)))}))
+            .children(self.dev.recipes.iter().map(|r|{let id=r.id.clone();path_button(Button::new(SharedString::from(format!("recipe:{id}"))), r.title.clone()).disabled(!self.check_dispatch_available()).on_click(cx.listener(move|this,_,_,cx|this.prepare_recipe(&id,cx)))}))
             .when_some(pending,|d,recipe|d.child(solid_section(div(), cx).v_flex().min_w_0().gap_3().p_3().border_1().border_color(palette(cx.theme().mode).warning)
                 .child(panel_heading(note(format!("Authorize {} for this project",recipe.title))))
                 .child(code_note("recipe-argv", recipe.argv.iter().skip(1).cloned().collect::<Vec<_>>().join(" "), cx))
                 .child(note("Read: captured inputs and the selected tool environments listed below. Write: isolated artifacts. Original source and tool network access are denied; a selected project virtualenv is a read-only exception. Build scripts/tests execute within this scope. Limit: 120 seconds."))
                 .children(recipe.read_roots.iter().enumerate().map(|(i,path)|code_note(("recipe-read-root",i), format!("Read-only: {}",path.display()), cx)))
                 .child(note("This grant is reused only while the executable and recipe fingerprint stay unchanged. It grants no AI source editing."))
-                .child(path_button(Button::new("authorize-check"), "Authorize Recipe & Run").primary().on_click(cx.listener(|this,_,_,cx|this.authorize_recipe(cx))))
+                .child(path_button(Button::new("authorize-check"), "Authorize Recipe & Run").primary().disabled(!self.check_dispatch_available()).on_click(cx.listener(|this,_,_,cx|this.authorize_recipe(cx))))
                 .child(path_button(Button::new("dismiss-recipe"), "Keep Editing").on_click(cx.listener(|this,_,_,cx|{this.dev.pending_recipe=None;cx.notify();})))))
             .when(busy,|d|d.child(path_button(Button::new("cancel-check"), "Cancel Active Check").danger().on_click(cx.listener(|this,_,_,cx|{
                 if let Some(cancel)=&this.dev.check_cancel{cancel.store(true,Ordering::Relaxed);}this.message("Cancellation requested. Waiting for the command's terminal result…",false,cx);

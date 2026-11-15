@@ -153,40 +153,18 @@ impl ConversationCapture for FreshCapture {
     }
 }
 
-fn eligible_check_origin(
-    session: &TaskSession,
-    scope: &ActionEvidenceScope,
-    origin: &ActionEvidenceScope,
-) -> bool {
-    origin == scope
-        || (matches!(
-            session.current_action().map(|(_, a)| a.kind),
-            Ok(GuidedActionKind::ValidateStep | GuidedActionKind::ValidateTask)
-        ) && origin.workflow == scope.workflow
-            && session.walkthroughs.iter().any(|w| {
-                w.id == origin.walkthrough_id
-                    && w.actions[..w.cursor].iter().any(|a| {
-                        a.id == origin.action_id && a.definition_hash() == origin.action_hash
-                    })
-            }))
-}
 pub(super) fn action_checks(
     store: &Store,
     session: &TaskSession,
     checks: &[CheckRecord],
 ) -> Result<Vec<CheckRecord>> {
-    let (walk, action) = session.current_action()?;
-    let scope = ActionEvidenceScope {
-        workflow: session.authorize(WorkflowAction::ReviewAction)?,
-        walkthrough_id: walk.id.clone(),
-        action_id: action.id.clone(),
-        action_hash: action.definition_hash(),
-    };
+    session.authorize(WorkflowAction::ReviewAction)?;
+    session.current_action()?;
     let mut scoped = vec![];
     for check in checks {
         if store
             .check_action_scope(&check.id)?
-            .is_some_and(|origin| eligible_check_origin(session, &scope, &origin))
+            .is_some_and(|origin| origin.is_eligible_check_origin(session))
         {
             scoped.push(check.clone());
         }
@@ -203,14 +181,13 @@ pub(super) fn authenticate_capture(
     language: &str,
     guidance: &EffectiveGuidance,
 ) -> Result<ActionReviewInput> {
-    let scope = input.scope();
     let mut commands = vec![];
     for mut command in input.commands.drain(..) {
         if let CommandProvenance::LocalCheck { check_id, .. } = &command.provenance {
             let Some(origin) = store.check_action_scope(check_id)? else {
                 continue;
             };
-            if !eligible_check_origin(session, &scope, &origin) {
+            if !origin.is_eligible_check_origin(session) {
                 continue;
             }
             command.scope = origin;

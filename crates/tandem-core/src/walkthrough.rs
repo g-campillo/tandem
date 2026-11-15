@@ -601,6 +601,32 @@ pub struct ActionEvidenceScope {
     pub action_hash: String,
 }
 
+impl ActionEvidenceScope {
+    /// Check origins stay attached to their actual action. Cumulative validation
+    /// can additionally inspect receipts from already consumed actions.
+    pub fn is_eligible_check_origin(&self, session: &TaskSession) -> bool {
+        let Ok(workflow) = session.authorize(WorkflowAction::ReviewAction) else {
+            return false;
+        };
+        let Ok((walk, action)) = session.current_action() else {
+            return false;
+        };
+        self.workflow == workflow
+            && ((self.walkthrough_id == walk.id
+                && self.action_id == action.id
+                && self.action_hash == action.definition_hash())
+                || (matches!(
+                    action.kind,
+                    GuidedActionKind::ValidateStep | GuidedActionKind::ValidateTask
+                ) && session.walkthroughs.iter().any(|w| {
+                    w.id == self.walkthrough_id
+                        && w.actions[..w.cursor].iter().any(|a| {
+                            a.id == self.action_id && a.definition_hash() == self.action_hash
+                        })
+                })))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum CommandOutput {
@@ -795,7 +821,7 @@ impl ActionReviewInput {
     pub fn scope(&self) -> ActionEvidenceScope {
         self.binding.scope()
     }
-    fn complete_current_command(&self, c: &ActionCommandEvidence) -> bool {
+    pub(crate) fn complete_current_command(&self, c: &ActionCommandEvidence) -> bool {
         c.snapshot
             .as_ref()
             .is_some_and(|s| s.id == self.binding.project_fingerprint)
@@ -852,21 +878,10 @@ impl ActionReviewInput {
         }
         for command in &self.commands {
             command.validate()?;
-            let historical_check =
-                matches!(
-                    session.current_action()?.1.kind,
-                    GuidedActionKind::ValidateStep | GuidedActionKind::ValidateTask
-                ) && matches!(command.provenance, CommandProvenance::LocalCheck { .. })
-                    && command.scope.workflow == self.binding.workflow
-                    && session.walkthroughs.iter().any(|walk| {
-                        walk.id == command.scope.walkthrough_id
-                            && walk.actions[..walk.cursor].iter().any(|action| {
-                                action.id == command.scope.action_id
-                                    && action.definition_hash() == command.scope.action_hash
-                            })
-                    });
+            let eligible_check = matches!(command.provenance, CommandProvenance::LocalCheck { .. })
+                && command.scope.is_eligible_check_origin(session);
             ensure!(
-                command.scope == self.scope() || historical_check,
+                command.scope == self.scope() || eligible_check,
                 "Command evidence belongs to another action or generation"
             );
             expected.push(ActionEvidenceBinding {

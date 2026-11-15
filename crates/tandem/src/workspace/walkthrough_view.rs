@@ -456,9 +456,7 @@ impl Workspace {
                             Button::new("run-action-check"),
                             "Run Check · independently authorized recipe",
                         )
-                        .disabled(
-                            self.dev.check_cancel.is_some() || self.agent.busy || self.loading,
-                        )
+                        .disabled(!self.check_dispatch_available())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.prepare_recipe(&id, cx);
                             if this.dev.pending_recipe.is_some() {

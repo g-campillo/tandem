@@ -248,6 +248,41 @@ pub fn phase_label(phase: OperationPhase) -> &'static str {
     }
 }
 
+/// Local capture/commit and check dispatch cannot overlap. AI discussion alone
+/// does not prevent independent, offline recipe execution.
+pub fn check_dispatch_allowed(
+    loading: bool,
+    check_running: bool,
+    agent_busy: bool,
+    local_transition: bool,
+) -> bool {
+    !loading && !check_running && !agent_busy && !local_transition
+}
+
+/// Managed checks use the approved current action, including final validation
+/// after the high-level task no longer has an active step. Unapproved sessions
+/// can still run independent checks without claiming action evidence authority.
+pub fn bind_check_record(
+    record: &mut CheckRecord,
+    session: Option<&TaskSession>,
+    legacy_task: Option<&TaskPlan>,
+) {
+    if let Some(session) = session {
+        if session.project == record.project
+            && let Ok(workflow) = session.authorize(WorkflowAction::ReviewAction)
+            && let Ok((walk, _)) = session.current_action()
+        {
+            record.task_id = workflow.task_id;
+            record.step_id = Some(walk.step_id.clone());
+            record.plan_revision = workflow.plan_ref.map(|p| p.revision);
+        }
+    } else if let Some(task) = legacy_task {
+        record.task_id = Some(task.id.clone());
+        record.step_id = task.active_step.clone();
+        record.plan_revision = Some(task.revision);
+    }
+}
+
 /// Automated execution is offered only for the identical registered command.
 /// Recipes with per-run substitutions cannot match an immutable action argv.
 pub fn matching_action_recipe<'a>(

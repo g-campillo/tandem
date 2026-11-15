@@ -645,8 +645,16 @@ impl Workspace {
             }Ok(())})();if let Err(e)=applied{view.message(e.to_string(),true,cx);}cx.notify();
         });}).detach();
     }
+    pub(super) fn check_dispatch_available(&self) -> bool {
+        companion_state::check_dispatch_allowed(
+            self.loading,
+            self.dev.check_cancel.is_some(),
+            self.agent.busy,
+            self.companion.local_action.is_some(),
+        )
+    }
     pub(super) fn prepare_recipe(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.dev.check_cancel.is_some() || self.agent.busy {
+        if !self.check_dispatch_available() {
             return;
         }
         let Some(recipe) = self.dev.recipes.iter().find(|r| r.id == id) else {
@@ -660,6 +668,9 @@ impl Workspace {
         }
     }
     pub(super) fn authorize_recipe(&mut self, cx: &mut Context<Self>) {
+        if !self.check_dispatch_available() {
+            return;
+        }
         let Some(id) = self.dev.pending_recipe.clone() else {
             return;
         };
@@ -688,7 +699,7 @@ impl Workspace {
         }
     }
     fn start_check(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.loading || self.dev.check_cancel.is_some() || self.agent.busy {
+        if !self.check_dispatch_available() {
             return;
         }
         if let Err(e) = self.flush(cx) {
@@ -722,18 +733,23 @@ impl Workspace {
             recipe.id.clone(),
             recipe.fingerprint.clone(),
         );
-        if let Some(task) = self.active_task() {
-            record.task_id = Some(task.id.clone());
-            record.step_id = task.active_step.clone();
-            record.plan_revision = Some(
-                self.companion
-                    .session
-                    .as_ref()
-                    .and_then(|s| s.plan.as_ref())
-                    .map_or(task.revision, |p| p.revision),
-            );
-        }
-        let stored = self.store.lock().unwrap().save_check(&record);
+        let stored = (|| -> Result<()> {
+            let mut store = self.store.lock().unwrap();
+            // Re-read durable approval/action state at dispatch. save_check
+            // authenticates the origin again inside the journal transaction.
+            let session = self
+                .companion
+                .session
+                .as_ref()
+                .map(|s| {
+                    store
+                        .load_session(&s.id)?
+                        .context("Check's conversation is unavailable")
+                })
+                .transpose()?;
+            companion_state::bind_check_record(&mut record, session.as_ref(), self.active_task());
+            store.save_check(&record)
+        })();
         if let Err(e) = stored {
             self.message(format!("Check not started: {e}"), true, cx);
             return;
