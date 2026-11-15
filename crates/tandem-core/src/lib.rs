@@ -15,6 +15,14 @@ mod improvement;
 pub use delegation::*;
 pub use import::*;
 pub use improvement::*;
+mod conversation;
+mod research;
+mod walkthrough;
+mod workflow;
+pub use conversation::*;
+pub use research::*;
+pub use walkthrough::*;
+pub use workflow::*;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
