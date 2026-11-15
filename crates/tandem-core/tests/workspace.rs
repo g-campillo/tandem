@@ -323,9 +323,11 @@ fn newer_storage_schema_is_refused_without_rewriting_its_data() {
     let path = directory.path().join("workspace.sqlite");
     {
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection.execute_batch("CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserve'); PRAGMA user_version=99;").unwrap();
+        connection.execute_batch("CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserve'); PRAGMA user_version=6;").unwrap();
     }
+    let original = fs::read(&path).unwrap();
     assert!(Store::open(directory.path()).is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
     let connection = rusqlite::Connection::open(path).unwrap();
     let value: String = connection
         .query_row("SELECT value FROM future_data", [], |row| row.get(0))
@@ -334,7 +336,7 @@ fn newer_storage_schema_is_refused_without_rewriting_its_data() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(value, "preserve");
-    assert_eq!(version, 99);
+    assert_eq!(version, 6);
 }
 
 #[test]

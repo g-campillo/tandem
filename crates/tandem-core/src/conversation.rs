@@ -158,6 +158,18 @@ pub enum ConversationPayload {
     WorkflowTransition {
         transition: WorkflowTransition,
     },
+    ResearchReceiptRecorded {
+        receipt_id: String,
+    },
+    WalkthroughPrepared {
+        walkthrough_id: String,
+    },
+    ActionTransitionRecorded {
+        transition_id: String,
+    },
+    OperationStarted {
+        operation: SessionOperation,
+    },
     OperationOutcome {
         operation_id: String,
         outcome: OperationOutcome,
@@ -189,4 +201,24 @@ pub enum OperationOutcome {
     Cancelled { detail: String },
     Interrupted { detail: String },
     Failed { detail: String },
+}
+
+/// Durable operation identity. Restart records an outcome before clearing its active slot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionOperation {
+    pub id: String,
+    pub session_id: String,
+    pub kind: SessionOperationKind,
+    pub started_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionOperationKind {
+    Discuss,
+    Research,
+    DraftSpec,
+    DraftPlan,
+    PrepareAction,
+    ReviewAction,
 }

@@ -162,3 +162,26 @@ fn unsupported_demonstrated_findings_become_concerns_and_optional_preferences_do
     assert!(!result.findings[1].blocking);
     assert!(input.parse_response(serde_json::json!({"conclusion":"RequirementsSatisfied","summary":"Done","findings":[],"evidence_used":["invented"],"validation_needed":[],"requested_context":[]})).is_err());
 }
+
+#[test]
+fn schema_four_migration_backs_up_before_upgrading_to_five() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("workspace.sqlite");
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO settings VALUES('checkpoint_sequence','17'); PRAGMA user_version=4;").unwrap();
+    }
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.sequence().unwrap(), 17);
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 5);
+    assert!(std::fs::read_dir(directory.path()).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("workspace-schema4-backup-")
+    }));
+}

@@ -232,11 +232,22 @@ pub struct ExecutionArchive {
     pub walkthroughs: Vec<Walkthrough>,
 }
 
+/// Original history remains linked, never reinterpreted as approval or an AI verdict.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LegacyTaskLink {
+    pub task_id: String,
+    pub revision: u64,
+    pub state_sequence: u64,
+    pub review_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskSession {
     pub id: String,
     pub project: String,
     pub sequence: u64,
+    #[serde(default)]
+    pub legacy_task: Option<LegacyTaskLink>,
     pub spec: Option<SpecDocument>,
     pub plan: Option<PlanDocument>,
     pub spec_approval: Option<DocumentApproval>,
@@ -256,6 +267,7 @@ impl TaskSession {
             id: new_id(),
             project,
             sequence: 0,
+            legacy_task: None,
             spec: None,
             plan: None,
             spec_approval: None,
@@ -269,7 +281,7 @@ impl TaskSession {
         })
     }
 
-    fn event(
+    pub(crate) fn event(
         &mut self,
         payload: ConversationPayload,
         run_id: Option<String>,
@@ -392,6 +404,8 @@ impl TaskSession {
         // Host owns task identity even when a fresh proposal contains a new ID.
         if let Some(current) = &self.plan {
             plan.task.id = current.task.id.clone();
+        } else if let Some(legacy) = &self.legacy_task {
+            plan.task.id = legacy.task_id.clone();
         }
         self.validate_plan(&plan)?;
         reset_progress(&mut plan.task, plan.revision);
@@ -451,12 +465,22 @@ impl TaskSession {
             }
         }
         plan.revision = self.next_plan_revision()?;
+        if let Some(legacy) = &self.legacy_task {
+            ensure!(
+                legacy.task_id == plan.task.id,
+                "Adopted plans must retain the original task ID"
+            );
+        }
         let state_sequence = self
             .plan
             .as_ref()
-            .map_or(Some(0), |current| {
-                current.task.state_sequence.checked_add(1)
+            .map(|current| current.task.state_sequence)
+            .or_else(|| {
+                self.legacy_task
+                    .as_ref()
+                    .map(|legacy| legacy.state_sequence)
             })
+            .map_or(Some(0), |sequence| sequence.checked_add(1))
             .context("Task sequence exhausted")?;
         reset_progress(&mut plan.task, plan.revision);
         plan.task.state_sequence = state_sequence;
@@ -654,7 +678,9 @@ impl TaskSession {
     fn next_plan_revision(&self) -> Result<u64> {
         self.plan
             .as_ref()
-            .map_or(Some(1), |d| d.revision.checked_add(1))
+            .map(|d| d.revision)
+            .or_else(|| self.legacy_task.as_ref().map(|legacy| legacy.revision))
+            .map_or(Some(1), |revision| revision.checked_add(1))
             .context("Plan revision exhausted")
     }
 
