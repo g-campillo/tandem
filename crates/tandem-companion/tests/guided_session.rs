@@ -241,6 +241,18 @@ impl Fixture {
             ResearchBroker::with_executor(Inspect),
         )
     }
+    fn reopen(self) -> Self {
+        let directory = self.store.lock().unwrap().directory.clone();
+        drop(self.store);
+        Self {
+            store: Arc::new(Mutex::new(Store::open(&directory).unwrap())),
+            _temp: self._temp,
+            session: self.session,
+            capture: self.capture,
+            peer: self.peer,
+            public: self.public,
+        }
+    }
     fn input(&self, id: &str, intent: ConversationIntent) -> ConversationInput {
         ConversationInput {
             id: id.into(),
@@ -426,6 +438,513 @@ fn completed(result: &ConversationResult) {
         "{:?}",
         result.outcome
     );
+}
+
+fn clarification(action: CompanionAction) -> Value {
+    let mut question = reply("Choose the intended behavior before I continue.");
+    question["question"] = json!({"id":"clarify","prompt":"Which behavior?","choices":[{"id":"keep","label":"Keep","description":"Preserve it"},{"id":"change","label":"Change","description":"Change it"}]});
+    typed_response(action, question, Value::Null)
+}
+fn typed_response(action: CompanionAction, reply: Value, artifact: Value) -> Value {
+    let key = artifact_key(action);
+    json!({"reply": reply, key: artifact})
+}
+fn artifact_key(action: CompanionAction) -> &'static str {
+    match action {
+        CompanionAction::DraftSpec => "spec",
+        CompanionAction::DraftPlan => "plan",
+        CompanionAction::PrepareWalkthrough => "actions",
+        CompanionAction::ReviewAction => "assessment",
+        _ => panic!("not a typed draft/action"),
+    }
+}
+fn typed_cases() -> [(CompanionAction, ConversationIntent); 4] {
+    [
+        (CompanionAction::DraftSpec, ConversationIntent::DraftSpec),
+        (CompanionAction::DraftPlan, ConversationIntent::DraftPlan),
+        (
+            CompanionAction::PrepareWalkthrough,
+            ConversationIntent::PrepareWalkthrough,
+        ),
+        (
+            CompanionAction::ReviewAction,
+            ConversationIntent::ReviewAction,
+        ),
+    ]
+}
+fn prepare_clarification_fixture(f: &mut Fixture, runner: &mut Runner, action: CompanionAction) {
+    match action {
+        CompanionAction::DraftSpec => {}
+        CompanionAction::DraftPlan => f.human(vec![SessionCommand::SaveSpec { spec: spec() }]),
+        CompanionAction::PrepareWalkthrough => f.approved(),
+        CompanionAction::ReviewAction => {
+            f.approved();
+            f.dynamic(|params| {
+                typed_response(
+                    CompanionAction::PrepareWalkthrough,
+                    reply("Prepare atomic actions."),
+                    json!(actions(&guided(params).session)),
+                )
+            });
+            completed(&f.run(runner, "prepare", ConversationIntent::PrepareWalkthrough));
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn typed_clarifications_publish_atomically_and_resume_preset_or_custom_answers_after_restart() {
+    for (action, intent) in typed_cases() {
+        for custom in [false, true] {
+            let mut f = Fixture::new();
+            let mut runner = f.runner();
+            prepare_clarification_fixture(&mut f, &mut runner, action);
+            let original = f.state();
+            let mut research = reply("I will inspect the declaration before clarifying.");
+            research["research_requests"] =
+                json!([{"type":"ReadFileRange","path":"lib.rs","start_line":1,"end_line":1}]);
+            f.reply(typed_response(action, research, Value::Null));
+            f.reply(clarification(action));
+            let result = f.run(&mut runner, "clarify", intent.clone());
+            completed(&result);
+            assert!(result.response.is_some());
+            assert!(result.walkthrough.is_none() && result.review.is_none());
+            assert!(runner.operations.active().is_none());
+            assert!(
+                f.store
+                    .lock()
+                    .unwrap()
+                    .active_session_operation(&f.session)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(f.state().pending_question.as_ref().unwrap().id, "clarify");
+            assert_eq!(
+                serde_json::to_value(&f.state().spec).unwrap(),
+                serde_json::to_value(&original.spec).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&f.state().plan).unwrap(),
+                serde_json::to_value(&original.plan).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&f.state().walkthroughs).unwrap(),
+                serde_json::to_value(&original.walkthroughs).unwrap()
+            );
+            assert_eq!(f.state().started_generation, original.started_generation);
+            assert!(
+                !f.events()
+                    .iter()
+                    .any(|e| matches!(e.payload, ConversationPayload::DocumentProposed { .. }))
+            );
+            if action == CompanionAction::ReviewAction {
+                assert_eq!(f.state().current_action().unwrap().0.cursor, 0);
+                let state = f.state();
+                let guidance = GuidanceSettings::default().effective(&state.project, "rust", None);
+                let captured = f
+                    .capture
+                    .capture(
+                        &state,
+                        action,
+                        "rust",
+                        &guidance,
+                        &[],
+                        &AtomicBool::new(false),
+                    )
+                    .unwrap();
+                let binding = captured.review.unwrap().binding;
+                assert!(
+                    f.store
+                        .lock()
+                        .unwrap()
+                        .advance_action(&f.session, &binding.action_id, "no-review", &binding)
+                        .is_err()
+                );
+            }
+            f.dynamic(|params| {
+                assert!(params["outputSchema"]["properties"].get("text").is_some());
+                reply("We can still discuss the tradeoffs.")
+            });
+            completed(&f.run(
+                &mut runner,
+                "ordinary",
+                ConversationIntent::Message("Discuss tradeoffs".into()),
+            ));
+            assert!(f.state().pending_question.is_some());
+            drop(runner);
+            let mut f = f.reopen();
+            assert!(f.state().pending_question.is_some());
+            let mut restarted = f.runner();
+            if action == CompanionAction::ReviewAction && custom {
+                std::fs::write(
+                    f.capture.project.root.join("lib.rs"),
+                    "pub const PRIVATE_SENTINEL: usize = 2;\n",
+                )
+                .unwrap();
+            }
+            let store = f.store.clone();
+            let session = f.session.clone();
+            f.dynamic(move |params| {
+                let state = store
+                    .lock()
+                    .unwrap()
+                    .load_session(&session)
+                    .unwrap()
+                    .unwrap();
+                assert!(state.pending_question.is_none());
+                assert_eq!(state.answered_questions.len(), 1);
+                assert_eq!(state.answered_questions[0].custom_text.is_some(), custom);
+                assert_eq!(state.answered_questions[0].choice_id.is_some(), !custom);
+                assert!(
+                    params["outputSchema"]["properties"]
+                        .get(artifact_key(action))
+                        .is_some(),
+                    "answer must resume {action:?}"
+                );
+                let context = guided(params);
+                if action == CompanionAction::ReviewAction && custom {
+                    assert!(
+                        context
+                            .review
+                            .as_ref()
+                            .unwrap()
+                            .context
+                            .files
+                            .iter()
+                            .any(|file| file.text.contains("usize = 2"))
+                    );
+                }
+                assert!(
+                    context
+                        .transcript
+                        .recent
+                        .iter()
+                        .any(|e| matches!(e.payload, ConversationPayload::QuestionAnswered { .. }))
+                );
+                let artifact = match action {
+                    CompanionAction::DraftSpec => json!(spec()),
+                    CompanionAction::DraftPlan => json!(plan()),
+                    CompanionAction::PrepareWalkthrough => json!(actions(&context.session)),
+                    CompanionAction::ReviewAction => assessment()["assessment"].clone(),
+                    _ => unreachable!(),
+                };
+                typed_response(
+                    action,
+                    reply("Continue using the recorded answer."),
+                    artifact,
+                )
+            });
+            let result = f.run(
+                &mut restarted,
+                "answer",
+                ConversationIntent::Answer(ClarificationAnswer {
+                    question_id: "clarify".into(),
+                    choice_id: (!custom).then(|| "keep".into()),
+                    custom_text: custom.then(|| "Keep it observable".into()),
+                }),
+            );
+            completed(&result);
+            assert!(f.state().pending_question.is_none());
+            assert_eq!(f.state().spec_approval, original.spec_approval);
+            assert_eq!(f.state().plan_approval, original.plan_approval);
+            match action {
+                CompanionAction::DraftSpec | CompanionAction::DraftPlan => assert!(
+                    f.events()
+                        .iter()
+                        .any(|e| matches!(e.payload, ConversationPayload::DocumentProposed { .. }))
+                ),
+                CompanionAction::PrepareWalkthrough => assert!(result.walkthrough.is_some()),
+                CompanionAction::ReviewAction => assert!(result.review.is_some()),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_terminal_results_without_artifact_question_or_research_are_rejected() {
+    for (action, intent) in typed_cases() {
+        let mut f = Fixture::new();
+        let mut runner = f.runner();
+        prepare_clarification_fixture(&mut f, &mut runner, action);
+        f.reply(typed_response(
+            action,
+            reply("I have no result."),
+            Value::Null,
+        ));
+        let result = f.run(&mut runner, "empty-terminal", intent);
+        assert!(matches!(result.outcome, OperationOutcome::Failed { .. }));
+        assert!(
+            result.response.is_none() && result.review.is_none() && result.walkthrough.is_none()
+        );
+        assert!(f.state().pending_question.is_none());
+        assert!(runner.operations.active().is_none());
+        assert!(!f.events().iter().any(|e| matches!(&e.payload, ConversationPayload::AssistantMessage { text } if text == "I have no result.")));
+    }
+}
+
+#[test]
+fn model_cannot_supply_clarification_continuation_authority() {
+    for (action, intent) in typed_cases() {
+        let mut f = Fixture::new();
+        let mut runner = f.runner();
+        prepare_clarification_fixture(&mut f, &mut runner, action);
+        let mut value = clarification(action);
+        value["continuation"] =
+            json!({"kind":"ReviewAction","workflow":{"execution_generation":1}});
+        f.reply(value);
+        let result = f.run(&mut runner, "forged-origin", intent);
+        assert!(matches!(result.outcome, OperationOutcome::Failed { .. }));
+        assert!(
+            result.response.is_none() && result.review.is_none() && result.walkthrough.is_none()
+        );
+        assert!(f.state().pending_question.is_none());
+        assert!(!f.events().iter().any(|e| matches!(
+            e.payload,
+            ConversationPayload::QuestionContinuationRecorded { .. }
+        )));
+        assert!(runner.operations.active().is_none());
+    }
+}
+
+#[test]
+fn typed_clarification_continuations_reject_replaced_documents_after_restart() {
+    for (action, intent) in typed_cases() {
+        let mut f = Fixture::new();
+        let mut runner = f.runner();
+        prepare_clarification_fixture(&mut f, &mut runner, action);
+        f.reply(clarification(action));
+        completed(&f.run(&mut runner, "clarify", intent));
+        let mut changed = spec();
+        changed.summary = "A different saved definition".into();
+        f.human(vec![SessionCommand::SaveSpec { spec: changed }]);
+        if matches!(
+            action,
+            CompanionAction::PrepareWalkthrough | CompanionAction::ReviewAction
+        ) {
+            // Even fresh human approvals/Start for replacement documents cannot
+            // retarget the older pending operation to that new authority.
+            let state = f.state();
+            let mut plan = state.plan.unwrap();
+            plan.spec_ref = state.spec.unwrap().document_ref();
+            f.human(vec![SessionCommand::SavePlan { plan }]);
+            let state = f.state();
+            f.human(vec![
+                SessionCommand::ApproveSpec {
+                    document_ref: state.spec.unwrap().document_ref(),
+                    approved_at_ms: now_ms(),
+                },
+                SessionCommand::ApprovePlan {
+                    document_ref: state.plan.unwrap().document_ref(),
+                    approved_at_ms: now_ms(),
+                },
+                SessionCommand::StartImplementation,
+            ]);
+        }
+        drop(runner);
+        let mut f = f.reopen();
+        let mut runner = f.runner();
+        let turns = f.peer.lock().unwrap().turns;
+        let result = f.run(
+            &mut runner,
+            "stale-answer",
+            ConversationIntent::Answer(ClarificationAnswer {
+                question_id: "clarify".into(),
+                choice_id: Some("keep".into()),
+                custom_text: None,
+            }),
+        );
+        assert!(matches!(result.outcome, OperationOutcome::Failed { .. }));
+        assert_eq!(f.peer.lock().unwrap().turns, turns);
+        assert_eq!(f.state().answered_questions.len(), 1);
+        assert!(f.state().pending_question.is_none());
+        assert!(
+            result.response.is_none() && result.review.is_none() && result.walkthrough.is_none()
+        );
+        assert!(runner.operations.active().is_none());
+    }
+}
+
+#[test]
+fn action_clarification_continuations_reject_a_new_walkthrough_or_advanced_action() {
+    for (action, intent) in typed_cases().into_iter().skip(2) {
+        let mut f = Fixture::new();
+        let mut runner = f.runner();
+        prepare_clarification_fixture(&mut f, &mut runner, action);
+        let spec_ref = f.state().spec.unwrap().document_ref();
+        let plan_ref = f.state().plan.unwrap().document_ref();
+        f.reply(clarification(action));
+        completed(&f.run(&mut runner, "clarify", intent));
+        if action == CompanionAction::PrepareWalkthrough {
+            f.dynamic(|params| {
+                typed_response(
+                    CompanionAction::PrepareWalkthrough,
+                    reply("An explicitly requested walkthrough."),
+                    json!(actions(&guided(params).session)),
+                )
+            });
+            completed(&f.run(
+                &mut runner,
+                "other-prepare",
+                ConversationIntent::PrepareWalkthrough,
+            ));
+        } else {
+            f.reply(assessment());
+            let review = f
+                .run(
+                    &mut runner,
+                    "other-review",
+                    ConversationIntent::ReviewAction,
+                )
+                .review
+                .unwrap();
+            f.store
+                .lock()
+                .unwrap()
+                .advance_action(
+                    &f.session,
+                    &review.binding.action_id,
+                    &review.id,
+                    &review.binding,
+                )
+                .unwrap();
+            assert_eq!(f.state().current_action().unwrap().0.cursor, 1);
+        }
+        assert_eq!(f.state().spec.unwrap().document_ref(), spec_ref);
+        assert_eq!(f.state().plan.unwrap().document_ref(), plan_ref);
+        drop(runner);
+        let mut f = f.reopen();
+        let mut runner = f.runner();
+        let turns = f.peer.lock().unwrap().turns;
+        let result = f.run(
+            &mut runner,
+            "stale-action-answer",
+            ConversationIntent::Answer(ClarificationAnswer {
+                question_id: "clarify".into(),
+                choice_id: None,
+                custom_text: Some("Keep it observable".into()),
+            }),
+        );
+        assert!(matches!(result.outcome, OperationOutcome::Failed { .. }));
+        assert_eq!(f.peer.lock().unwrap().turns, turns);
+        assert_eq!(f.state().answered_questions.len(), 1);
+        assert!(runner.operations.active().is_none());
+    }
+}
+
+#[test]
+fn resumed_preparation_cannot_replace_a_walkthrough_created_while_the_answer_runs() {
+    let mut f = Fixture::new();
+    let mut runner = f.runner();
+    f.approved();
+    f.reply(clarification(CompanionAction::PrepareWalkthrough));
+    completed(&f.run(
+        &mut runner,
+        "clarify",
+        ConversationIntent::PrepareWalkthrough,
+    ));
+    let state = f.state();
+    let other = walkthrough_proposal(&state, actions(&state)).unwrap();
+    let other_id = other.id.clone();
+    let store = f.store.clone();
+    let session = f.session.clone();
+    f.dynamic(move |params| {
+        let mut store = store.lock().unwrap();
+        let state = store.load_session(&session).unwrap().unwrap();
+        store
+            .apply_session_transition(
+                &session,
+                state.sequence,
+                &SessionTransition::new(
+                    new_id(),
+                    vec![SessionCommand::SaveWalkthrough {
+                        walkthrough: other.clone(),
+                    }],
+                ),
+            )
+            .unwrap();
+        typed_response(
+            CompanionAction::PrepareWalkthrough,
+            reply("The earlier preparation completed."),
+            json!(actions(&guided(params).session)),
+        )
+    });
+    let result = f.run(
+        &mut runner,
+        "answer",
+        ConversationIntent::Answer(ClarificationAnswer {
+            question_id: "clarify".into(),
+            choice_id: Some("keep".into()),
+            custom_text: None,
+        }),
+    );
+    assert!(
+        matches!(result.outcome, OperationOutcome::Failed { .. }),
+        "{:?}",
+        result.outcome
+    );
+    assert!(result.response.is_none() && result.walkthrough.is_none());
+    assert_eq!(f.state().current_action().unwrap().0.id, other_id);
+    assert!(runner.operations.active().is_none());
+}
+
+#[test]
+fn clarification_reply_question_and_origin_roll_back_together_on_publication_failure() {
+    for (action, intent) in typed_cases() {
+        for target in [
+            "QuestionAsked",
+            "QuestionContinuationRecorded",
+            "OperationOutcome",
+        ] {
+            let mut f = Fixture::new();
+            let mut runner = f.runner();
+            prepare_clarification_fixture(&mut f, &mut runner, action);
+            let directory = f.store.lock().unwrap().directory.clone();
+            let db = rusqlite::Connection::open(directory.join("workspace.sqlite")).unwrap();
+            db.execute_batch(&format!("CREATE TRIGGER reject_question BEFORE INSERT ON conversation_event WHEN json_extract(NEW.data,'$.payload.type')='{target}' BEGIN SELECT RAISE(FAIL,'injected clarification persistence failure'); END;")).unwrap();
+            f.reply(clarification(action));
+            let result = runner.run(
+                f.input("clarify", intent.clone()),
+                &mut f.capture,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                |_| Ok(()),
+            );
+            if target == "OperationOutcome" {
+                assert!(result.is_err());
+            } else {
+                let result = result.unwrap();
+                assert!(matches!(result.outcome, OperationOutcome::Failed { .. }));
+                assert!(
+                    result.response.is_none()
+                        && result.review.is_none()
+                        && result.walkthrough.is_none()
+                );
+            }
+            assert!(f.state().pending_question.is_none());
+            assert!(!f.events().iter().any(|e| matches!(&e.payload,
+                ConversationPayload::AssistantMessage { text } if text == "Choose the intended behavior before I continue."
+            )));
+            assert!(!f.events().iter().any(|e| matches!(
+                e.payload,
+                ConversationPayload::QuestionContinuationRecorded { .. }
+            )));
+            assert!(runner.operations.active().is_none());
+            db.execute_batch("DROP TRIGGER reject_question").unwrap();
+            drop(db);
+            drop(runner);
+            let f = f.reopen();
+            assert!(f.state().pending_question.is_none());
+            assert!(
+                f.store
+                    .lock()
+                    .unwrap()
+                    .active_session_operation(&f.session)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 }
 
 #[test]

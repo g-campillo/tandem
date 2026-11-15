@@ -157,6 +157,11 @@ pub enum ConversationPayload {
     QuestionAnswered {
         answer: ClarificationAnswer,
     },
+    /// Host-created continuation metadata, never accepted from model output.
+    QuestionContinuationRecorded {
+        question_id: String,
+        continuation: QuestionContinuation,
+    },
     ResearchActivity {
         activity: ResearchActivity,
     },
@@ -241,6 +246,67 @@ pub enum SessionOperationKind {
     PrepareAction,
     ReviewAction,
     Reveal,
+}
+
+/// The unfinished operation behind a clarification. Definitions and action
+/// identity are retained across restart, but this never grants approval or Start.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionContinuation {
+    pub kind: SessionOperationKind,
+    pub spec_ref: Option<DocumentRef>,
+    pub plan_ref: Option<DocumentRef>,
+    pub workflow: Option<WorkflowBinding>,
+    pub step_id: Option<String>,
+    pub action_scope: Option<crate::ActionEvidenceScope>,
+}
+impl QuestionContinuation {
+    pub fn capture(session: &crate::TaskSession, kind: SessionOperationKind) -> Result<Self> {
+        let implementation = match kind {
+            SessionOperationKind::DraftSpec | SessionOperationKind::DraftPlan => None,
+            SessionOperationKind::PrepareAction => Some(crate::WorkflowAction::PrepareWalkthrough),
+            SessionOperationKind::ReviewAction => Some(crate::WorkflowAction::ReviewAction),
+            _ => anyhow::bail!("This operation has no typed clarification continuation"),
+        };
+        let workflow = implementation
+            .map(|action| session.authorize(action))
+            .transpose()?;
+        let action_scope = workflow.as_ref().and_then(|workflow| {
+            session
+                .current_action()
+                .ok()
+                .map(|(walk, action)| crate::ActionEvidenceScope {
+                    workflow: workflow.clone(),
+                    walkthrough_id: walk.id.clone(),
+                    action_id: action.id.clone(),
+                    action_hash: action.definition_hash(),
+                })
+        });
+        ensure!(
+            kind != SessionOperationKind::ReviewAction || action_scope.is_some(),
+            "Prepare an action before continuing its review"
+        );
+        Ok(Self {
+            kind,
+            spec_ref: session.spec.as_ref().map(crate::SpecDocument::document_ref),
+            plan_ref: session.plan.as_ref().map(crate::PlanDocument::document_ref),
+            step_id: workflow.as_ref().and_then(|_| {
+                session
+                    .plan
+                    .as_ref()
+                    .and_then(|p| p.task.active_step.clone())
+            }),
+            workflow,
+            action_scope,
+        })
+    }
+    pub fn validate(&self, session: &crate::TaskSession) -> Result<()> {
+        ensure!(
+            self == &Self::capture(session, self.kind)?,
+            "Clarification belongs to an earlier document, workflow or action scope; request the operation again"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

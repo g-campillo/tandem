@@ -723,6 +723,10 @@ pub enum SessionCommand {
     AnswerQuestion {
         answer: ClarificationAnswer,
     },
+    RecordQuestionContinuation {
+        question_id: String,
+        continuation: crate::QuestionContinuation,
+    },
     ProposeSpec {
         spec: SpecDocument,
         run_id: Option<String>,
@@ -799,6 +803,10 @@ pub struct SessionTransition {
     pub authorization: Option<SessionAuthorization>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definitions: Option<SessionDefinitions>,
+    /// A resumed clarification remains bound to its original scope through the
+    /// final publication transaction, including changes during the model turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_continuation: Option<crate::QuestionContinuation>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -815,6 +823,7 @@ impl SessionTransition {
             operation_id: None,
             authorization: None,
             definitions: None,
+            question_continuation: None,
         }
     }
     pub fn for_operation(mut self, operation_id: impl Into<String>) -> Self {
@@ -823,6 +832,10 @@ impl SessionTransition {
     }
     pub fn with_authorization(mut self, action: WorkflowAction, binding: WorkflowBinding) -> Self {
         self.authorization = Some(SessionAuthorization { action, binding });
+        self
+    }
+    pub fn with_question_continuation(mut self, continuation: crate::QuestionContinuation) -> Self {
+        self.question_continuation = Some(continuation);
         self
     }
     pub fn with_definitions(mut self, session: &TaskSession) -> Self {
@@ -1110,6 +1123,9 @@ impl Store {
             session.sequence == expected_sequence,
             "A newer session state already exists"
         );
+        if let Some(continuation) = &transition.question_continuation {
+            continuation.validate(&session)?;
+        }
         if let Some(definitions) = &transition.definitions {
             ensure!(
                 session.spec.as_ref().map(SpecDocument::document_ref) == definitions.spec_ref
@@ -1536,6 +1552,31 @@ fn apply_session_command(
             session.ask_question(question.clone(), run_id.clone())?
         }
         SessionCommand::AnswerQuestion { answer } => session.answer_question(answer.clone())?,
+        SessionCommand::RecordQuestionContinuation {
+            question_id,
+            continuation,
+        } => {
+            let operation_id =
+                operation_id.context("Question continuation needs its active operation fence")?;
+            ensure!(
+                session.pending_question.as_ref().map(|q| &q.id) == Some(question_id),
+                "Continuation must belong to the pending question"
+            );
+            let data: String = connection.query_row("SELECT data FROM session_operation WHERE id=?1 AND session_id=?2 AND outcome IS NULL", params![operation_id, session.id], |r| r.get(0))?;
+            let operation: SessionOperation = serde_json::from_str(&data)?;
+            ensure!(
+                operation.kind == continuation.kind,
+                "Continuation differs from its originating operation"
+            );
+            continuation.validate(session)?;
+            session.event(
+                ConversationPayload::QuestionContinuationRecorded {
+                    question_id: question_id.clone(),
+                    continuation: continuation.clone(),
+                },
+                Some(operation_id.into()),
+            )?
+        }
         SessionCommand::ProposeSpec { spec, run_id } => {
             session.propose_spec(spec.clone(), run_id.clone())?
         }

@@ -351,6 +351,30 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                 .is_none(),
             "Operation ID belongs to another session"
         );
+        // Only an explicit answer resumes unfinished typed work. The origin is
+        // host-recorded durable metadata, never a model-selected operation.
+        let continuation = if let ConversationIntent::Answer(answer) = &input.intent {
+            all_events(&self.store, &session_id)?
+                .into_iter()
+                .rev()
+                .find_map(|event| match event.payload {
+                    ConversationPayload::QuestionContinuationRecorded {
+                        question_id,
+                        continuation,
+                    } if question_id == answer.question_id => Some(continuation),
+                    _ => None,
+                })
+        } else {
+            None
+        };
+        let action = match continuation.as_ref().map(|c| c.kind) {
+            Some(SessionOperationKind::DraftSpec) => CompanionAction::DraftSpec,
+            Some(SessionOperationKind::DraftPlan) => CompanionAction::DraftPlan,
+            Some(SessionOperationKind::PrepareAction) => CompanionAction::PrepareWalkthrough,
+            Some(SessionOperationKind::ReviewAction) => CompanionAction::ReviewAction,
+            Some(_) => bail!("Unsupported clarification continuation"),
+            None => input.intent.action(),
+        };
         let mut historical = false;
         let mut result_review = None;
         let mut result_walkthrough = None;
@@ -360,7 +384,9 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
         let operation = ActiveOperation {
             id: id.clone(),
             session_id: session_id.clone(),
-            kind: input.intent.kind(),
+            kind: continuation
+                .as_ref()
+                .map_or_else(|| input.intent.kind(), |c| c.kind),
             phase: OperationPhase::PreservingInput,
             started_at_ms: now_ms(),
             cancel_requested: false,
@@ -415,7 +441,9 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                 &mut observe,
             )?;
             let session = load(&self.store, &session_id)?;
-            let action = input.intent.action();
+            if let Some(continuation) = &continuation {
+                continuation.validate(&session)?;
+            }
             let workflow_action = workflow_action(action);
             let workflow = if let Some(a) = workflow_action {
                 Some(session.authorize(a)?)
@@ -851,6 +879,9 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                     }
                 }
                 let mut transition = SessionTransition::new(new_id(), commands).for_operation(&id);
+                if let Some(continuation) = &continuation {
+                    transition = transition.with_question_continuation(continuation.clone());
+                }
                 if let Some(a) = workflow_action {
                     transition = transition.with_authorization(
                         a,
@@ -1166,6 +1197,33 @@ fn final_commands(
                 run_id: Some(run.into()),
             });
         }
+    }
+    // A validated clarification is a complete conversational result while its
+    // typed artifact is still pending. Publish the question and origin together,
+    // without inventing a proposal, walkthrough or review.
+    let unfinished = match response {
+        CompanionResponse::SpecDraft(draft) if draft.spec.is_none() => {
+            Some(SessionOperationKind::DraftSpec)
+        }
+        CompanionResponse::PlanDraft(draft) if draft.plan.is_none() => {
+            Some(SessionOperationKind::DraftPlan)
+        }
+        CompanionResponse::WalkthroughDraft(draft) if draft.actions.is_none() => {
+            Some(SessionOperationKind::PrepareAction)
+        }
+        CompanionResponse::ActionAssessment(draft) if draft.assessment.is_none() => {
+            Some(SessionOperationKind::ReviewAction)
+        }
+        _ => None,
+    };
+    if let Some(kind) = unfinished
+        && let Some(question) = response_reply(response).and_then(|reply| reply.question.as_ref())
+    {
+        commands.push(SessionCommand::RecordQuestionContinuation {
+            question_id: question.id.clone(),
+            continuation: QuestionContinuation::capture(session, kind)?,
+        });
+        return Ok(commands);
     }
     match response {
         CompanionResponse::Discussion(_) => {}
