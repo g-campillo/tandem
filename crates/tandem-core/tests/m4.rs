@@ -1,8 +1,27 @@
+#[path = "../../tandem-agent/examples/support/mod.rs"]
+mod support;
 use std::collections::BTreeMap;
 use tandem_core::*;
 
+fn fixture_task(project: &Project) -> TaskPlan {
+    let mut task = TaskPlan::new(
+        project.key().into(),
+        "Implement a bounded change".into(),
+        vec!["Preserve behavior".into()],
+        vec!["Implement".into()],
+    )
+    .unwrap();
+    task.id = "task".into();
+    task.steps[0].id = "step".into();
+    task
+}
 fn grant(project: &Project, paths: &[&str]) -> DelegationGrant {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = Store::open(directory.path()).unwrap();
+    let session = support::approved_session(&mut store, fixture_task(project)).unwrap();
     DelegationGrant {
+        workflow: Some(session.authorize(WorkflowAction::Takeover).unwrap()),
+        action_scope: None,
         id: new_id(),
         project: project.key().into(),
         task_id: "task".into(),
@@ -180,6 +199,10 @@ fn import_journal_and_all_drafts_commit_together_and_survive_restart() {
     workspace.sequence = 1;
     {
         let mut store = Store::open(&temp.path().join("state")).unwrap();
+        let session = support::approved_session(&mut store, fixture_task(&project)).unwrap();
+        let mut retained = run.clone();
+        retained.grant.workflow = Some(session.authorize(WorkflowAction::Takeover).unwrap());
+        store.save_agent_run(&retained).unwrap();
         store.commit_import(&workspace, &working, &import).unwrap();
         assert!(store.commit_import(&workspace, &working, &import).is_err());
     }
@@ -356,4 +379,103 @@ fn running_check_intent_is_durable_before_dispatch_with_a_new_journal_version() 
     let mut stale = saved.clone();
     stale.summary = "Changed without a new version".into();
     assert!(store.save_agent_run(&stale).is_err());
+}
+
+#[test]
+fn takeover_requires_current_durable_approvals_start_and_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = Project::open(temp.path()).unwrap();
+    let mut store = Store::open(&temp.path().join("state")).unwrap();
+    let mut session = support::approved_session(&mut store, fixture_task(&project)).unwrap();
+    let mut scope = grant(&project, &["a"]);
+    scope.workflow = Some(session.authorize(WorkflowAction::Takeover).unwrap());
+    store.authorize_delegation(&scope).unwrap();
+    let mut action_session = session.clone();
+    action_session.walkthroughs = vec![support::fixture_walkthrough(&action_session)];
+    let mut action_grant = scope.clone();
+    action_grant.action_scope = DelegationActionScope::current(&action_session);
+    action_grant.validate_workflow(&action_session).unwrap();
+    let mut next = action_session.clone();
+    next.walkthroughs[0].cursor = 1;
+    assert!(action_grant.validate_workflow(&next).is_err());
+    let mut replacement = action_session.clone();
+    replacement.walkthroughs[0].id = new_id();
+    assert!(action_grant.validate_workflow(&replacement).is_err());
+    // A discussion is conversation state only and cannot revoke or create authority.
+    store
+        .append_user_message(
+            &session.id,
+            session.sequence,
+            &new_id(),
+            "Discuss the approach",
+        )
+        .unwrap();
+    session = store.load_session(&session.id).unwrap().unwrap();
+    store.authorize_delegation(&scope).unwrap();
+    let mut changed = session.spec.clone().unwrap();
+    changed.summary = "Changed requirements".into();
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(new_id(), vec![SessionCommand::SaveSpec { spec: changed }]),
+        )
+        .unwrap();
+    assert!(store.authorize_delegation(&scope).is_err());
+    assert!(scope.validate_workflow(&session).is_err());
+    let mut legacy = scope.clone();
+    legacy.workflow = None;
+    assert!(store.authorize_delegation(&legacy).is_err());
+    // Legacy grant data remains readable without gaining new authority.
+    let mut value = serde_json::to_value(&scope).unwrap();
+    value.as_object_mut().unwrap().remove("workflow");
+    value.as_object_mut().unwrap().remove("action_scope");
+    let decoded: DelegationGrant = serde_json::from_value(value).unwrap();
+    decoded.validate().unwrap();
+    assert!(store.authorize_delegation(&decoded).is_err());
+}
+
+#[test]
+fn import_revalidates_current_approval_and_preserves_staged_work() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("a"), "base\n").unwrap();
+    let project = Project::open(temp.path()).unwrap();
+    let mut store = Store::open(&temp.path().join("state")).unwrap();
+    let mut session = support::approved_session(&mut store, fixture_task(&project)).unwrap();
+    let base = project.open_document("a", false).unwrap();
+    let mut after = base.clone();
+    after.snapshot("agent\n".into());
+    let mut run = staged(&project, Some(base), after);
+    run.grant.workflow = Some(session.authorize(WorkflowAction::Takeover).unwrap());
+    store.save_agent_run(&run).unwrap();
+    let group = preview_import(&run, &project, &[])
+        .unwrap()
+        .transaction
+        .unwrap();
+    let working = apply_to_working_set(&[], &group);
+    let mut state = WorkspaceState::new(&project);
+    state.sequence = 1;
+    let mut plan = session.plan.clone().unwrap();
+    plan.task.goal = "A revised objective".into();
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(new_id(), vec![SessionCommand::SavePlan { plan }]),
+        )
+        .unwrap();
+    assert!(session.authorize(WorkflowAction::Takeover).is_err());
+    assert!(store.commit_import(&state, &working, &group).is_err());
+    assert!(store.drafts(project.key()).unwrap().is_empty());
+    assert_eq!(
+        store.agent_runs(project.key()).unwrap()[0].staged["a"]
+            .as_ref()
+            .unwrap()
+            .text,
+        "agent\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("a")).unwrap(),
+        "base\n"
+    );
 }

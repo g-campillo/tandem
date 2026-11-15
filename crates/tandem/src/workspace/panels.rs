@@ -4,7 +4,7 @@ use crate::appearance::{
     panel_metadata, panel_warning, path_button, solid_section,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 
@@ -223,39 +223,7 @@ impl Workspace {
             .into_any_element()
     }
     fn task_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let task = self
-            .dev
-            .tasks
-            .iter()
-            .find(|t| Some(&t.id) == self.dev.selected_task.as_ref());
-        panel_body(cx).child(panel_heading(note("Task and current step")))
-            .child(note("Create or revisit a saved plan. Use Companion for AI analysis, guidance and review."))
-            .when(self.project.is_none(),|d|d.child(note("Open a project to create a task.")))
-            .when(self.project.is_some()&&!self.dev.task_editor,|d|d.child(path_button(Button::new("new-task"), "New Task").on_click(cx.listener(|this,_,window,cx|this.edit_task(false,window,cx)))))
-            .when(self.dev.task_editor,|d|d
-                .child(note("Goal")).child(Input::new(&self.dev.goal).aria_label("Task goal"))
-                .child(note("Acceptance criteria")).child(Textarea::new(&self.dev.criteria).aria_label("Task acceptance criteria"))
-                .child(note("Steps, one per line, in dependency order")).child(Textarea::new(&self.dev.steps).aria_label("Task steps"))
-                .when(self.dev.editing_task.is_some(),|d|d.child(note("Saving a revision keeps the previous plan in history and starts the revised steps as pending.")))
-                .child(path_button(Button::new("save-plan"), "Save Plan").primary().on_click(cx.listener(|this,_,_,cx|this.save_task_plan(cx))))
-                .child(path_button(Button::new("cancel-plan"), "Cancel Plan Edit").on_click(cx.listener(|this,_,_,cx|{this.dev.task_editor=false;cx.notify();}))))
-            .when(!self.dev.task_editor,|d|d.when_some(task,|d,task|d
-                .child(panel_heading(note(task.goal.clone()))).child(panel_metadata(note(format!("Plan revision {} · {}/{} steps marked complete",task.revision,task.steps.iter().filter(|s|s.status==StepStatus::Complete).count(),task.steps.len())), cx))
-                .children(task.acceptance.iter().enumerate().map(|(i,a)|div().id(("acceptance",i)).child(note(format!("• {a}")))))
-                .children(task.steps.iter().enumerate().map(|(i,step)|{
-                    let id=step.id.clone();div().id(("step-card",i)).v_flex().min_w_0().gap_2().pt_3().border_t_1().border_color(cx.theme().border)
-                        .child(note(format!("{}. {} · {:?}",i+1,step.title,step.status)))
-                        .when(!step.why.is_empty(),|d|d.child(note(step.why.clone())))
-                        .when(!step.done_when.is_empty(),|d|d.children(step.done_when.iter().enumerate().map(|(i,c)|div().id(("done-when",i)).child(note(format!("Done when: {c}"))))))
-                        .when(step.status!=StepStatus::Active&&step.status!=StepStatus::Complete,|d|d.child(path_button(Button::new(SharedString::from(format!("step:{id}"))), "Work on This Step").on_click(cx.listener(move|this,_,_,cx|this.task_progress(Some(id.clone()),cx)))))
-                        .when(step.status==StepStatus::Active,|d|d.child(path_button(Button::new("complete-active-step"), "Mark Step Complete").on_click(cx.listener(|this,_,_,cx|this.task_progress(None,cx)))))
-                        .when_some(step.completion_note.clone(),|d,text|d.child(note(text))).child(panel_metadata(note(format!("{} linked check receipt(s)",step.evidence.len())), cx))
-                }))
-                .child(path_button(Button::new("revise-plan"), "Revise Plan").on_click(cx.listener(|this,_,window,cx|this.edit_task(true,window,cx))))))
-            .when(self.dev.tasks.iter().any(|t|Some(&t.id)!=self.dev.selected_task.as_ref())&&!self.dev.task_editor,|d|d.child(panel_heading(note("Saved tasks")).mt_3().pt_3().border_t_1().border_color(cx.theme().border)).children(self.dev.tasks.iter().filter(|t|Some(&t.id)!=self.dev.selected_task.as_ref()).map(|task|{
-                let id=task.id.clone();path_button(Button::new(SharedString::from(format!("task:{id}"))), task.goal.clone()).on_click(cx.listener(move|this,_,_,cx|{this.dev.selected_task=Some(id.clone());this.companion.selected_run=None;this.companion.proposal_fields=None;this.companion.solution=None;this.companion.status="Saved task restored.".into();this.dev.scroll.set_offset(point(px(0.0),px(0.0)));cx.notify();}))
-            })))
-            .into_any_element()
+        self.companion_panel(cx)
     }
 }
 

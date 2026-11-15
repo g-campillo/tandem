@@ -129,9 +129,9 @@ fn main() -> Result<()> {
                     MenuItem::action("Document Symbols", Symbols),
                 ]),
                 Menu::new("Companion").items([
-                    MenuItem::action("Analyze / Revise Plan", AnalyzeTask),
-                    MenuItem::action("Guide Current Step", GuideStep),
-                    MenuItem::action("Review Current Step", ReviewStep),
+                    MenuItem::action("Analyze / Discuss", AnalyzeTask),
+                    MenuItem::action("Prepare Current Action", GuideStep),
+                    MenuItem::action("Review Current Action", ReviewStep),
                     MenuItem::action("Takeover Scope", TakeoverPanel),
                     MenuItem::action("Undo Agent Import", UndoAgentImport),
                     MenuItem::action("Stop AI Work", CancelCompanion),

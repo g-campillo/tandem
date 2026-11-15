@@ -16,9 +16,34 @@ pub enum DelegationScope {
     Step,
     Feature,
 }
+/// Exact current action, independent of the inspection step selected in the UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationActionScope {
+    pub walkthrough_id: String,
+    pub action_id: String,
+    pub action_revision: u64,
+    pub action_hash: String,
+}
+impl DelegationActionScope {
+    pub fn current(session: &TaskSession) -> Option<Self> {
+        session
+            .current_action()
+            .ok()
+            .map(|(walkthrough, action)| Self {
+                walkthrough_id: walkthrough.id.clone(),
+                action_id: action.id.clone(),
+                action_revision: action.revision,
+                action_hash: action.definition_hash(),
+            })
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DelegationGrant {
     pub id: String,
+    #[serde(default)]
+    pub workflow: Option<WorkflowBinding>,
+    #[serde(default)]
+    pub action_scope: Option<DelegationActionScope>,
     pub project: String,
     pub task_id: String,
     pub plan_revision: u64,
@@ -75,6 +100,32 @@ impl DelegationGrant {
         ensure!(
             self.checks.len() <= 4,
             "Choose at most four fixed check recipes"
+        );
+        Ok(())
+    }
+    /// Historical grants remain readable, but authority requires the current durable session.
+    pub fn validate_workflow(&self, session: &TaskSession) -> Result<()> {
+        let binding = self
+            .workflow
+            .as_ref()
+            .context("Legacy Takeover grant has no workflow approval; prepare a new scope")?;
+        ensure!(
+            session.project == self.project
+                && session.binding_is_current(WorkflowAction::Takeover, binding),
+            "Takeover approvals or execution generation changed; staged work is retained"
+        );
+        let plan = session
+            .plan
+            .as_ref()
+            .context("Save a plan before Takeover")?;
+        ensure!(self.matches_task(&plan.task), "Takeover plan changed");
+        ensure!(
+            self.scope != DelegationScope::Step || self.step_id == plan.task.active_step,
+            "Takeover scope is not the current implementation step"
+        );
+        ensure!(
+            self.action_scope == DelegationActionScope::current(session),
+            "Takeover current action changed; prepare a new scope"
         );
         Ok(())
     }

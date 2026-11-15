@@ -2347,3 +2347,46 @@ fn reused_private_transport_keeps_screening_inputs_that_receipt_replay_has_omitt
     assert_eq!(f.public.lock().unwrap().turns, 1);
     assert_eq!(f.peer.lock().unwrap().threads, 1);
 }
+
+#[test]
+fn explicit_hint_and_improvement_discussion_revalidate_implementation_authority() {
+    let mut f = Fixture::new();
+    let mut runner = f.runner();
+    let blocked = f.run(
+        &mut runner,
+        "blocked-hint",
+        ConversationIntent::GatedDiscussion("Give one hint".into()),
+    );
+    assert!(matches!(blocked.outcome, OperationOutcome::Failed { .. }));
+    assert_eq!(f.peer.lock().unwrap().turns, 0);
+    f.approved();
+    f.reply(reply("Consider the smallest observable behavior first."));
+    completed(&f.run(
+        &mut runner,
+        "approved-hint",
+        ConversationIntent::GatedDiscussion("Give one hint".into()),
+    ));
+    let store = f.store.clone();
+    let id = f.session.clone();
+    f.dynamic(move |_| {
+        let mut store = store.lock().unwrap();
+        let state = store.load_session(&id).unwrap().unwrap();
+        let mut spec = state.spec.clone().unwrap();
+        spec.summary = "Changed while discussing improvement".into();
+        store
+            .apply_session_transition(
+                &id,
+                state.sequence,
+                &SessionTransition::new(new_id(), vec![SessionCommand::SaveSpec { spec }]),
+            )
+            .unwrap();
+        reply("A historical improvement proposal")
+    });
+    let stale = f.run(
+        &mut runner,
+        "stale-improvement",
+        ConversationIntent::GatedDiscussion("Evaluate clarity".into()),
+    );
+    assert!(matches!(stale.outcome, OperationOutcome::Failed { .. }));
+    assert!(!f.events().iter().any(|e|matches!(&e.payload,ConversationPayload::AssistantMessage{text} if text=="A historical improvement proposal")));
+}

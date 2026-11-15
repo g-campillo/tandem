@@ -1,3 +1,4 @@
+mod support;
 use anyhow::{Result, ensure};
 use std::{
     collections::BTreeMap,
@@ -57,11 +58,14 @@ fn main() -> Result<()> {
     )?;
     let environment = CheckEnvironment::discover(&source, root.join("checks"))?;
     let recipe = environment.recipe("cargo-test")?;
-    let grant=DelegationGrant{id:new_id(),project:project.key().into(),task_id:task.id.clone(),plan_revision:task.revision,step_id:Some(task.steps[0].id.clone()),scope:DelegationScope::Step,
-        objective:"Implement double in new src/helper.rs, expose it from src/lib.rs without changing its public signature, and make src/main.rs print double(21). Preserve the pre-existing user comment and all tests. Run the approved cargo-test recipe and repair failures within scope.".into(),paths:vec!["src/lib.rs".into(),"src/main.rs".into(),"src/helper.rs".into()],checks:BTreeMap::from([("cargo-test".into(),recipe.grant_fingerprint)]),max_rounds:3,confirmed_at_ms:0};
     let store = Mutex::new(Store::open(&root.join("state"))?);
-    store.lock().unwrap().save_task(&task)?;
+    let workflow = support::approved_session(&mut store.lock().unwrap(), task)?;
+    let task = workflow.plan.as_ref().unwrap().task.clone();
+    let grant=DelegationGrant{workflow:Some(workflow.authorize(WorkflowAction::Takeover)?),action_scope:None,id:new_id(),project:project.key().into(),task_id:task.id.clone(),plan_revision:task.revision,step_id:Some(task.steps[0].id.clone()),scope:DelegationScope::Step,
+        objective:"Implement double in new src/helper.rs, expose it from src/lib.rs without changing its public signature, and make src/main.rs print double(21). Preserve the pre-existing user comment and all tests. Run the approved cargo-test recipe and repair failures within scope.".into(),paths:vec!["src/lib.rs".into(),"src/main.rs".into(),"src/helper.rs".into()],checks:BTreeMap::from([("cargo-test".into(),recipe.grant_fingerprint)]),max_rounds:3,confirmed_at_ms:0};
+
     let mut run = prepare_delegation(
+        &store,
         &project,
         &[draft.clone(), unrelated.clone()],
         grant,

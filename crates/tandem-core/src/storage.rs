@@ -157,6 +157,16 @@ impl Store {
             .transpose()
             .map(Option::unwrap_or_default)
     }
+    pub fn authorize_delegation(&self, grant: &crate::DelegationGrant) -> Result<()> {
+        let binding = grant
+            .workflow
+            .as_ref()
+            .context("Legacy Takeover grant cannot newly run")?;
+        let session = self
+            .load_session(&binding.session_id)?
+            .context("Takeover session unavailable")?;
+        grant.validate_workflow(&session)
+    }
     pub fn agent_runs(&self, root: &str) -> Result<Vec<AgentRun>> {
         let rows = self
             .connection
@@ -259,6 +269,31 @@ impl Store {
             );
         }
         let transaction = self.connection.transaction()?;
+        if group.status == ImportStatus::Applied {
+            let data: String = transaction
+                .query_row(
+                    "SELECT data FROM agent_run WHERE id=?1",
+                    [&group.agent_run_id],
+                    |row| row.get(0),
+                )
+                .context("Import needs its retained delegation grant")?;
+            let run: AgentRun = serde_json::from_str(&data)?;
+            ensure!(
+                run.project == group.project
+                    && run.grant.confirmed_at_ms > 0
+                    && !run.status.active()
+                    && run.stage_verified,
+                "Inspect a confirmed terminal Takeover before importing"
+            );
+            let binding = run
+                .grant
+                .workflow
+                .as_ref()
+                .context("Legacy Takeover cannot newly import")?;
+            let session = load_session(&transaction, &binding.session_id)?
+                .context("Takeover session unavailable")?;
+            run.grant.validate_workflow(&session)?;
+        }
         let previous_sequence: Option<String> = transaction
             .query_row(
                 "SELECT value FROM settings WHERE key='checkpoint_sequence'",

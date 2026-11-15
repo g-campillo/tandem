@@ -66,6 +66,11 @@ impl Workspace {
             return;
         }
         let result = (|| -> Result<_> {
+            let workflow = super::companion_state::command_binding(
+                self.companion.session.as_ref(),
+                CompanionAction::Delegate,
+                false,
+            )?;
             let task = self
                 .active_task()
                 .cloned()
@@ -118,6 +123,12 @@ impl Workspace {
                 .collect::<Result<_>>()?;
             let grant = DelegationGrant {
                 id: new_id(),
+                workflow: Some(workflow),
+                action_scope: self
+                    .companion
+                    .session
+                    .as_ref()
+                    .and_then(DelegationActionScope::current),
                 project: project.key().into(),
                 task_id: task.id.clone(),
                 plan_revision: task.revision,
@@ -171,7 +182,9 @@ impl Workspace {
         let store = self.store.clone();
         let epoch = self.epoch;
         let operation = cx.background_spawn(async move {
-            let run = tandem_agent::prepare_delegation(&project, &working, grant, &cache, &cancel)?;
+            let run = tandem_agent::prepare_delegation(
+                &store, &project, &working, grant, &cache, &cancel,
+            )?;
             store.lock().unwrap().save_agent_run(&run)?;
             Ok::<_, anyhow::Error>(run)
         });
@@ -221,6 +234,10 @@ impl Workspace {
                     .is_some_and(|c| c.kind == tandem_companion::ConnectionKind::Ready),
                 "Connect your ChatGPT subscription in Companion first"
             );
+            self.store
+                .lock()
+                .unwrap()
+                .authorize_delegation(&run.grant)?;
             run.grant.confirmed_at_ms = now_ms();
             run.sequence += 1;
             self.store.lock().unwrap().save_agent_run(&run)?;
@@ -332,6 +349,10 @@ impl Workspace {
                     !self.agent.imports.iter().any(|g| g.agent_run_id == run.id),
                     "This delegation already has an import journal; it cannot be replayed"
                 );
+                self.store
+                    .lock()
+                    .unwrap()
+                    .authorize_delegation(&run.grant)?;
                 tandem_agent::inspect_delegation(&mut run)?;
                 self.store.lock().unwrap().save_agent_run(&run)?;
                 let preview = preview_import(&run, project, &live)?;

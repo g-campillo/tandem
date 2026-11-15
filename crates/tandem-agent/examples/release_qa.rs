@@ -1,3 +1,4 @@
+mod support;
 use anyhow::{Result, ensure};
 use std::fs;
 use tandem_core::*;
@@ -47,9 +48,7 @@ fn main() -> Result<()> {
     task.steps[0].why =
         "Keep the arithmetic contract explicit and validate boundary inputs.".into();
     task.steps[0].done_when = task.acceptance.clone();
-    let id = task.steps[0].id.clone();
-    task.start_step(&id)?;
-    store.save_task(&task)?;
+    support::approved_session(&mut store, task)?;
     let docs = vec![
         project.open_document("src/lib.rs", false)?,
         project.open_document("logic.py", false)?,

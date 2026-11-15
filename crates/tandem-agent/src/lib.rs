@@ -40,6 +40,7 @@ fn stage_project(run: &AgentRun) -> Result<Project> {
 }
 
 pub fn prepare_delegation(
+    store: &Mutex<Store>,
     project: &Project,
     working: &[Document],
     grant: DelegationGrant,
@@ -47,6 +48,7 @@ pub fn prepare_delegation(
     cancel: &AtomicBool,
 ) -> Result<AgentRun> {
     grant.validate()?;
+    store.lock().unwrap().authorize_delegation(&grant)?;
     ensure!(
         grant.project == project.key() && grant.confirmed_at_ms == 0,
         "Prepare an unconfirmed grant for this project"
@@ -112,6 +114,7 @@ pub fn prepare_delegation(
         size <= MAX_DELEGATED_BYTES,
         "Delegated source exceeds the 256 KiB scope limit; choose a smaller step"
     );
+    store.lock().unwrap().authorize_delegation(&run.grant)?;
     run.staged = run.baseline.clone();
     run.baseline_manifest = Some(snapshot.manifest);
     run.stage_verified = true;
@@ -241,6 +244,10 @@ pub struct AgentExecution<'a> {
     pub cancel: &'a AtomicBool,
 }
 impl AgentExecution<'_> {
+    fn authorize(&self, run: &AgentRun) -> Result<()> {
+        self.store.lock().unwrap().authorize_delegation(&run.grant)
+    }
+
     pub fn run(
         &mut self,
         mut run: AgentRun,
@@ -256,6 +263,7 @@ impl AgentExecution<'_> {
             run.project == self.original.key(),
             "Delegation project changed"
         );
+        self.authorize(&run)?;
         let mut environment = self.environment.clone();
         environment.denied_roots.push(self.original.root.clone());
         run.status = AgentStatus::Running;
@@ -272,6 +280,7 @@ impl AgentExecution<'_> {
             let stage = stage_project(&run)?;
             let context_cache = PathBuf::from(&run.directory).join("context-captures");
             for round in 1..=run.grant.max_rounds {
+                self.authorize(&run)?;
                 if self.cancel.load(Ordering::Relaxed) {
                     run.cancel_requested = true;
                     run.finish(
@@ -370,6 +379,7 @@ impl AgentExecution<'_> {
                 let model = ModelRun::pending(run.project.clone(), request);
                 run.model_runs.push(model.id.clone());
                 self.store.lock().unwrap().save_model_run(&model)?;
+                self.authorize(&run)?;
                 let (model, next) =
                     self.session
                         .run(model, binding.take(), self.cancel, |model| {
@@ -424,6 +434,7 @@ impl AgentExecution<'_> {
                     run.activity(format!("Applying staged edit: {path}"));
                     self.store.lock().unwrap().save_agent_run(&run)?;
                     observe(&run);
+                    self.authorize(&run)?;
                     stage.save(&document)?;
                 }
                 inspect_delegation(&mut run)?;
@@ -468,6 +479,7 @@ impl AgentExecution<'_> {
                     check.plan_revision = Some(run.grant.plan_revision);
                     run.record_check_intent(check.id.clone());
                     self.store.lock().unwrap().save_agent_run(&run)?;
+                    self.authorize(&run)?;
                     let check = run_check(
                         &environment,
                         &stage,
@@ -576,8 +588,86 @@ pub fn delegation_cache(environment: &CheckEnvironment) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[path = "../examples/support/mod.rs"]
+mod support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_rechecks_durable_workflow_before_source_capture() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("project");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("a.rs"), "source\n").unwrap();
+        let project = Project::open(&source).unwrap();
+        let mut state = Store::open(&temp.path().join("state")).unwrap();
+        let task = TaskPlan::new(
+            project.key().into(),
+            "Edit a.rs".into(),
+            vec!["Preserve behavior".into()],
+            vec!["Edit".into()],
+        )
+        .unwrap();
+        let session = support::approved_session(&mut state, task).unwrap();
+        let grant = DelegationGrant {
+            id: new_id(),
+            workflow: Some(session.authorize(WorkflowAction::Takeover).unwrap()),
+            action_scope: None,
+            project: project.key().into(),
+            task_id: session.plan.as_ref().unwrap().task.id.clone(),
+            plan_revision: 1,
+            step_id: session.plan.as_ref().unwrap().task.active_step.clone(),
+            scope: DelegationScope::Step,
+            objective: "Edit a.rs".into(),
+            paths: vec!["a.rs".into()],
+            checks: Default::default(),
+            max_rounds: 1,
+            confirmed_at_ms: 0,
+        };
+        let mut spec = session.spec.clone().unwrap();
+        spec.summary = "Changed requirement".into();
+        state
+            .apply_session_transition(
+                &session.id,
+                session.sequence,
+                &SessionTransition::new(new_id(), vec![SessionCommand::SaveSpec { spec }]),
+            )
+            .unwrap();
+        let store = Mutex::new(state);
+        let cache = temp.path().join("must-not-capture");
+        assert!(
+            prepare_delegation(
+                &store,
+                &project,
+                &[],
+                grant.clone(),
+                &cache,
+                &AtomicBool::new(false)
+            )
+            .is_err()
+        );
+        assert!(!cache.exists());
+        let mut legacy = grant;
+        legacy.workflow = None;
+        assert!(
+            prepare_delegation(
+                &store,
+                &project,
+                &[],
+                legacy,
+                &cache,
+                &AtomicBool::new(false)
+            )
+            .is_err()
+        );
+        assert!(!cache.exists());
+        assert_eq!(
+            std::fs::read_to_string(source.join("a.rs")).unwrap(),
+            "source\n"
+        );
+    }
     #[test]
     fn stage_verification_refuses_out_of_scope_files_links_and_content_changes() {
         let temp = tempfile::tempdir().unwrap();
@@ -586,10 +676,22 @@ mod tests {
         std::fs::write(source.join("a.rs"), "a\n").unwrap();
         std::fs::write(source.join("context.rs"), "context\n").unwrap();
         let project = Project::open(&source).unwrap();
+        let mut fixture_store = Store::open(&temp.path().join("state")).unwrap();
+        let task = TaskPlan::new(
+            project.key().into(),
+            "Edit a.rs".into(),
+            vec!["Preserve behavior".into()],
+            vec!["Edit".into()],
+        )
+        .unwrap();
+        let workflow = support::approved_session(&mut fixture_store, task).unwrap();
+        let store = Mutex::new(fixture_store);
         let grant = DelegationGrant {
+            workflow: Some(workflow.authorize(WorkflowAction::Takeover).unwrap()),
+            action_scope: None,
             id: new_id(),
             project: project.key().into(),
-            task_id: "accepted".into(),
+            task_id: workflow.plan.as_ref().unwrap().task.id.clone(),
             plan_revision: 1,
             step_id: None,
             scope: DelegationScope::Feature,
@@ -600,6 +702,7 @@ mod tests {
             confirmed_at_ms: 0,
         };
         let mut run = prepare_delegation(
+            &store,
             &project,
             &[],
             grant,

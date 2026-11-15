@@ -1,5 +1,5 @@
 use super::*;
-use gpui_kit::component::input::TextareaState;
+
 use serde_json::{Value, json};
 use std::rc::Rc;
 use tandem_checks::{CheckEnvironment, Recipe};
@@ -53,11 +53,6 @@ pub struct Development {
     pub pending_recipe: Option<String>,
     pub tasks: Vec<TaskPlan>,
     pub selected_task: Option<String>,
-    pub editing_task: Option<String>,
-    pub task_editor: bool,
-    pub goal: Entity<InputState>,
-    pub criteria: Entity<TextareaState>,
-    pub steps: Entity<TextareaState>,
 }
 impl Development {
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
@@ -94,19 +89,6 @@ impl Development {
             pending_recipe: None,
             tasks: vec![],
             selected_task: None,
-            editing_task: None,
-            task_editor: false,
-            goal: cx.new(|cx| InputState::new(window, cx).placeholder("What should change?")),
-            criteria: cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .rows(3)
-                    .placeholder("One acceptance criterion per line")
-            }),
-            steps: cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .rows(5)
-                    .placeholder("One meaningful step per line")
-            }),
         }
     }
     pub fn reset(
@@ -825,169 +807,6 @@ impl Workspace {
             self.dev.checks.truncate(30);
         }
         cx.notify();
-    }
-    pub(super) fn edit_task(
-        &mut self,
-        existing: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let task = existing
-            .then(|| {
-                self.dev
-                    .tasks
-                    .iter()
-                    .find(|t| Some(&t.id) == self.dev.selected_task.as_ref())
-                    .cloned()
-            })
-            .flatten();
-        self.dev.editing_task = task.as_ref().map(|t| t.id.clone());
-        self.dev.task_editor = true;
-        self.dev.goal.update(cx, |field, cx| {
-            field.set_value(
-                task.as_ref().map(|t| t.goal.clone()).unwrap_or_default(),
-                window,
-                cx,
-            )
-        });
-        self.dev.criteria.update(cx, |field, cx| {
-            field.set_value(
-                task.as_ref()
-                    .map(|t| t.acceptance.join("\n"))
-                    .unwrap_or_default(),
-                window,
-                cx,
-            )
-        });
-        self.dev.steps.update(cx, |field, cx| {
-            field.set_value(
-                task.as_ref()
-                    .map(|t| {
-                        t.steps
-                            .iter()
-                            .map(|s| s.title.clone())
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .unwrap_or_default(),
-                window,
-                cx,
-            )
-        });
-        cx.notify();
-    }
-    pub(super) fn save_task_plan(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = &self.project else {
-            return;
-        };
-        let goal = self.dev.goal.read(cx).value().to_string();
-        let lines = |s: String| {
-            s.lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        };
-        let criteria = lines(self.dev.criteria.read(cx).value().to_string());
-        let titles = lines(self.dev.steps.read(cx).value().to_string());
-        let result = (|| -> Result<TaskPlan> {
-            let task = if let Some(old) = self
-                .dev
-                .tasks
-                .iter()
-                .find(|t| Some(&t.id) == self.dev.editing_task.as_ref())
-            {
-                let mut task = old.clone();
-                task.revise(goal, criteria, titles)?;
-                task
-            } else {
-                TaskPlan::new(project.key().into(), goal, criteria, titles)?
-            };
-            self.store.lock().unwrap().save_task(&task)?;
-            Ok(task)
-        })();
-        match result {
-            Ok(task) => {
-                self.dev.tasks.retain(|t| t.id != task.id);
-                self.dev.selected_task = Some(task.id.clone());
-                self.dev.tasks.insert(0, task);
-                self.dev.task_editor = false;
-                self.message(
-                    "Plan saved. Step completion remains your decision.",
-                    false,
-                    cx,
-                );
-            }
-            Err(e) => self.message(e.to_string(), true, cx),
-        }
-    }
-    pub(super) fn task_progress(&mut self, start: Option<String>, cx: &mut Context<Self>) {
-        let Some(old) = self
-            .dev
-            .tasks
-            .iter()
-            .find(|t| Some(&t.id) == self.dev.selected_task.as_ref())
-            .cloned()
-        else {
-            return;
-        };
-        let mut task = old;
-        let result = (|| -> Result<()> {
-            if let Some(id) = start {
-                task.start_step(&id)?;
-            } else {
-                let evidence = self
-                    .dev
-                    .checks
-                    .iter()
-                    .filter(|c| {
-                        c.task_id.as_ref() == Some(&task.id)
-                            && c.step_id == task.active_step
-                            && c.plan_revision == Some(task.revision)
-                            && c.completed_at_ms.is_some()
-                    })
-                    .map(|c| c.id.clone())
-                    .collect();
-                task.complete_active_manually(evidence)?;
-            }
-            self.store.lock().unwrap().save_task(&task)
-        })();
-        match result {
-            Ok(()) => {
-                if let Some(existing) = self.dev.tasks.iter_mut().find(|t| t.id == task.id) {
-                    *existing = task.clone();
-                }
-                for step in &task.steps {
-                    if step.status == StepStatus::Complete {
-                        self.companion.settings.clear_step(&step.id);
-                    }
-                }
-                if let Some(step) = task
-                    .steps
-                    .iter()
-                    .find(|s| Some(&s.id) == task.active_step.as_ref())
-                    && !step.languages.is_empty()
-                    && !step.languages.contains(&self.companion.language)
-                {
-                    self.companion.language = step.languages[0].clone();
-                }
-                let settings_saved = self
-                    .store
-                    .lock()
-                    .unwrap()
-                    .save_guidance(&self.companion.settings);
-                if let Err(e) = settings_saved {
-                    self.companion.status =
-                        format!("Progress saved, but guidance cleanup failed: {e}");
-                }
-                self.companion.selected_run = None;
-                self.companion.solution = None;
-                self.companion.proposal_fields = None;
-                self.dev.scroll.set_offset(point(px(0.0), px(0.0)));
-                cx.notify();
-            }
-            Err(e) => self.message(e.to_string(), true, cx),
-        }
     }
 }
 

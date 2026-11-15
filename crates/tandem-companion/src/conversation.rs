@@ -225,6 +225,8 @@ impl ConversationCapture for ProjectConversationCapture {
 #[derive(Clone, Debug, serde::Serialize)]
 pub enum ConversationIntent {
     Message(String),
+    /// Explicit Hint/improvement request; discussion prose with implementation authority checked throughout.
+    GatedDiscussion(String),
     Answer(ClarificationAnswer),
     Discuss,
     DraftSpec,
@@ -239,7 +241,9 @@ pub enum ConversationIntent {
 impl ConversationIntent {
     fn action(&self) -> CompanionAction {
         match self {
-            Self::Message(_) | Self::Answer(_) | Self::Discuss => CompanionAction::Discuss,
+            Self::Message(_) | Self::GatedDiscussion(_) | Self::Answer(_) | Self::Discuss => {
+                CompanionAction::Discuss
+            }
             Self::DraftSpec => CompanionAction::DraftSpec,
             Self::DraftPlan => CompanionAction::DraftPlan,
             Self::PrepareWalkthrough => CompanionAction::PrepareWalkthrough,
@@ -259,7 +263,7 @@ impl ConversationIntent {
     }
     fn question(&self) -> String {
         match self {
-            Self::Message(text) => text.clone(),
+            Self::Message(text) | Self::GatedDiscussion(text) => text.clone(),
             Self::Answer(_) => {
                 "Continue using the explicit answer recorded in the authoritative transcript."
                     .into()
@@ -408,7 +412,7 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                 },
             ];
             match &input.intent {
-                ConversationIntent::Message(text) => {
+                ConversationIntent::Message(text) | ConversationIntent::GatedDiscussion(text) => {
                     ensure!(!credential_like(text), "Credential-like input was withheld");
                     commands.insert(0, SessionCommand::HumanMessage { text: text.clone() });
                 }
@@ -444,7 +448,12 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
             if let Some(continuation) = &continuation {
                 continuation.validate(&session)?;
             }
-            let workflow_action = workflow_action(action);
+            let workflow_action = if matches!(input.intent, ConversationIntent::GatedDiscussion(_))
+            {
+                Some(WorkflowAction::PrepareAction)
+            } else {
+                workflow_action(action)
+            };
             let workflow = if let Some(a) = workflow_action {
                 Some(session.authorize(a)?)
             } else {
@@ -614,6 +623,18 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                 let run = ModelRun::pending(session.project.clone(), request);
                 lock_store(&self.store)?.save_model_run(&run)?;
                 let store = self.store.clone();
+                if let Some(action) = workflow_action {
+                    ensure!(
+                        load(&self.store, &session_id)?.binding_is_current(
+                            action,
+                            guided
+                                .workflow
+                                .as_ref()
+                                .context("Missing workflow binding")?
+                        ),
+                        "Workflow authority changed before dispatch"
+                    );
+                }
                 let (mut run, thread) = self.backend.turn(
                     run,
                     self.threads.get(&key).cloned(),

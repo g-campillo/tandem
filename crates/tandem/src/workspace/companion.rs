@@ -1,10 +1,9 @@
+use super::companion_state::{self, CompanionTab};
+use super::documents_view::DocumentFields;
 use super::*;
 use gpui_kit::component::input::TextareaState;
 use std::collections::BTreeSet;
-use tandem_companion::{
-    CompanionSession, ConnectionKind, ConnectionState, capture_context, credential_like,
-    matching_check_evidence,
-};
+use tandem_companion::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PreferenceScope {
@@ -15,34 +14,128 @@ pub enum PreferenceScope {
     Step,
     StepLanguage,
 }
-pub struct ProposedFields {
-    pub goal: Entity<InputState>,
-    pub criteria: Entity<TextareaState>,
-    pub steps: Vec<StepFields>,
+
+/// The runtime is shared with connection/model listing and separately authorized Takeover.
+pub struct SharedBackend(pub Arc<Mutex<Option<CompanionSession>>>);
+impl SharedBackend {
+    fn with<T>(&self, f: impl FnOnce(&mut CompanionSession) -> Result<T>) -> Result<T> {
+        let mut slot = self
+            .0
+            .lock()
+            .map_err(|_| anyhow!("Companion process unavailable"))?;
+        if slot
+            .as_ref()
+            .is_some_and(|s| s.connection.kind == ConnectionKind::Unavailable)
+        {
+            slot.take();
+        }
+        if slot.is_none() {
+            *slot = Some(CompanionSession::connect()?);
+        }
+        f(slot.as_mut().unwrap())
+    }
 }
-pub struct StepFields {
-    pub title: Entity<InputState>,
-    pub why: Entity<TextareaState>,
-    pub files: Entity<InputState>,
-    pub done: Entity<TextareaState>,
-    pub dependencies: Entity<InputState>,
+impl ConversationBackend for SharedBackend {
+    fn check_account(&mut self, cancel: &AtomicBool) -> Result<()> {
+        self.with(|s| ConversationBackend::check_account(s, cancel))
+    }
+    fn resolve_model(&mut self, p: &ModelPreference, cancel: &AtomicBool) -> Result<ResolvedModel> {
+        self.with(|s| ConversationBackend::resolve_model(s, p, cancel))
+    }
+    fn turn(
+        &mut self,
+        run: ModelRun,
+        thread: Option<ThreadBinding>,
+        cancel: &AtomicBool,
+        observe: &mut dyn FnMut(&ModelRun) -> Result<()>,
+    ) -> Result<(ModelRun, Option<ThreadBinding>)> {
+        self.with(|s| s.run(run, thread, cancel, observe))
+    }
 }
+#[derive(Default)]
+pub struct PublicRuntime(Option<PublicDataWorker<tandem_codex::Client, AnonymousPublicHttp>>);
+impl PublicWorker for PublicRuntime {
+    fn execute(
+        &mut self,
+        brief: &ScreenedPublicBrief,
+        model: &ResolvedModel,
+        cancel: &AtomicBool,
+        observe: &mut dyn FnMut(&PublicResearchProgress) -> Result<()>,
+    ) -> Result<ResearchReceipt> {
+        if self.0.is_none() {
+            self.0 = Some(PublicDataWorker {
+                search: PublicResearchSession::connect()?,
+                sources: PublicSourceFetcher::new()?,
+            });
+        }
+        self.0
+            .as_mut()
+            .unwrap()
+            .execute(brief, model, cancel, observe)
+    }
+}
+type Runner = ConversationRunner<SharedBackend, PublicRuntime>;
+
+/// Each capture asks the UI for a new versioned buffer snapshot. The original
+/// project/session guard is checked before the UI supplies any editor content.
+#[derive(Default)]
+pub struct CaptureMailbox {
+    project: String,
+    session_id: String,
+    requested: bool,
+    response: Option<std::result::Result<Vec<Document>, String>>,
+}
+struct FreshCapture {
+    capture: ProjectConversationCapture,
+    mailbox: Arc<Mutex<CaptureMailbox>>,
+}
+impl ConversationCapture for FreshCapture {
+    fn capture(
+        &mut self,
+        session: &TaskSession,
+        action: CompanionAction,
+        language: &str,
+        guidance: &EffectiveGuidance,
+        checks: &[CheckRecord],
+        cancel: &AtomicBool,
+    ) -> Result<CapturedConversation> {
+        {
+            let mut m = self.mailbox.lock().unwrap();
+            m.requested = true;
+            m.response = None;
+        }
+        loop {
+            anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Capture cancelled");
+            if let Some(response) = self.mailbox.lock().unwrap().response.take() {
+                self.capture.overlays = response.map_err(|e| anyhow!(e))?;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.capture
+            .capture(session, action, language, guidance, checks, cancel)
+    }
+}
+
 pub struct CompanionUi {
     pub settings: GuidanceSettings,
     pub scope: PreferenceScope,
     pub show_settings: bool,
     pub show_context: bool,
     pub show_connection: bool,
-    pub show_plan: bool,
     pub show_history: bool,
     pub language: String,
     pub runtime: Arc<Mutex<Option<CompanionSession>>>,
+    runner: Arc<Mutex<Option<Runner>>>,
     pub connection: Option<ConnectionState>,
     pub busy: bool,
     pub status: String,
     pub cancel: Option<Arc<AtomicBool>>,
-    pub updates: Option<Arc<Mutex<Option<ModelRun>>>>,
+    pub operation_id: Option<String>,
+    pub progress: Arc<Mutex<Option<ActiveOperation>>>,
+    pub capture: Option<Arc<Mutex<CaptureMailbox>>>,
     pub question: Entity<TextareaState>,
+    pub custom_answer: Entity<TextareaState>,
     pub context_paths: Entity<TextareaState>,
     pub context: Option<ContextSnapshot>,
     pub context_busy: bool,
@@ -51,14 +144,22 @@ pub struct CompanionUi {
     pub context_epoch: u64,
     pub runs: Vec<ModelRun>,
     pub selected_run: Option<String>,
-    pub draft_id: String,
-    pub proposal_fields: Option<ProposedFields>,
-    pub edit_proposal: bool,
+    pub session: Option<TaskSession>,
+    pub sessions: Vec<TaskSession>,
+    pub events: Vec<ConversationEvent>,
+    pub receipts: Vec<ResearchReceipt>,
+    pub composer: ComposerDraft,
+    pub tab: CompanionTab,
+    pub documents: Option<DocumentFields>,
     pub solution: Option<(String, Entity<EditorState>)>,
-    pub collapsed: BTreeSet<String>,
+    pub solution_scope: Option<companion_state::SolutionScope>,
     pub auto_requests: BTreeSet<String>,
-    pub inflight_policy_sequence: Option<u64>,
-    automatic_request: bool,
+    pub inspected_step: Option<String>,
+    pub model_preference: ModelPreference,
+    pub catalog: Option<ModelCatalog>,
+    pub model_error: Option<String>,
+    pub resolved_model: Option<ResolvedModel>,
+    pub document_fingerprint: String,
 }
 impl CompanionUi {
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
@@ -68,24 +169,31 @@ impl CompanionUi {
             show_settings: false,
             show_context: false,
             show_connection: false,
-            show_plan: false,
             show_history: false,
             language: "rust".into(),
             runtime: Arc::new(Mutex::new(None)),
+            runner: Arc::new(Mutex::new(None)),
             connection: None,
             busy: false,
-            status: "Companion ready to connect. You control source changes.".into(),
+            status: "Discuss your goal. Editing works offline.".into(),
             cancel: None,
-            updates: None,
+            operation_id: None,
+            progress: Arc::new(Mutex::new(None)),
+            capture: None,
             question: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .rows(3)
-                    .placeholder("Describe a feature, ask a question, or revise the approach")
+                    .placeholder("Discuss your goal or ask a follow-up")
+            }),
+            custom_answer: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .rows(2)
+                    .placeholder("Your own answer")
             }),
             context_paths: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .rows(2)
-                    .placeholder("Optional extra context paths, one per line")
+                    .placeholder("Additional relative context paths")
             }),
             context: None,
             context_busy: false,
@@ -94,14 +202,22 @@ impl CompanionUi {
             context_epoch: 0,
             runs: vec![],
             selected_run: None,
-            draft_id: new_id(),
-            proposal_fields: None,
-            edit_proposal: false,
+            session: None,
+            sessions: vec![],
+            events: vec![],
+            receipts: vec![],
+            composer: ComposerDraft::default(),
+            tab: CompanionTab::Conversation,
+            documents: None,
             solution: None,
-            collapsed: BTreeSet::new(),
+            solution_scope: None,
             auto_requests: BTreeSet::new(),
-            inflight_policy_sequence: None,
-            automatic_request: false,
+            inspected_step: None,
+            model_preference: ModelPreference::Automatic,
+            catalog: None,
+            model_error: None,
+            resolved_model: None,
+            document_fingerprint: String::new(),
         }
     }
     pub fn reset_project(
@@ -112,12 +228,15 @@ impl CompanionUi {
         cx: &mut Context<Workspace>,
     ) {
         let runtime = self.runtime.clone();
+        let runner = self.runner.clone();
         let connection = self.connection.clone();
+        let catalog = self.catalog.clone();
         *self = Self::new(window, cx);
         self.runtime = runtime;
+        self.runner = runner;
         self.connection = connection;
+        self.catalog = catalog;
         self.settings = settings;
-        self.selected_run = runs.first().map(|r| r.id.clone());
         self.runs = runs;
     }
 }
@@ -131,10 +250,18 @@ impl Drop for CompanionUi {
 
 impl Workspace {
     pub(super) fn active_task(&self) -> Option<&TaskPlan> {
-        self.dev
-            .tasks
-            .iter()
-            .find(|t| Some(&t.id) == self.dev.selected_task.as_ref())
+        // Session authority wins over the legacy compatibility projection.
+        self.companion
+            .session
+            .as_ref()
+            .and_then(|s| s.plan.as_ref())
+            .map(|p| &p.task)
+            .or_else(|| {
+                self.dev
+                    .tasks
+                    .iter()
+                    .find(|t| Some(&t.id) == self.dev.selected_task.as_ref())
+            })
     }
     pub(super) fn effective_guidance(&self) -> EffectiveGuidance {
         self.companion.settings.effective(
@@ -164,217 +291,585 @@ impl Workspace {
                     .cloned(),
             );
         }
-        paths.extend(
-            self.index
-                .files
-                .iter()
-                .filter(|p| {
-                    p.starts_with("tests/")
-                        || std::path::Path::new(p)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| n.starts_with("test_") && n.ends_with(".py"))
-                })
-                .take(4)
-                .cloned(),
-        );
         if let Some(task) = self.active_task() {
-            let relevant = task
-                .active_step
-                .as_ref()
-                .and_then(|id| task.steps.iter().find(|s| &s.id == id));
-            for step in task
-                .steps
-                .iter()
-                .filter(|s| {
-                    relevant
-                        .is_none_or(|active| s.id == active.id || active.depends_on.contains(&s.id))
-                })
-                .take(6)
-            {
-                paths.extend(step.files.iter().cloned());
-            }
+            paths.extend(task.steps.iter().flat_map(|s| s.files.clone()));
         }
-        paths.extend(
-            self.companion
-                .context_paths
-                .read(cx)
-                .value()
-                .lines()
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(str::to_string),
-        );
+        paths.extend(lines(&self.companion.context_paths.read(cx).value()));
         paths.into_iter().collect()
     }
-    pub(super) fn refresh_companion_context(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
+    pub(super) fn preserve_composer(&mut self, cx: &App) -> Result<()> {
+        let Some(session) = &self.companion.session else {
+            return Ok(());
+        };
+        let text = self.companion.question.read(cx).value().to_string();
+        if text != self.companion.composer.text {
+            let sequence = self.store.lock().unwrap().save_composer_draft(
+                &session.id,
+                self.companion.composer.sequence,
+                &text,
+            )?;
+            self.companion.composer = ComposerDraft { sequence, text };
+        }
+        Ok(())
+    }
+    pub(super) fn restore_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let result = (|| -> Result<String> {
+            let project = self.project.as_ref().context("Open a project")?;
+            let mut store = self.store.lock().unwrap();
+            self.companion.model_preference = store.model_preference()?;
+            Ok(match store.selected_session(project.key())? {
+                Some(id) => id,
+                None => store.create_session(project.key())?.id,
+            })
+        })();
+        match result {
+            Ok(id) => self.select_conversation(&id, window, cx),
+            Err(e) => self.companion.status = e.to_string(),
+        }
+    }
+    pub(super) fn select_conversation(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.companion.busy || self.agent.busy {
             return;
         }
-        let Some(project) = self.project.clone() else {
-            return;
-        };
-        self.snapshot_live(cx);
-        let paths = self.selected_context_paths(cx);
-        let overlays = match self.working_snapshots(cx) {
-            Ok(documents) => documents,
-            Err(e) => {
-                self.message(format!("Could not capture retained drafts: {e}"), true, cx);
-                return;
+        let result = (|| -> Result<_> {
+            self.preserve_composer(cx)?;
+            let project = self.project.as_ref().context("Open a project")?;
+            let mut store = self.store.lock().unwrap();
+            store.select_session(project.key(), id)?;
+            Ok((
+                store
+                    .load_session(id)?
+                    .context("Conversation unavailable")?,
+                store.composer_draft(id)?,
+            ))
+        })();
+        match result {
+            Ok((session, draft)) => {
+                self.dev.selected_task = session
+                    .plan
+                    .as_ref()
+                    .map(|p| p.task.id.clone())
+                    .or_else(|| session.legacy_task.as_ref().map(|l| l.task_id.clone()));
+                self.companion.events.clear();
+                self.companion.session = Some(session);
+                self.companion.composer = draft.clone();
+                self.companion
+                    .question
+                    .update(cx, |q, cx| q.set_value(draft.text, window, cx));
+                self.companion.receipts.clear();
+                self.companion
+                    .custom_answer
+                    .update(cx, |q, cx| q.set_value("", window, cx));
+                self.companion.solution = None;
+                self.companion.selected_run = None;
+                self.companion.inspected_step = None;
+                self.reload_conversation(true, window, cx);
+                self.companion.status =
+                    "Conversation restored. Approvals belong to the displayed saved versions."
+                        .into();
             }
-        };
-        let epoch = self.epoch;
-        let code_epoch = self.companion.code_epoch;
-        self.companion.context_job += 1;
-        let job = self.companion.context_job;
-        self.companion.context_busy = true;
-        let cache = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join("Library/Caches/Tandem/companion-context");
-        let environment = self.dev.environment.clone();
-        let ids = self
-            .dev
-            .recipes
-            .iter()
-            .map(|r| r.id.clone())
-            .collect::<Vec<_>>();
-        let operation = cx.background_spawn(async move {
-            let mut context =
-                capture_context(&project, &overlays, &paths, &cache, &AtomicBool::new(false))?;
-            tandem_companion::bind_validation_environment(&mut context, environment.as_ref(), &ids);
-            Ok::<_, anyhow::Error>(context)
-        });
-        cx.spawn(async move |view, cx| {
-            let result = operation.await;
-            let _ = view.update(cx, |view, cx| {
-                if view.epoch != epoch || view.companion.context_job != job {
-                    return;
-                }
-                view.companion.context_busy = false;
-                if view.companion.code_epoch != code_epoch {
-                    view.companion.status =
-                        "Code changed during capture; refresh context again.".into();
-                    cx.notify();
-                    return;
-                }
-                match result {
-                    Ok(context) => {
-                        view.companion.context = Some(context);
-                        view.companion.context_epoch = code_epoch;
-                    }
-                    Err(e) => view.companion.status = format!("Context unavailable: {e}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+            Err(e) => self.companion.status = e.to_string(),
+        }
         cx.notify();
     }
+    pub(super) fn reload_conversation(
+        &mut self,
+        documents: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = (|| -> Result<_> {
+            let id = &self
+                .companion
+                .session
+                .as_ref()
+                .context("No conversation")?
+                .id;
+            let store = self.store.lock().unwrap();
+            let session = store
+                .load_session(id)?
+                .context("Conversation unavailable")?;
+            let events = store.conversation_events(id, None, 100)?;
+            let mut receipts = vec![];
+            for event in &events {
+                if let ConversationPayload::ResearchReceiptRecorded { receipt_id } = &event.payload
+                    && let Some(receipt) = store.research_receipt(id, receipt_id)?
+                {
+                    receipts.push(receipt);
+                }
+            }
+            Ok((
+                session,
+                events,
+                receipts,
+                store.sessions(self.project.as_ref().context("Open a project")?.key())?,
+            ))
+        })();
+        match result {
+            Ok((session, events, receipts, sessions)) => {
+                self.dev.selected_task = session
+                    .plan
+                    .as_ref()
+                    .map(|p| p.task.id.clone())
+                    .or_else(|| session.legacy_task.as_ref().map(|l| l.task_id.clone()));
+                self.companion.session = Some(session);
+                for event in events {
+                    if !self.companion.events.iter().any(|e| e.id == event.id) {
+                        self.companion.events.push(event);
+                    }
+                }
+                self.companion.events.sort_by_key(|e| e.sequence);
+                for receipt in receipts {
+                    if !self.companion.receipts.iter().any(|r| r.id == receipt.id) {
+                        self.companion.receipts.push(receipt);
+                    }
+                }
+                self.companion.sessions = sessions;
+                if documents {
+                    self.load_document_fields(window, cx);
+                }
+            }
+            Err(e) => self.companion.status = e.to_string(),
+        }
+        cx.notify();
+    }
+    pub(super) fn older_conversation(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.companion.session else {
+            return;
+        };
+        let result = self.store.lock().unwrap().conversation_events(
+            &session.id,
+            self.companion.events.first().map(|e| e.sequence),
+            100,
+        );
+        match result {
+            Ok(mut older) => {
+                older.append(&mut self.companion.events);
+                self.companion.events = older;
+            }
+            Err(e) => self.companion.status = e.to_string(),
+        }
+        cx.notify();
+    }
+    pub(super) fn legacy_conversation(
+        &mut self,
+        id: &str,
+        adopt: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.companion.busy || self.agent.busy {
+            return;
+        }
+        if let Err(e) = self.preserve_composer(cx) {
+            self.companion.status = e.to_string();
+            return;
+        }
+        if adopt {
+            let result = self.store.lock().unwrap().adopt_legacy_task(id);
+            match result {
+                Ok(session) => self.select_conversation(&session.id, window, cx),
+                Err(e) => self.companion.status = e.to_string(),
+            }
+        } else {
+            self.companion.session = None;
+            self.dev.selected_task = Some(id.into());
+            self.companion.events.clear();
+            self.companion.receipts.clear();
+            self.companion.selected_run = None;
+            self.companion.solution = None;
+            self.companion.documents = None;
+            self.companion.tab = CompanionTab::Conversation;
+            self.companion.status="Legacy history: continue in a conversation to save and approve a spec and dependent plan.".into();
+        }
+        cx.notify();
+    }
+    pub(super) fn legacy_run(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.companion.busy || self.agent.busy {
+            return;
+        }
+        if let Err(e) = self.preserve_composer(cx) {
+            self.companion.status = e.to_string();
+            return;
+        }
+        self.companion.session = None;
+        self.dev.selected_task = None;
+        self.companion.selected_run = Some(id.into());
+        self.companion.events.clear();
+        self.companion.receipts.clear();
+        self.companion.documents = None;
+        self.companion.solution = None;
+        self.companion
+            .question
+            .update(cx, |q, cx| q.set_value("", window, cx));
+        self.companion.status="Legacy conversation history. New implementation requires saved, approved documents and Start.".into();
+        cx.notify();
+    }
+    pub(super) fn new_companion_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.companion.busy || self.agent.busy {
+            return;
+        }
+        let result = (|| -> Result<_> {
+            self.preserve_composer(cx)?;
+            Ok(self
+                .store
+                .lock()
+                .unwrap()
+                .create_session(self.project.as_ref().context("Open a project")?.key())?
+                .id)
+        })();
+        match result {
+            Ok(id) => self.select_conversation(&id, window, cx),
+            Err(e) => self.companion.status = e.to_string(),
+        }
+    }
     pub(super) fn companion_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let update = self
+        if let Err(e) = self.preserve_composer(cx) {
+            self.companion.status = format!("Composer could not be preserved: {e}");
+        }
+        if let Some(mailbox) = self.companion.capture.clone() {
+            let requested = mailbox.lock().unwrap().requested;
+            if requested {
+                let in_scope = {
+                    let m = mailbox.lock().unwrap();
+                    self.project.as_ref().is_some_and(|p| p.key() == m.project)
+                        && self
+                            .companion
+                            .session
+                            .as_ref()
+                            .is_some_and(|s| s.id == m.session_id)
+                };
+                let result = if in_scope {
+                    self.working_snapshots(cx).map_err(|e| e.to_string())
+                } else {
+                    Err("Project or conversation changed during capture".into())
+                };
+                let mut m = mailbox.lock().unwrap();
+                m.response = Some(result);
+                m.requested = false;
+            }
+        }
+        let progress = self.companion.progress.lock().unwrap().take();
+        if let Some(progress) = progress
+            && self.companion.operation_id.as_ref() == Some(&progress.id)
+            && self
+                .companion
+                .session
+                .as_ref()
+                .is_some_and(|s| s.id == progress.session_id)
+        {
+            self.companion.status = format!("{:?}", progress.phase);
+            self.reload_conversation(false, window, cx);
+        }
+        let fingerprint = self
             .companion
-            .updates
+            .documents
             .as_ref()
-            .and_then(|slot| slot.lock().unwrap().take());
-        if let Some(run) = update {
-            self.receive_model_run(run, cx);
+            .map(|d| d.fingerprint(cx))
+            .unwrap_or_default();
+        if fingerprint != self.companion.document_fingerprint {
+            self.companion.document_fingerprint = fingerprint;
+            cx.notify();
         }
         if self.companion.busy || self.agent.busy || self.loading {
             return;
         }
-        let guidance = self.effective_guidance();
-        if guidance.solution != SolutionPolicy::AutomaticPreview {
-            return;
-        }
-        let Some(task) = self.active_task() else {
+        let Some(session) = &self.companion.session else {
             return;
         };
-        let Some(step) = &task.active_step else {
+        if let Some(key) = companion_state::preview_key(
+            session,
+            &self.companion.language,
+            &self.effective_guidance(),
+        ) && self.companion.auto_requests.insert(key)
+        {
+            self.start_conversation(
+                ConversationIntent::AutomaticPreview(SolutionPolicy::AutomaticPreview),
+                window,
+                cx,
+            );
+        }
+    }
+    pub(super) fn run_companion(
+        &mut self,
+        action: CompanionAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(e) = companion_state::command_binding(
+            self.companion.session.as_ref(),
+            action,
+            self.companion.busy || self.agent.busy || self.loading,
+        ) {
+            self.companion.status = e.to_string();
+            cx.notify();
             return;
+        }
+        let typed = self.companion.question.read(cx).value().trim().to_string();
+        let intent = match action {
+            CompanionAction::DraftSpec => ConversationIntent::DraftSpec,
+            CompanionAction::DraftPlan => ConversationIntent::DraftPlan,
+            CompanionAction::Guide | CompanionAction::PrepareWalkthrough => {
+                ConversationIntent::PrepareWalkthrough
+            }
+            CompanionAction::Review | CompanionAction::ReviewAction => {
+                ConversationIntent::ReviewAction
+            }
+            CompanionAction::Reveal => ConversationIntent::Reveal,
+            CompanionAction::Delegate => return,
+            CompanionAction::Hint => ConversationIntent::GatedDiscussion(format!(
+                "Give one conceptual hint for the current action. Keep full implementations hidden. {typed}"
+            )),
+            CompanionAction::ImproveClarity
+            | CompanionAction::ImproveSpeed
+            | CompanionAction::ImproveBalanced => ConversationIntent::GatedDiscussion(format!(
+                "Evaluate selected code for {action:?}. Preserve behavior, explain preconditions and tradeoffs, and distinguish expected from measured improvements. Keep full implementations hidden. {typed}"
+            )),
+            _ if !typed.is_empty() => ConversationIntent::Message(typed),
+            CompanionAction::Ask => {
+                self.companion.status = "Enter a message first.".into();
+                cx.notify();
+                return;
+            }
+            _ => ConversationIntent::Discuss,
         };
-        if task.steps.iter().find(|s| &s.id == step).is_some_and(|s| {
-            !s.languages.is_empty() && !s.languages.contains(&self.companion.language)
-        }) {
+        self.start_conversation(intent, window, cx);
+    }
+    pub(super) fn answer_companion(
+        &mut self,
+        question: &str,
+        choice: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let custom = self
+            .companion
+            .custom_answer
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let answer = ClarificationAnswer {
+            question_id: question.into(),
+            choice_id: choice,
+            custom_text: (!custom.is_empty()).then_some(custom),
+        };
+        let result = self
+            .companion
+            .session
+            .as_ref()
+            .and_then(|s| s.pending_question.as_ref())
+            .context("This question has already been answered")
+            .and_then(|q| answer.validate(q));
+        if let Err(e) = result {
+            self.companion.status = e.to_string();
+            cx.notify();
             return;
         }
-        let key = format!(
-            "{}:{}:{}:{}:{}",
-            task.id,
-            task.revision,
-            step,
-            self.companion.language,
-            guidance.fingerprint()
-        );
-        if self.companion.runs.iter().any(|r| {
-            r.status == ModelStatus::Completed
-                && r.request.action == CompanionAction::Reveal
-                && r.binding.task_id.as_deref() == Some(&task.id)
-                && r.binding.plan_revision == task.revision
-                && r.binding.step_id.as_ref() == Some(step)
-                && r.request.language == self.companion.language
-                && r.binding.guidance_fingerprint == guidance.fingerprint()
-        }) {
-            self.companion.auto_requests.insert(key);
+        self.start_conversation(ConversationIntent::Answer(answer), window, cx);
+    }
+    pub(super) fn start_conversation(
+        &mut self,
+        intent: ConversationIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.companion.busy || self.agent.busy || self.loading {
             return;
         }
-        if self.companion.auto_requests.insert(key) {
-            self.companion.automatic_request = true;
-            self.run_companion(CompanionAction::Reveal, window, cx);
-            self.companion.automatic_request = false;
-        }
+        let result = (|| -> Result<_> {
+            self.flush(cx)?;
+            self.preserve_composer(cx)?;
+            let project = self.project.clone().context("Open a project")?;
+            let session = self
+                .companion
+                .session
+                .as_ref()
+                .context("Continue the legacy task in a conversation first")?;
+            let id = if matches!(intent, ConversationIntent::AutomaticPreview(_)) {
+                format!(
+                    "preview-{}",
+                    content_hash(
+                        companion_state::preview_key(
+                            session,
+                            &self.companion.language,
+                            &self.effective_guidance()
+                        )
+                        .context("No current action is authorized for preview")?
+                        .as_bytes()
+                    )
+                )
+            } else {
+                new_id()
+            };
+            let session_id = session.id.clone();
+            let input = ConversationInput {
+                id: id.clone(),
+                session_id: session_id.clone(),
+                intent,
+                language: self.companion.language.clone(),
+                guidance: self.effective_guidance(),
+                model_preference: self.companion.model_preference.clone(),
+            };
+            Ok((project, id, session_id, input))
+        })();
+        let (project, id, session_id, input) = match result {
+            Ok(v) => v,
+            Err(e) => {
+                self.companion.status = e.to_string();
+                cx.notify();
+                return;
+            }
+        };
+        let submitted_answer = match &input.intent {
+            ConversationIntent::Answer(answer) => {
+                Some(answer.custom_text.clone().unwrap_or_default())
+            }
+            _ => None,
+        };
+        let requested_language = input.language.clone();
+        let requested_guidance = input.guidance.fingerprint();
+        let submitted = match &input.intent {
+            ConversationIntent::Message(t) => Some(t.clone()),
+            _ => None,
+        };
+        let mailbox = Arc::new(Mutex::new(CaptureMailbox {
+            project: project.key().into(),
+            session_id: session_id.clone(),
+            ..Default::default()
+        }));
+        let mut capture = FreshCapture {
+            capture: ProjectConversationCapture {
+                project: project.clone(),
+                overlays: vec![],
+                selected: self.selected_context_paths(cx),
+                cache: companion_cache(),
+                check_environment: self.dev.environment.clone(),
+                recipe_ids: self.dev.recipes.iter().map(|r| r.id.clone()).collect(),
+                attachments: vec![],
+            },
+            mailbox: mailbox.clone(),
+        };
+        self.companion.capture = Some(mailbox);
+        self.companion.busy = true;
+        self.companion.operation_id = Some(id.clone());
+        self.companion.solution = None;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.companion.cancel = Some(cancel.clone());
+        let runner = self.companion.runner.clone();
+        let runtime = self.companion.runtime.clone();
+        let store = self.store.clone();
+        let progress = self.companion.progress.clone();
+        let epoch = self.epoch;
+        let project_key = project.key().to_string();
+        let document_fingerprint = self.companion.documents.as_ref().map(|d| d.fingerprint(cx));
+        self.companion.status = "Preserving input…".into();
+        let operation = cx.background_spawn(async move {
+            let mut runner = runner
+                .lock()
+                .map_err(|_| anyhow!("Conversation coordinator unavailable"))?;
+            if runner.is_none() {
+                *runner = Some(ConversationRunner::new(
+                    store.clone(),
+                    SharedBackend(runtime),
+                    PublicRuntime::default(),
+                    ResearchBroker::default(),
+                ));
+            }
+            runner
+                .as_mut()
+                .unwrap()
+                .run(input, &mut capture, None, cancel, |op| {
+                    *progress.lock().unwrap() = Some(op.clone());
+                    Ok(())
+                })
+        });
+        let weak = cx.entity().downgrade();
+        window.spawn(cx,async move |cx| {
+            let result=operation.await;
+            let _=weak.update_in(cx,|view,window,cx| {
+                if view.epoch!=epoch || view.project.as_ref().is_none_or(|p|p.key()!=project_key) || view.companion.operation_id.as_ref()!=Some(&id) || view.companion.session.as_ref().is_none_or(|s|s.id!=session_id) { return; }
+                view.companion.busy=false; view.companion.cancel=None; view.companion.capture=None; view.companion.operation_id=None;
+                let document_unchanged=view.companion.documents.as_ref().map(|d|d.fingerprint(cx))==document_fingerprint;
+                let document_proposal=result.as_ref().is_ok_and(|r|matches!(r.outcome,OperationOutcome::Completed{..})&&!r.historical&&matches!(r.response,Some(CompanionResponse::SpecDraft(_)|CompanionResponse::PlanDraft(_))));
+                view.reload_conversation(document_unchanged&&document_proposal,window,cx);
+                match result {
+                    Ok(result)=>{
+                        let completed=matches!(result.outcome,OperationOutcome::Completed{..}) && !result.historical;
+                        view.companion.status=match result.outcome {OperationOutcome::Completed{summary}=>summary,OperationOutcome::Failed{detail}|OperationOutcome::Cancelled{detail}|OperationOutcome::Interrupted{detail}=>detail};
+                        if completed && view.companion.language==requested_language && view.effective_guidance().fingerprint()==requested_guidance && let Some(CompanionResponse::Solution(solution))=result.response {
+                            let editor=cx.new(|cx|EditorState::new(window,cx).language(&solution.language).default_value(solution.code));
+                            view.companion.solution_scope=view.companion.session.as_ref().and_then(|s|s.authorize(WorkflowAction::Reveal).ok().zip(s.current_action().ok())).map(|(workflow,_)|companion_state::SolutionScope{workflow,action_scope:DelegationActionScope::current(view.companion.session.as_ref().unwrap()).unwrap(),language:requested_language.clone(),guidance:requested_guidance.clone()});
+                            view.companion.solution=Some((solution.summary,editor));
+                        }
+                        if companion_state::clear_submitted_input(completed,submitted.as_deref(),&view.companion.question.read(cx).value()) {
+                            view.companion.question.update(cx,|q,cx|q.set_value("",window,cx)); let _=view.preserve_composer(cx);
+                        }
+                        if companion_state::clear_submitted_input(completed,submitted_answer.as_deref(),&view.companion.custom_answer.read(cx).value()){view.companion.custom_answer.update(cx,|q,cx|q.set_value("",window,cx));}
+                    }
+                    Err(e)=>view.companion.status=format!("Conversation stopped: {e}. Saved input is retained; uncertain work was not replayed."),
+                }
+                let latest=view.store.lock().unwrap().model_runs(&project_key);
+                if let Ok(runs)=latest { view.companion.resolved_model=runs.iter().find(|r|r.request.conversation_id.as_deref()==Some(&session_id)).and_then(|r|r.request.resolved_model.clone()); view.companion.runs=runs; }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
     }
     pub(super) fn connect_companion(&mut self, login: bool, cx: &mut Context<Self>) {
         if self.companion.busy || self.agent.busy {
             return;
         }
         self.companion.busy = true;
+        let id = new_id();
+        self.companion.operation_id = Some(id.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         self.companion.cancel = Some(cancel.clone());
-        self.companion.status = if login {
-            "Opening official ChatGPT sign-in; complete it in the browser."
-        } else {
-            "Connecting to the subscription runtime…"
-        }
-        .into();
-        let runtime = self.companion.runtime.clone();
+        let runtime = SharedBackend(self.companion.runtime.clone());
         let operation = cx.background_spawn(async move {
-            let mut slot = runtime
-                .lock()
-                .map_err(|_| anyhow!("Companion process unavailable"))?;
-            if slot
-                .as_ref()
-                .is_some_and(|s| s.connection.kind == ConnectionKind::Unavailable)
-            {
-                slot.take();
-            }
-            if slot.is_none() {
-                *slot = Some(CompanionSession::connect()?);
-            }
-            let session = slot.as_mut().unwrap();
-            if login {
-                session.login(&cancel)
-            } else {
-                session.refresh()
-            }
+            runtime.with(|s| {
+                let state = if login {
+                    s.login(&cancel)?
+                } else {
+                    s.refresh()?
+                };
+                let catalog = s.list_models();
+                Ok((state, catalog))
+            })
         });
         cx.spawn(async move |view, cx| {
             let result = operation.await;
             let _ = view.update(cx, |view, cx| {
+                if view.companion.operation_id.as_ref() != Some(&id) {
+                    return;
+                }
                 view.companion.busy = false;
+                view.companion.operation_id = None;
                 view.companion.cancel = None;
                 match result {
-                    Ok(state) => {
+                    Ok((state, catalog)) => {
                         view.companion.status = state.detail.clone();
                         view.companion.connection = Some(state);
+                        match catalog {
+                            Ok(c) => {
+                                view.companion.catalog = Some(c);
+                                view.companion.model_error = None;
+                            }
+                            Err(e) => {
+                                view.companion.catalog = None;
+                                view.companion.model_error = Some(e.to_string());
+                            }
+                        }
                     }
                     Err(e) => {
-                        view.companion.show_connection = true;
+                        view.companion.catalog = None;
                         view.companion.status = e.to_string();
-                        view.companion.connection = Some(ConnectionState {
-                            kind: ConnectionKind::Unavailable,
-                            detail: "Connection unavailable. Editing remains usable.".into(),
-                            plan: None,
-                            limits: vec![],
-                        });
+                        view.companion.model_error = Some(e.to_string());
                     }
                 }
                 cx.notify();
@@ -393,524 +888,75 @@ impl Workspace {
         })
         .detach();
         self.companion.connection = None;
+        self.companion.catalog = None;
         self.companion.status =
-            "Disconnected. Editing, tasks and completed responses remain available.".into();
+            "Disconnected. Editing and saved conversations remain available.".into();
         cx.notify();
     }
-    fn conversation_name(&self, action: CompanionAction) -> String {
-        format!(
-            "{}:{}:{}",
-            self.dev
-                .selected_task
-                .as_deref()
-                .unwrap_or(&self.companion.draft_id),
-            if action == CompanionAction::Reveal {
-                "solution"
-            } else {
-                "main"
-            },
-            self.companion.language
-        )
+    pub(super) fn choose_model(&mut self, preference: ModelPreference, cx: &mut Context<Self>) {
+        if self.companion.busy || self.agent.busy {
+            return;
+        }
+        let result = self
+            .store
+            .lock()
+            .unwrap()
+            .save_model_preference(&preference);
+        match result {
+            Ok(()) => self.companion.model_preference = preference,
+            Err(e) => self.companion.model_error = Some(e.to_string()),
+        }
+        cx.notify();
     }
-    pub(super) fn run_companion(
-        &mut self,
-        action: CompanionAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.companion.busy || self.agent.busy || self.loading {
+    pub(super) fn refresh_companion_context(&mut self, cx: &mut Context<Self>) {
+        if self.loading || self.companion.context_busy {
             return;
         }
         let Some(project) = self.project.clone() else {
-            self.message("Open a project before starting companion work.", false, cx);
             return;
         };
-        // A standing preview preference authorizes the accepted step, not an
-        // unfinished question the user happens to be drafting in the text box.
-        let typed = if self.companion.automatic_request {
-            String::new()
-        } else {
-            self.companion.question.read(cx).value().trim().to_string()
-        };
-        if typed.len() > 16000 || credential_like(&typed) {
-            self.companion.status =
-                "Request not sent: remove credential-like content or shorten it to 16 KiB.".into();
-            cx.notify();
-            return;
-        }
-        let task = self.active_task().cloned();
-        let guidance = self.effective_guidance();
-        let language = self.companion.language.clone();
-        let question = if typed.is_empty() {
-            match action{
-            CompanionAction::Discuss | CompanionAction::DraftSpec | CompanionAction::DraftPlan | CompanionAction::PrepareWalkthrough | CompanionAction::ReviewAction => "Use the durable conversation coordinator for this request.".into(),
-            CompanionAction::Analyze=>task.as_ref().map(|t|format!("Reassess and revise the plan for: {}",t.goal)).unwrap_or_default(),
-            CompanionAction::Guide=>"Guide the current step at my selected level. Explain what to do, why, and how to know it is complete. Keep the implementation hidden.".into(),
-            CompanionAction::Hint=>"Give one useful hint for the current step without revealing its implementation.".into(),
-            CompanionAction::Explain=>"Explain the relevant concepts in the selected code, proposed plan or current step at my chosen depth, without showing a full implementation.".into(),
-            CompanionAction::Reveal=>"Show one complete suggested implementation for the current step in the selected language, with section explanations and tradeoffs. This grants no editing authority.".into(),
-            CompanionAction::Review=>"Review the current captured implementation against this step, accepted requirements and architecture. Accept any valid alternative. Cite actual check evidence and distinguish verified problems from concerns. Do not supply a replacement solution.".into(),CompanionAction::Ask=>String::new(),
-            CompanionAction::Delegate=>return,
-            CompanionAction::ImproveClarity|CompanionAction::ImproveSpeed|CompanionAction::ImproveBalanced=>format!("Evaluate the selected code for {:?}. Preserve behavior; state preconditions, tradeoffs and validation gaps. Keep current code when change is not justified. Separate expected improvements from actual benchmark evidence. Proposals only; no replacement implementation.",action)}
-        } else {
-            typed.clone()
-        };
-        if question.is_empty() {
-            self.companion.status = "Describe the desired outcome or ask a question first.".into();
-            cx.notify();
-            return;
-        }
-        if matches!(
-            action,
-            CompanionAction::Guide | CompanionAction::Hint | CompanionAction::Review
-        ) && task.is_none()
-        {
-            self.companion.status = "Analyze and accept a task plan first.".into();
-            cx.notify();
-            return;
-        }
-        if let Err(e) = self.flush(cx) {
-            self.message(
-                format!("Request not started: drafts could not be preserved: {e}"),
-                true,
-                cx,
-            );
-            return;
-        }
-        self.snapshot_live(cx);
-        let overlays = match self.working_snapshots(cx) {
-            Ok(documents) => documents,
+        let working = match self.working_snapshots(cx) {
+            Ok(w) => w,
             Err(e) => {
-                self.message(format!("Could not capture retained drafts: {e}"), true, cx);
+                self.companion.status = e.to_string();
                 return;
             }
         };
         let paths = self.selected_context_paths(cx);
-        let mut prior_decisions = self
-            .companion
-            .runs
-            .iter()
-            .filter(|r| {
-                r.status == ModelStatus::Completed
-                    && r.request.language == language
-                    && r.binding.task_id == task.as_ref().map(|t| t.id.clone())
-                    && (task.is_some() || Some(&r.id) == self.companion.selected_run.as_ref())
-            })
-            .filter_map(|r| match &r.response {
-                Some(CompanionResponse::Guidance(g)) => Some(format!(
-                    "Question: {}\nResponse: {}",
-                    r.request.question, g.summary
-                )),
-                Some(CompanionResponse::Plan(plan)) => Some(format!(
-                    "Proposed, not yet accepted plan: {}",
-                    serde_json::to_string(plan)
-                        .unwrap_or_default()
-                        .chars()
-                        .take(12000)
-                        .collect::<String>()
-                )),
-                _ => None,
-            })
-            .take(4)
-            .collect::<Vec<_>>();
-        if action == CompanionAction::Explain
-            && let Some(run) = self
-                .companion
-                .runs
-                .iter()
-                .find(|r| Some(&r.id) == self.companion.selected_run.as_ref())
-            && run.displayable(&guidance, &language)
-            && let Some(CompanionResponse::Solution(solution)) = &run.response
-        {
-            prior_decisions.push(format!(
-                "Already revealed suggestion to explain: {}",
-                solution.code
-            ));
-        }
-        let context = ContextSnapshot {
-            validation_environments: Default::default(),
-            id: String::new(),
-            project_fingerprint: String::new(),
-            files: vec![],
-            tree: vec![],
-            omitted: vec![],
-            captured_at_ms: now_ms(),
-        };
-        let preference = self.store.lock().unwrap().model_preference();
-        let model_preference = match preference {
-            Ok(preference) => preference,
-            Err(error) => {
-                self.message(format!("Request not started: {error}"), true, cx);
-                return;
-            }
-        };
-        let conversation_id = Some(
-            self.dev
-                .selected_task
-                .clone()
-                .unwrap_or_else(|| self.companion.draft_id.clone()),
-        );
-        let request = ModelRequest {
-            model_preference,
-            resolved_model: None,
-            conversation_id,
-            guided: None,
-            delegation: None,
-            action,
-            question,
-            language,
-            guidance,
-            task,
-            context,
-            evidence: vec![],
-            prior_decisions,
-        };
-        let mut run = ModelRun::pending(project.key().into(), request);
-        let saved = self.store.lock().unwrap().save_model_run(&run);
-        if let Err(e) = saved {
-            self.message(format!("Request not started: {e}"), true, cx);
-            return;
-        }
-        self.companion.selected_run = Some(run.id.clone());
-        self.companion.proposal_fields = None;
-        self.companion.solution = None;
-        self.receive_model_run(run.clone(), cx);
-        self.companion.inflight_policy_sequence = Some(self.companion.settings.sequence);
-        self.companion.busy = true;
-        let cancel = Arc::new(AtomicBool::new(false));
-        let updates = Arc::new(Mutex::new(None));
-        self.companion.cancel = Some(cancel.clone());
-        self.companion.updates = Some(updates.clone());
-        let runtime = self.companion.runtime.clone();
-        let store = self.store.clone();
         let epoch = self.epoch;
-        let name = self.conversation_name(action);
-        let checks = self.dev.checks.clone();
-        let environment = self.dev.environment.clone();
-        let recipe_ids = self
-            .dev
-            .recipes
-            .iter()
-            .map(|r| r.id.clone())
-            .collect::<Vec<_>>();
-        let cache = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join("Library/Caches/Tandem/companion-context");
+        let code_epoch = self.companion.code_epoch;
+        self.companion.context_job += 1;
+        let job = self.companion.context_job;
+        self.companion.context_busy = true;
         let operation = cx.background_spawn(async move {
-            let result = (|| -> Result<(ModelRun, Option<ConnectionState>)> {
-                run.request.context =
-                    capture_context(&project, &overlays, &paths, &cache, &cancel)?;
-                let recipes = tandem_companion::bind_validation_environment(
-                    &mut run.request.context,
-                    environment.as_ref(),
-                    &recipe_ids,
-                );
-                run.request.evidence =
-                    matching_check_evidence(&run.request.context, &checks, &recipes);
-                run.binding = run.request.binding();
-                run.sequence += 1;
-                store.lock().unwrap().save_model_run(&run)?;
-                *updates.lock().unwrap() = Some(run.clone());
-                let binding = store
-                    .lock()
-                    .unwrap()
-                    .companion_thread(project.key(), &name)?;
-                let mut slot = runtime
-                    .lock()
-                    .map_err(|_| anyhow!("Companion process unavailable"))?;
-                if slot
-                    .as_ref()
-                    .is_some_and(|s| s.connection.kind == ConnectionKind::Unavailable)
-                {
-                    slot.take();
-                }
-                if slot.is_none() {
-                    *slot = Some(CompanionSession::connect()?);
-                }
-                let session = slot.as_mut().unwrap();
-                let (finished, binding) =
-                    session.run(run.clone(), binding, &cancel, |progress| {
-                        store.lock().unwrap().save_model_run(progress)?;
-                        *updates.lock().unwrap() = Some(progress.clone());
-                        Ok(())
-                    })?;
-                if let Some(binding) = binding {
-                    store
-                        .lock()
-                        .unwrap()
-                        .save_companion_thread(project.key(), &name, &binding)?;
-                } else {
-                    store
-                        .lock()
-                        .unwrap()
-                        .forget_companion_thread(project.key(), &name)?;
-                }
-                Ok((finished, Some(session.connection.clone())))
-            })();
-            match result {
-                Ok(result) => Ok(result),
-                Err(error) => {
-                    run.finish(
-                        if cancel.load(Ordering::Relaxed) {
-                            ModelStatus::Cancelled
-                        } else {
-                            ModelStatus::Failed
-                        },
-                        error.to_string(),
-                    );
-                    store.lock().unwrap().save_model_run(&run)?;
-                    Ok((run, None))
-                }
-            }
-        });
-        let weak = cx.entity().downgrade();
-        window.spawn(cx,async move|cx|{let result:Result<(ModelRun,Option<ConnectionState>)>=operation.await;let _=weak.update_in(cx,|view,window,cx|{
-            if view.epoch!=epoch{return;}view.companion.busy=false;view.companion.cancel=None;view.companion.updates=None;
-            match result{Ok((mut run,connection))=>{if let Some(connection)=connection{view.companion.connection=Some(connection);}
-                let current=view.companion.settings.effective(&run.project,&run.request.language,view.active_task());
-                if run.status==ModelStatus::Completed && (run.binding.guidance_fingerprint!=current.fingerprint() || view.companion.inflight_policy_sequence.is_some_and(|n|n!=view.companion.settings.sequence)){run.response=None;run.finish(ModelStatus::Quarantined,"Guidance changed while this response was generated. Its content was withheld; request again with the current settings.");let _=view.store.lock().unwrap().save_model_run(&run);}
-                let completed=run.status==ModelStatus::Completed;let id=run.id.clone();view.receive_model_run(run,cx);view.select_model_run(&id,window,cx);
-                if completed&&view.companion.question.read(cx).value().trim()==typed{view.companion.question.update(cx,|q,cx|q.set_value("",window,cx));}
-                view.refresh_companion_context(cx);
-                view.companion.inflight_policy_sequence=None;
-            },Err(e)=>view.companion.status=format!("Could not record the final response: {e}. No request was replayed.")};cx.notify();
-        });}).detach();
-        cx.notify();
-    }
-    fn receive_model_run(&mut self, mut run: ModelRun, cx: &mut Context<Self>) {
-        if run.status == ModelStatus::Completed
-            && self
-                .companion
-                .inflight_policy_sequence
-                .is_some_and(|n| n != self.companion.settings.sequence)
-        {
-            run.response = None;
-            run.finish(ModelStatus::Quarantined,"Guidance changed during generation; content was withheld. Request again with current settings.");
-            let _ = self.store.lock().unwrap().save_model_run(&run);
-        }
-        self.companion.status = run.detail.clone();
-        if let Some(existing) = self.companion.runs.iter_mut().find(|r| r.id == run.id) {
-            if existing.sequence <= run.sequence {
-                *existing = run;
-            }
-        } else {
-            self.companion.runs.insert(0, run);
-            self.companion.runs.truncate(40);
-        }
-        cx.notify();
-    }
-    pub(super) fn run_is_current(&self, run: &ModelRun, cx: &App) -> bool {
-        if !run.request.context.files.iter().all(|file| {
-            self.tabs
-                .iter()
-                .find(|t| t.document.path == file.path)
-                .is_none_or(|tab| {
-                    content_hash(
-                        &tab.document
-                            .format
-                            .encode(&tab.editor.read(cx).text().to_string()),
-                    ) == file.hash
-                })
-        }) {
-            return false;
-        }
-
-        self.companion.context.as_ref().is_some_and(|context| {
-            self.companion.context_epoch == self.companion.code_epoch
-                && run.binding.current(
-                    context,
-                    self.active_task(),
-                    &self.effective_guidance(),
-                    &self.companion.language,
-                )
-        })
-    }
-    pub(super) fn select_model_run(
-        &mut self,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.companion.selected_run = Some(id.into());
-        self.companion.proposal_fields = None;
-        self.companion.solution = None;
-        self.companion.edit_proposal = false;
-        let response = self
-            .companion
-            .runs
-            .iter()
-            .find(|r| r.id == id)
-            .and_then(|r| r.response.clone());
-        match response {
-            Some(CompanionResponse::Plan(plan)) => {
-                self.companion.proposal_fields = Some(ProposedFields {
-                    goal: cx.new(|cx| InputState::new(window, cx).default_value(plan.goal)),
-                    criteria: cx.new(|cx| {
-                        TextareaState::new(window, cx)
-                            .rows(3)
-                            .default_value(plan.acceptance.join("\n"))
-                    }),
-                    steps: plan
-                        .steps
-                        .into_iter()
-                        .map(|s| StepFields {
-                            title: cx.new(|cx| InputState::new(window, cx).default_value(s.title)),
-                            why: cx.new(|cx| {
-                                TextareaState::new(window, cx).rows(2).default_value(s.why)
-                            }),
-                            files: cx.new(|cx| {
-                                InputState::new(window, cx).default_value(s.files.join(", "))
-                            }),
-                            done: cx.new(|cx| {
-                                TextareaState::new(window, cx)
-                                    .rows(2)
-                                    .default_value(s.done_when.join("\n"))
-                            }),
-                            dependencies: cx.new(|cx| {
-                                InputState::new(window, cx).default_value(
-                                    s.depends_on
-                                        .iter()
-                                        .map(|i| (i + 1).to_string())
-                                        .collect::<Vec<_>>()
-                                        .join(", "),
-                                )
-                            }),
-                        })
-                        .collect(),
-                });
-            }
-            Some(CompanionResponse::Solution(solution)) => {
-                let editor = cx.new(|cx| {
-                    EditorState::new(window, cx)
-                        .language(&solution.language)
-                        .default_value(solution.code)
-                });
-                self.companion.solution = Some((id.into(), editor));
-            }
-            _ => {}
-        }
-        cx.notify();
-    }
-    pub(super) fn accept_companion_plan(&mut self, cx: &mut Context<Self>) {
-        let Some(run) = self
-            .companion
-            .runs
-            .iter()
-            .find(|r| Some(&r.id) == self.companion.selected_run.as_ref())
-            .cloned()
-        else {
-            return;
-        };
-        if !self.run_is_current(&run, cx) {
-            self.companion.status="Context or preferences changed. Refresh context, or analyze again before accepting.".into();
-            cx.notify();
-            return;
-        }
-        let Some(CompanionResponse::Plan(mut proposal)) = run.response.clone() else {
-            return;
-        };
-        let Some(fields) = &self.companion.proposal_fields else {
-            return;
-        };
-        let result = (|| -> Result<TaskPlan> {
-            proposal.goal = fields.goal.read(cx).value().to_string();
-            proposal.acceptance = lines(&fields.criteria.read(cx).value());
-            for (step, fields) in proposal.steps.iter_mut().zip(&fields.steps) {
-                step.title = fields.title.read(cx).value().to_string();
-                step.why = fields.why.read(cx).value().to_string();
-                step.files = fields
-                    .files
-                    .read(cx)
-                    .value()
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect();
-                step.done_when = lines(&fields.done.read(cx).value());
-                step.depends_on = fields
-                    .dependencies
-                    .read(cx)
-                    .value()
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| {
-                        s.parse::<usize>()
-                            .ok()
-                            .and_then(|n| n.checked_sub(1))
-                            .context("Dependencies use step numbers beginning at 1")
-                    })
-                    .collect::<Result<_>>()?;
-            }
-            anyhow::ensure!(
-                proposal.requested_context.is_empty(),
-                "Include the requested context and analyze again before accepting this provisional plan"
-            );
-            let task = proposal.into_plan(&run.project, run.request.task.as_ref())?;
-            self.store.lock().unwrap().save_task(&task)?;
-            let preference = self.store.lock().unwrap().model_preference()?;
-            if let Some(binding) = run.legacy_task_thread(&task.id, &preference) {
-                let name = format!("{}:main:{}", task.id, run.request.language);
-                self.store
-                    .lock()
-                    .unwrap()
-                    .save_companion_thread(&run.project, &name, &binding)?;
-            }
-            Ok(task)
-        })();
-        match result {
-            Ok(task) => {
-                self.dev.tasks.retain(|t| t.id != task.id);
-                self.dev.selected_task = Some(task.id.clone());
-                self.dev.tasks.insert(0, task);
-                self.dev.scroll.set_offset(point(px(0.0), px(0.0)));
-                self.companion.selected_run = None;
-                self.companion.proposal_fields = None;
-                self.companion.status =
-                    "Plan accepted. Choose a step; you remain in control of the implementation."
-                        .into();
-            }
-            Err(e) => self.companion.status = e.to_string(),
-        }
-        cx.notify();
-    }
-    pub(super) fn include_requested_context(
-        &mut self,
-        paths: Vec<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.companion.question.read(cx).value().trim().is_empty()
-            && let Some(question) = self
-                .companion
-                .runs
-                .iter()
-                .find(|r| Some(&r.id) == self.companion.selected_run.as_ref())
-                .map(|r| r.request.question.clone())
-        {
-            self.companion
-                .question
-                .update(cx, |field, cx| field.set_value(question, window, cx));
-        }
-        let mut selected = lines(&self.companion.context_paths.read(cx).value())
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        for path in paths {
-            if normalized_relative(std::path::Path::new(&path)).is_ok() {
-                selected.insert(path);
-            }
-        }
-        self.companion.context_paths.update(cx, |field, cx| {
-            field.set_value(
-                selected.into_iter().collect::<Vec<_>>().join("\n"),
-                window,
-                cx,
+            capture_context(
+                &project,
+                &working,
+                &paths,
+                &companion_cache(),
+                &AtomicBool::new(false),
             )
         });
-        self.refresh_companion_context(cx);
-        self.companion.status =
-            "Requested paths added. Analyze or review again using the expanded context.".into();
-        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = operation.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.epoch != epoch || view.companion.context_job != job {
+                    return;
+                }
+                view.companion.context_busy = false;
+                if view.companion.code_epoch == code_epoch {
+                    match result {
+                        Ok(c) => {
+                            view.companion.context = Some(c);
+                            view.companion.context_epoch = code_epoch;
+                        }
+                        Err(e) => view.companion.status = e.to_string(),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
     pub(super) fn current_patch(&self) -> GuidancePatch {
         let settings = &self.companion.settings;
@@ -1020,24 +1066,12 @@ impl Workspace {
         }
         cx.notify();
     }
-    pub(super) fn new_companion_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.companion.busy || self.agent.busy {
-            return;
-        }
-        self.dev.selected_task = None;
-        self.companion.draft_id = new_id();
-        self.companion.selected_run = None;
-        self.companion.proposal_fields = None;
-        self.companion.solution = None;
-        self.companion.question.update(cx, |field, cx| {
-            field.set_value("", window, cx);
-            field.focus(window, cx);
-        });
-        self.companion.status = "Describe the new goal, then analyze its context and plan.".into();
-        cx.notify();
-    }
 }
-fn lines(text: &str) -> Vec<String> {
+fn companion_cache() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+        .join("Library/Caches/Tandem/companion-context")
+}
+pub(super) fn lines(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())

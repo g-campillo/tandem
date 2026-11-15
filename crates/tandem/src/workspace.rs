@@ -3,7 +3,10 @@ use health::HealthUi;
 mod agent;
 use agent::AgentUi;
 mod companion;
+mod companion_state;
 mod companion_view;
+mod conversation_view;
+mod documents_view;
 mod panels;
 use companion::CompanionUi;
 mod provider;
@@ -405,6 +408,7 @@ impl Workspace {
             )
     }
     fn flush(&mut self, cx: &App) -> Result<()> {
+        self.preserve_composer(cx)?;
         self.snapshot_live(cx);
         if let Some(state) = self.state() {
             self.store
@@ -592,6 +596,7 @@ impl Workspace {
                         view.project = Some(loaded.project.clone()); view.index = loaded.index; view.show_recent = false;
                         view.dev.reset(loaded.tools,loaded.tasks,loaded.checks,window,cx);
                         view.companion.reset_project(loaded.guidance,loaded.model_runs,window,cx);
+                        view.restore_conversation(window,cx);
                         view.agent=AgentUi::new(window,cx);view.agent.selected=loaded.agent_runs.first().map(|r|r.id.clone());view.agent.runs=loaded.agent_runs;view.agent.imports=loaded.imports;
                         let name = loaded.project.root.file_name().map(|name| name.to_string_lossy()).unwrap_or_else(|| "Project".into());
                         window.set_window_title(&format!("{name} — Tandem"));
