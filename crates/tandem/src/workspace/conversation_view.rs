@@ -1,4 +1,6 @@
-use super::companion_state::{CompanionTab, model_label};
+use super::companion_state::{
+    CompanionTab, HistoricalRow, historical_run, historical_task, model_label,
+};
 use super::panels::note;
 use super::*;
 use crate::appearance::{
@@ -250,6 +252,11 @@ impl Workspace {
             body=body.child(panel_heading(note(format!("Legacy task: {}",task.goal)))).child(note(task.analysis.clone()))
                 .child(panel_warning(note("Historical completion does not authorize new implementation. Continue to create a linked conversation with a spec and dependent plan."),cx))
                 .child(path_button(Button::new("adopt-legacy-task"),"Continue in a conversation").disabled(busy).on_click(cx.listener(move|this,_,w,cx|this.legacy_conversation(&id,true,w,cx))));
+            body = body.children(
+                historical_task(task)
+                    .into_iter()
+                    .map(|r| self.historical_row(r, cx)),
+            );
             for run in self
                 .companion
                 .runs
@@ -260,12 +267,11 @@ impl Workspace {
                     note(format!("Historical request: {}", run.request.question)),
                     cx,
                 ));
-                if let Some(CompanionResponse::Guidance(g)) = &run.response {
-                    body = body.child(note(g.summary.clone()));
-                }
-                if let Some(CompanionResponse::Plan(p)) = &run.response {
-                    body = body.child(note(format!("Historical proposal: {}", p.goal)));
-                }
+                body = body.children(
+                    historical_run(run)
+                        .into_iter()
+                        .map(|r| self.historical_row(r, cx)),
+                );
             }
         }
         if self.companion.session.is_none()
@@ -279,12 +285,11 @@ impl Workspace {
                 "Historical request: {}",
                 run.request.question
             )));
-            if let Some(CompanionResponse::Guidance(g)) = &run.response {
-                body = body.child(note(g.summary.clone()));
-            }
-            if let Some(CompanionResponse::Plan(p)) = &run.response {
-                body = body.child(note(format!("Historical proposal: {}", p.goal)));
-            }
+            body = body.children(
+                historical_run(run)
+                    .into_iter()
+                    .map(|r| self.historical_row(r, cx)),
+            );
         }
         if self
             .companion
@@ -383,6 +388,18 @@ impl Workspace {
                     .p_3()
                     .border_1()
                     .child(note(text)),
+                );
+            }
+            if matches!(event.payload, ConversationPayload::AssistantMessage { .. })
+                && let Some(run) = self.companion.runs.iter().find(|r| {
+                    Some(&r.id) == event.run_id.as_ref()
+                        && matches!(r.response, Some(CompanionResponse::Improvement(_)))
+                })
+            {
+                body = body.children(
+                    historical_run(run)
+                        .into_iter()
+                        .map(|r| self.historical_row(r, cx)),
                 );
             }
             if let ConversationPayload::ResearchFindings { findings } = &event.payload {
@@ -584,6 +601,37 @@ impl Workspace {
                         .aria_label("Explicitly revealed suggested solution")
                         .h(px(230.)),
                 );
+        }
+        body.into_any_element()
+    }
+    fn historical_row(&self, row: HistoricalRow, cx: &mut Context<Self>) -> AnyElement {
+        let mut body = panel_body(cx).child(note(row.text));
+        if let Some((path, line)) = row.source {
+            let label = format!("Historical source: {path}:{line}");
+            body = body.child(
+                path_button(
+                    Button::new(SharedString::from(format!("history-source:{path}:{line}"))),
+                    label,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_file(path.clone(), false, Some(line as usize), window, cx)
+                })),
+            );
+        }
+        if let Some(id) = row.check_id
+            && self.dev.checks.iter().any(|c| c.id == id)
+        {
+            body = body.child(
+                path_button(
+                    Button::new(SharedString::from(format!("history-check:{id}"))),
+                    "Inspect saved check receipt",
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.dev.selected_check = Some(id.clone());
+                    this.dev.panel = super::tools::Panel::Checks;
+                    cx.notify();
+                })),
+            );
         }
         body.into_any_element()
     }

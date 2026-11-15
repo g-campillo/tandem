@@ -252,6 +252,9 @@ pub struct ReviewEvidence {
     pub status: String,
     pub summary: String,
     pub verified_failure: bool,
+    /// Typed host check data; arbitrary command output cannot certify a measurement.
+    #[serde(default)]
+    pub benchmark: Option<BenchmarkMeasurement>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -416,6 +419,20 @@ impl ModelRequest {
                         "Action evidence differs from the request snapshot"
                     );
                 }
+            }
+            CompanionAction::ImproveClarity
+            | CompanionAction::ImproveSpeed
+            | CompanionAction::ImproveBalanced => {
+                let binding = guided
+                    .workflow
+                    .as_ref()
+                    .context("Improvement requires its workflow binding")?;
+                ensure!(
+                    guided
+                        .session
+                        .binding_is_current(WorkflowAction::PrepareAction, binding),
+                    "Improvement request is unauthorized"
+                );
             }
             CompanionAction::DraftPlan => {
                 ensure!(
@@ -615,6 +632,22 @@ impl ModelRequest {
                         && proposal.preconditions.len() <= 32
                         && proposal.suggested_steps.len() <= 16,
                     "Proposal needs bounded invariants and steps"
+                );
+                let measured = self.evidence.iter().any(|e| {
+                    proposal.evidence_ids.contains(&e.id)
+                        && e.status == "Passed"
+                        && e.benchmark.as_ref().is_some_and(|m| m.validate().is_ok())
+                });
+                ensure!(
+                    measured
+                        || !claims_measurement(&format!(
+                            "{}\n{}\n{}\n{}",
+                            proposal.summary,
+                            proposal.expected_complexity,
+                            proposal.practical_costs,
+                            proposal.tradeoffs.join("\n")
+                        )),
+                    "Measured improvement requires cited matching benchmark evidence"
                 );
                 CompanionResponse::Improvement(proposal)
             }
@@ -999,6 +1032,29 @@ pub fn parse_walkthrough_response(
         "Walkthrough starts at the current generation"
     );
     Ok(walk)
+}
+
+/// A conservative prose guard complements typed evidence identity checks.
+/// Negative measurement disclosures are allowed; positive claims require a host receipt.
+fn claims_measurement(text: &str) -> bool {
+    let mut text = text.to_lowercase();
+    for disclosure in [
+        "not yet measured",
+        "not been measured",
+        "not measured",
+        "no measured",
+        "unmeasured",
+        "not measurements",
+        "no measurements",
+        "no measurement",
+        "without measurements",
+        "without measurement",
+        "not benchmarked",
+    ] {
+        text = text.replace(disclosure, "");
+    }
+    text.split(|c: char| !c.is_alphabetic())
+        .any(|word| matches!(word, "measured" | "benchmarked"))
 }
 
 #[cfg(test)]

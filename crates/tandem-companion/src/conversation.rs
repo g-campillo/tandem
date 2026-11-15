@@ -225,8 +225,12 @@ impl ConversationCapture for ProjectConversationCapture {
 #[derive(Clone, Debug, serde::Serialize)]
 pub enum ConversationIntent {
     Message(String),
-    /// Explicit Hint/improvement request; discussion prose with implementation authority checked throughout.
+    /// Explicit Hint request; discussion prose with implementation authority checked throughout.
     GatedDiscussion(String),
+    Improve {
+        objective: ImprovementObjective,
+        question: String,
+    },
     Answer(ClarificationAnswer),
     Discuss,
     DraftSpec,
@@ -244,6 +248,11 @@ impl ConversationIntent {
             Self::Message(_) | Self::GatedDiscussion(_) | Self::Answer(_) | Self::Discuss => {
                 CompanionAction::Discuss
             }
+            Self::Improve { objective, .. } => match objective {
+                ImprovementObjective::Clarity => CompanionAction::ImproveClarity,
+                ImprovementObjective::Speed => CompanionAction::ImproveSpeed,
+                ImprovementObjective::Balanced => CompanionAction::ImproveBalanced,
+            },
             Self::DraftSpec => CompanionAction::DraftSpec,
             Self::DraftPlan => CompanionAction::DraftPlan,
             Self::PrepareWalkthrough => CompanionAction::PrepareWalkthrough,
@@ -263,7 +272,9 @@ impl ConversationIntent {
     }
     fn question(&self) -> String {
         match self {
-            Self::Message(text) | Self::GatedDiscussion(text) => text.clone(),
+            Self::Message(text)
+            | Self::GatedDiscussion(text)
+            | Self::Improve { question: text, .. } => text.clone(),
             Self::Answer(_) => {
                 "Continue using the explicit answer recorded in the authoritative transcript."
                     .into()
@@ -412,7 +423,9 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                 },
             ];
             match &input.intent {
-                ConversationIntent::Message(text) | ConversationIntent::GatedDiscussion(text) => {
+                ConversationIntent::Message(text)
+                | ConversationIntent::GatedDiscussion(text)
+                | ConversationIntent::Improve { question: text, .. } => {
                     ensure!(!credential_like(text), "Credential-like input was withheld");
                     commands.insert(0, SessionCommand::HumanMessage { text: text.clone() });
                 }
@@ -612,7 +625,26 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                     guidance: input.guidance.clone(),
                     task: session.plan.as_ref().map(|p| p.task.clone()),
                     context: captured.context.clone(),
-                    evidence: vec![],
+                    evidence: if matches!(
+                        action,
+                        CompanionAction::ImproveClarity
+                            | CompanionAction::ImproveSpeed
+                            | CompanionAction::ImproveBalanced
+                    ) {
+                        matching_check_evidence(
+                            &captured.context,
+                            &checks,
+                            &captured
+                                .context
+                                .validation_environments
+                                .iter()
+                                .filter(|(_, fingerprint)| fingerprint.as_str() != "unavailable")
+                                .map(|(id, fingerprint)| (id.clone(), fingerprint.clone()))
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        vec![]
+                    },
                     prior_decisions: vec![],
                     delegation: None,
                 };
@@ -1145,6 +1177,9 @@ fn phase(
 }
 fn workflow_action(action: CompanionAction) -> Option<WorkflowAction> {
     match action {
+        CompanionAction::ImproveClarity
+        | CompanionAction::ImproveSpeed
+        | CompanionAction::ImproveBalanced => Some(WorkflowAction::PrepareAction),
         CompanionAction::PrepareWalkthrough => Some(WorkflowAction::PrepareWalkthrough),
         CompanionAction::ReviewAction => Some(WorkflowAction::ReviewAction),
         CompanionAction::Reveal => Some(WorkflowAction::Reveal),
@@ -1248,6 +1283,15 @@ fn final_commands(
     }
     match response {
         CompanionResponse::Discussion(_) => {}
+        CompanionResponse::Improvement(proposal) => {
+            commands.push(SessionCommand::AssistantMessage {
+                text: format!(
+                    "Structured read-only improvement · {:?} · {:?}\n{}",
+                    proposal.objective, proposal.decision, proposal.summary
+                ),
+                run_id: run.into(),
+            })
+        }
         CompanionResponse::SpecDraft(draft) => commands.push(SessionCommand::ProposeSpec {
             spec: draft.spec.clone().context("No spec proposal returned")?,
             run_id: Some(run.into()),
@@ -1427,6 +1471,7 @@ fn response_value(response: &CompanionResponse) -> Result<serde_json::Value> {
         CompanionResponse::WalkthroughDraft(r) => serde_json::to_value(r)?,
         CompanionResponse::ActionAssessment(r) => serde_json::to_value(r)?,
         CompanionResponse::Solution(r) => serde_json::to_value(r)?,
+        CompanionResponse::Improvement(r) => serde_json::to_value(r)?,
         _ => bail!("Unexpected managed response contract"),
     })
 }

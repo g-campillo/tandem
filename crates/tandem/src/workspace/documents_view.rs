@@ -1,5 +1,4 @@
-use super::companion::lines;
-use super::companion_state::{CompanionTab, approval_matches};
+use super::companion_state::{CompanionTab, DocumentEditorDraft, approval_matches};
 use super::panels::note;
 use super::*;
 use crate::appearance::{
@@ -33,151 +32,87 @@ impl DocumentFields {
         )
     }
 
-    fn text(&self, key: &str, cx: &App) -> String {
-        self.fields
-            .iter()
-            .find(|f| f.key == key)
-            .map(|f| f.input.read(cx).value().to_string())
-            .unwrap_or_default()
+    pub fn snapshot(&self, cx: &App) -> DocumentEditorDraft {
+        let mut draft = DocumentEditorDraft::new(self.spec.clone(), self.plan.clone());
+        for field in &mut draft.fields {
+            if let Some(input) = self.fields.iter().find(|f| f.key == field.key) {
+                field.value = input.input.read(cx).value().to_string();
+            }
+        }
+        draft
     }
     fn read_spec(&self, cx: &App) -> Result<SpecDocument> {
-        let mut spec = self.spec.clone();
-        spec.summary = self.text("summary", cx);
-        spec.requirements = criteria(&self.text("requirements", cx))?;
-        spec.acceptance = criteria(&self.text("acceptance", cx))?;
-        spec.in_scope = lines(&self.text("in_scope", cx));
-        spec.out_of_scope = lines(&self.text("out_of_scope", cx));
-        spec.constraints = lines(&self.text("spec_constraints", cx));
-        spec.validate()?;
-        Ok(spec)
+        self.snapshot(cx).read_spec()
     }
     fn read_plan(&self, cx: &App) -> Result<PlanDocument> {
-        let mut plan = self
-            .plan
-            .clone()
-            .context("Save a spec and draft a plan first")?;
-        plan.task.goal = self.text("goal", cx);
-        plan.task.analysis = self.text("analysis", cx);
-        plan.task.acceptance = lines(&self.text("plan_acceptance", cx));
-        plan.task.constraints = lines(&self.text("plan_constraints", cx));
-        plan.task.unknowns = lines(&self.text("unknowns", cx));
-        for (i, step) in plan.task.steps.iter_mut().enumerate() {
-            step.title = self.text(&format!("step.{i}.title"), cx);
-            step.why = self.text(&format!("step.{i}.why"), cx);
-            step.files = lines(&self.text(&format!("step.{i}.files"), cx));
-            step.symbols = lines(&self.text(&format!("step.{i}.symbols"), cx));
-            step.languages = lines(&self.text(&format!("step.{i}.languages"), cx));
-            step.depends_on = lines(&self.text(&format!("step.{i}.dependencies"), cx));
-            step.done_when = lines(&self.text(&format!("step.{i}.done"), cx));
-        }
-        plan.validate()?;
-        Ok(plan)
+        self.snapshot(cx).read_plan()
     }
     fn dirty(&self, kind: WorkflowDocumentKind, session: &TaskSession, cx: &App) -> bool {
-        match kind {
-            WorkflowDocumentKind::Spec => self
-                .read_spec(cx)
-                .ok()
-                .zip(session.spec.as_ref())
-                .is_none_or(|(d, s)| d.document_ref() != s.document_ref()),
-            WorkflowDocumentKind::Plan => self
-                .read_plan(cx)
-                .ok()
-                .zip(session.plan.as_ref())
-                .is_none_or(|(d, s)| d.document_ref() != s.document_ref()),
-        }
+        self.snapshot(cx).dirty(kind, session)
     }
 }
-fn criteria(text: &str) -> Result<Vec<Criterion>> {
-    lines(text)
-        .into_iter()
-        .map(|line| {
-            let (id, text) = line
-                .split_once('|')
-                .context("Criteria use stable-id | text, one per line")?;
-            Ok(Criterion {
-                id: id.trim().into(),
-                text: text.trim().into(),
-            })
-        })
-        .collect()
-}
-fn criterion_text(criteria: &[Criterion]) -> String {
-    criteria
-        .iter()
-        .map(|c| format!("{} | {}", c.id, c.text))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-fn field(
-    key: impl Into<String>,
-    label: impl Into<String>,
-    value: String,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) -> Field {
-    Field {
-        key: key.into(),
-        label: label.into(),
-        input: cx.new(|cx| TextareaState::new(window, cx).rows(3).default_value(value)),
-    }
-}
+
 impl Workspace {
     pub(super) fn load_document_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.companion.session.clone() else {
             self.companion.documents = None;
             return;
         };
-        let proposal = |kind| {
-            self.companion
-                .events
-                .iter()
-                .rev()
-                .find_map(|e| match (&e.payload, kind) {
-                    (ConversationPayload::DocumentSaved { kind: saved, .. }, requested)
-                        if *saved == requested =>
-                    {
-                        Some(None)
-                    }
-                    (
-                        ConversationPayload::DocumentProposed {
-                            proposal: DocumentProposal::Spec(spec),
-                        },
-                        WorkflowDocumentKind::Spec,
-                    ) => Some(Some(DocumentProposal::Spec(spec.clone()))),
-                    (
-                        ConversationPayload::DocumentProposed {
-                            proposal: DocumentProposal::Plan(plan),
-                        },
-                        WorkflowDocumentKind::Plan,
-                    ) => Some(Some(DocumentProposal::Plan(plan.clone()))),
-                    _ => None,
-                })
-                .flatten()
+        let draft = self
+            .companion
+            .documents
+            .as_ref()
+            .map(|d| d.snapshot(cx))
+            .unwrap_or_else(|| {
+                self.companion
+                    .document_drafts
+                    .restore(&session, &self.companion.events)
+            });
+        self.set_document_draft(draft, window, cx);
+        self.refresh_document_fields(None, window, cx);
+    }
+    fn refresh_document_fields(
+        &mut self,
+        saved: Option<WorkflowDocumentKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = &self.companion.session else {
+            return;
         };
-        let spec = match proposal(WorkflowDocumentKind::Spec) {
-            Some(DocumentProposal::Spec(d)) => d,
-            _ => session.spec.clone().unwrap_or(SpecDocument {
-                revision: 1,
-                summary: String::new(),
-                requirements: vec![Criterion {
-                    id: "requirement-1".into(),
-                    text: String::new(),
-                }],
-                in_scope: vec![],
-                out_of_scope: vec![],
-                constraints: vec![],
-                acceptance: vec![Criterion {
-                    id: "acceptance-1".into(),
-                    text: String::new(),
-                }],
-            }),
-        };
-        let plan = match proposal(WorkflowDocumentKind::Plan) {
-            Some(DocumentProposal::Plan(d)) => Some(d),
-            _ => session.plan.clone(),
-        };
-        self.set_document_fields(spec, plan, window, cx);
+        let mut draft = self
+            .companion
+            .documents
+            .as_ref()
+            .map(|d| d.snapshot(cx))
+            .unwrap_or_else(|| DocumentEditorDraft::from_session(session, &self.companion.events));
+        draft.refresh(session, &self.companion.events, saved);
+        self.set_document_draft(draft, window, cx);
+    }
+    fn set_document_draft(
+        &mut self,
+        draft: DocumentEditorDraft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fields = draft
+            .fields
+            .into_iter()
+            .map(|f| Field {
+                key: f.key,
+                label: f.label,
+                input: cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .rows(3)
+                        .default_value(f.value)
+                }),
+            })
+            .collect();
+        self.companion.documents = Some(DocumentFields {
+            spec: draft.spec,
+            plan: draft.plan,
+            fields,
+        });
     }
     fn set_document_fields(
         &mut self,
@@ -186,87 +121,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut fields = vec![
-            field("summary", "Summary", spec.summary.clone(), window, cx),
-            field(
-                "requirements",
-                "Requirements · stable-id | text",
-                criterion_text(&spec.requirements),
-                window,
-                cx,
-            ),
-            field(
-                "in_scope",
-                "In scope · one item per line",
-                spec.in_scope.join("\n"),
-                window,
-                cx,
-            ),
-            field(
-                "out_of_scope",
-                "Out of scope",
-                spec.out_of_scope.join("\n"),
-                window,
-                cx,
-            ),
-            field(
-                "spec_constraints",
-                "Spec constraints",
-                spec.constraints.join("\n"),
-                window,
-                cx,
-            ),
-            field(
-                "acceptance",
-                "Acceptance · stable-id | text",
-                criterion_text(&spec.acceptance),
-                window,
-                cx,
-            ),
-        ];
-        if let Some(plan) = &plan {
-            for (key, label, value) in [
-                ("goal", "Goal", plan.task.goal.clone()),
-                ("analysis", "Analysis", plan.task.analysis.clone()),
-                (
-                    "plan_acceptance",
-                    "Plan acceptance",
-                    plan.task.acceptance.join("\n"),
-                ),
-                (
-                    "plan_constraints",
-                    "Plan constraints",
-                    plan.task.constraints.join("\n"),
-                ),
-                ("unknowns", "Unknowns", plan.task.unknowns.join("\n")),
-            ] {
-                fields.push(field(key, label, value, window, cx));
-            }
-            for (i, step) in plan.task.steps.iter().enumerate() {
-                fields.push(field(
-                    format!("step.{i}.title"),
-                    format!("Step {} title · {}", i + 1, step.id),
-                    step.title.clone(),
-                    window,
-                    cx,
-                ));
-                for (key, label, value) in [
-                    ("why", "Why", step.why.clone()),
-                    ("files", "Files · one path per line", step.files.join("\n")),
-                    ("symbols", "Symbols", step.symbols.join("\n")),
-                    ("languages", "Languages", step.languages.join("\n")),
-                    (
-                        "dependencies",
-                        "Dependencies · stable step IDs, one per line",
-                        step.depends_on.join("\n"),
-                    ),
-                    ("done", "Done conditions", step.done_when.join("\n")),
-                ] {
-                    fields.push(field(format!("step.{i}.{key}"), label, value, window, cx));
-                }
-            }
-        }
-        self.companion.documents = Some(DocumentFields { spec, plan, fields });
+        self.set_document_draft(DocumentEditorDraft::new(spec, plan), window, cx);
     }
     pub(super) fn document_command(
         &mut self,
@@ -340,7 +195,8 @@ impl Workspace {
         })();
         match result {
             Ok(()) => {
-                self.reload_conversation(true, window, cx);
+                self.reload_conversation(false, window, cx);
+                self.refresh_document_fields(Some(kind), window, cx);
                 self.companion.solution = None;
                 self.companion.status = if approve {
                     "The displayed saved version is approved."
@@ -419,7 +275,28 @@ impl Workspace {
             ))
         })();
         match result {
-            Ok((spec, plan)) => self.set_document_fields(spec, Some(plan), window, cx),
+            Ok((spec, plan)) => {
+                let previous = self.companion.documents.as_ref().map(|d| d.snapshot(cx));
+                let mut draft = DocumentEditorDraft::new(spec, Some(plan));
+                if let Some(previous) = previous {
+                    draft.spec = previous.spec;
+                    for field in &mut draft.fields {
+                        if matches!(
+                            field.key.as_str(),
+                            "summary"
+                                | "requirements"
+                                | "in_scope"
+                                | "out_of_scope"
+                                | "spec_constraints"
+                                | "acceptance"
+                        ) && let Some(old) = previous.fields.iter().find(|f| f.key == field.key)
+                        {
+                            field.value = old.value.clone();
+                        }
+                    }
+                }
+                self.set_document_draft(draft, window, cx);
+            }
             Err(e) => self.companion.status = e.to_string(),
         }
         cx.notify();

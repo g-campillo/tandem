@@ -191,6 +191,7 @@ pub fn matching_check_evidence(
                 c.output.chars().take(12000).collect::<String>()
             )},
             verified_failure: c.status == CheckStatus::Failed,
+            benchmark: c.benchmark.as_ref().filter(|m| c.status == CheckStatus::Passed && m.validate().is_ok() && !credential_like(&serde_json::to_string(m).unwrap_or_default())).cloned(),
         })
         .collect()
 }

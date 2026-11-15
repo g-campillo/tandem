@@ -151,6 +151,7 @@ pub struct CompanionUi {
     pub composer: ComposerDraft,
     pub tab: CompanionTab,
     pub documents: Option<DocumentFields>,
+    pub document_drafts: companion_state::SessionDocumentDrafts,
     pub solution: Option<(String, Entity<EditorState>)>,
     pub solution_scope: Option<companion_state::SolutionScope>,
     pub auto_requests: BTreeSet<String>,
@@ -209,6 +210,7 @@ impl CompanionUi {
             composer: ComposerDraft::default(),
             tab: CompanionTab::Conversation,
             documents: None,
+            document_drafts: Default::default(),
             solution: None,
             solution_scope: None,
             auto_requests: BTreeSet::new(),
@@ -301,6 +303,11 @@ impl Workspace {
         let Some(session) = &self.companion.session else {
             return Ok(());
         };
+        if let Some(fields) = &self.companion.documents {
+            self.companion
+                .document_drafts
+                .preserve(&session.id, fields.snapshot(cx));
+        }
         let text = self.companion.question.read(cx).value().to_string();
         if text != self.companion.composer.text {
             let sequence = self.store.lock().unwrap().save_composer_draft(
@@ -357,6 +364,7 @@ impl Workspace {
                     .or_else(|| session.legacy_task.as_ref().map(|l| l.task_id.clone()));
                 self.companion.events.clear();
                 self.companion.session = Some(session);
+                self.companion.documents = None;
                 self.companion.composer = draft.clone();
                 self.companion
                     .question
@@ -627,9 +635,16 @@ impl Workspace {
             )),
             CompanionAction::ImproveClarity
             | CompanionAction::ImproveSpeed
-            | CompanionAction::ImproveBalanced => ConversationIntent::GatedDiscussion(format!(
-                "Evaluate selected code for {action:?}. Preserve behavior, explain preconditions and tradeoffs, and distinguish expected from measured improvements. Keep full implementations hidden. {typed}"
-            )),
+            | CompanionAction::ImproveBalanced => ConversationIntent::Improve {
+                objective: match action {
+                    CompanionAction::ImproveClarity => ImprovementObjective::Clarity,
+                    CompanionAction::ImproveSpeed => ImprovementObjective::Speed,
+                    _ => ImprovementObjective::Balanced,
+                },
+                question: format!(
+                    "Evaluate selected code; preserve behavior, state invariants, preconditions and tradeoffs. Keep current code when change is unjustified. Performance is unmeasured without actual benchmark receipts. Proposals only; keep implementations hidden. {typed}"
+                ),
+            },
             _ if !typed.is_empty() => ConversationIntent::Message(typed),
             CompanionAction::Ask => {
                 self.companion.status = "Enter a message first.".into();
@@ -767,7 +782,6 @@ impl Workspace {
         let progress = self.companion.progress.clone();
         let epoch = self.epoch;
         let project_key = project.key().to_string();
-        let document_fingerprint = self.companion.documents.as_ref().map(|d| d.fingerprint(cx));
         self.companion.status = "Preserving input…".into();
         let operation = cx.background_spawn(async move {
             let mut runner = runner
@@ -795,9 +809,8 @@ impl Workspace {
             let _=weak.update_in(cx,|view,window,cx| {
                 if view.epoch!=epoch || view.project.as_ref().is_none_or(|p|p.key()!=project_key) || view.companion.operation_id.as_ref()!=Some(&id) || view.companion.session.as_ref().is_none_or(|s|s.id!=session_id) { return; }
                 view.companion.busy=false; view.companion.cancel=None; view.companion.capture=None; view.companion.operation_id=None;
-                let document_unchanged=view.companion.documents.as_ref().map(|d|d.fingerprint(cx))==document_fingerprint;
                 let document_proposal=result.as_ref().is_ok_and(|r|matches!(r.outcome,OperationOutcome::Completed{..})&&!r.historical&&matches!(r.response,Some(CompanionResponse::SpecDraft(_)|CompanionResponse::PlanDraft(_))));
-                view.reload_conversation(document_unchanged&&document_proposal,window,cx);
+                view.reload_conversation(document_proposal,window,cx);
                 match result {
                     Ok(result)=>{
                         let completed=matches!(result.outcome,OperationOutcome::Completed{..}) && !result.historical;

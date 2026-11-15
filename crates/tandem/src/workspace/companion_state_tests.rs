@@ -258,3 +258,394 @@ fn pending_answer_draft_is_retained_during_chat_failure_and_new_typing() {
         "My custom answer"
     ));
 }
+
+#[test]
+fn document_refresh_preserves_other_document_and_preexisting_edits() {
+    for (edited, affected) in [
+        (WorkflowDocumentKind::Plan, WorkflowDocumentKind::Spec),
+        (WorkflowDocumentKind::Spec, WorkflowDocumentKind::Plan),
+    ] {
+        for approve in [false, true] {
+            let (_dir, mut store, session) = approved();
+            let mut draft = DocumentEditorDraft::from_session(&session, &[]);
+            let key = if edited == WorkflowDocumentKind::Plan {
+                "goal"
+            } else {
+                "summary"
+            };
+            draft
+                .fields
+                .iter_mut()
+                .find(|f| f.key == key)
+                .unwrap()
+                .value = "Unsaved human work".into();
+            let command = match (affected, approve) {
+                (WorkflowDocumentKind::Spec, true) => SessionCommand::ApproveSpec {
+                    document_ref: session.spec.as_ref().unwrap().document_ref(),
+                    approved_at_ms: now_ms(),
+                },
+                (WorkflowDocumentKind::Plan, true) => SessionCommand::ApprovePlan {
+                    document_ref: session.plan.as_ref().unwrap().document_ref(),
+                    approved_at_ms: now_ms(),
+                },
+                (WorkflowDocumentKind::Spec, false) => {
+                    let mut spec = session.spec.clone().unwrap();
+                    spec.summary = "Changed saved spec".into();
+                    SessionCommand::SaveSpec { spec }
+                }
+                (WorkflowDocumentKind::Plan, false) => {
+                    let mut plan = session.plan.clone().unwrap();
+                    plan.task.goal = "Changed saved plan".into();
+                    SessionCommand::SavePlan { plan }
+                }
+            };
+            let current = store.load_session(&session.id).unwrap().unwrap();
+            let current = store
+                .apply_session_transition(
+                    &session.id,
+                    current.sequence,
+                    &SessionTransition::new(new_id(), vec![command]),
+                )
+                .unwrap();
+            draft.refresh(&current, &[], Some(affected));
+            assert_eq!(
+                draft.fields.iter().find(|f| f.key == key).unwrap().value,
+                "Unsaved human work"
+            );
+        }
+    }
+    let (_dir, store, session) = approved();
+    let mut draft = DocumentEditorDraft::from_session(&session, &[]);
+    draft
+        .fields
+        .iter_mut()
+        .find(|f| f.key == "summary")
+        .unwrap()
+        .value = "Already dirty before request".into();
+    let mut proposal = session.spec.clone().unwrap();
+    proposal.revision += 1;
+    proposal.summary = "Model proposal".into();
+    let mut proposed = session.clone();
+    let event = proposed.propose_spec(proposal, None).unwrap();
+    draft.refresh(&session, &[event], None);
+    assert_eq!(
+        draft.read_spec().unwrap().summary,
+        "Already dirty before request"
+    );
+    let mut sessions = SessionDocumentDrafts::default();
+    sessions.preserve(&session.id, draft);
+    let other = TaskSession::new("/fixture".into()).unwrap();
+    let mut other_draft = sessions.restore(&other, &[]);
+    other_draft
+        .fields
+        .iter_mut()
+        .find(|f| f.key == "requirements")
+        .unwrap()
+        .value = "invalid raw criterion".into();
+    sessions.preserve(&other.id, other_draft);
+    let restored = sessions.restore(&session, &[]);
+    assert_eq!(
+        restored.read_spec().unwrap().summary,
+        "Already dirty before request"
+    );
+    assert_eq!(
+        store.load_session(&session.id).unwrap().unwrap().spec,
+        session.spec
+    );
+    assert_eq!(
+        sessions
+            .restore(&other, &[])
+            .fields
+            .iter()
+            .find(|f| f.key == "requirements")
+            .unwrap()
+            .value,
+        "invalid raw criterion"
+    );
+}
+
+#[test]
+fn identical_proposal_noop_save_restores_exact_saved_refs_and_can_start() {
+    let (_dir, mut store, fixture) = approved();
+    let mut session = store.create_session("/fixture").unwrap();
+    let mut plan = fixture.plan.clone().unwrap();
+    plan.task.id = new_id();
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![
+                    SessionCommand::SaveSpec {
+                        spec: fixture.spec.unwrap(),
+                    },
+                    SessionCommand::SavePlan { plan },
+                ],
+            ),
+        )
+        .unwrap();
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::ApprovePlan {
+                    document_ref: session.plan.as_ref().unwrap().document_ref(),
+                    approved_at_ms: now_ms(),
+                }],
+            ),
+        )
+        .unwrap();
+    let mut proposal = session.spec.clone().unwrap();
+    proposal.revision += 1;
+    let proposed = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::ProposeSpec {
+                    spec: proposal,
+                    run_id: None,
+                }],
+            ),
+        )
+        .unwrap();
+    let events = store.conversation_events(&session.id, None, 100).unwrap();
+    let mut draft = DocumentEditorDraft::from_session(&proposed, &events);
+    let saved = store
+        .apply_session_transition(
+            &session.id,
+            proposed.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveSpec {
+                    spec: draft.read_spec().unwrap(),
+                }],
+            ),
+        )
+        .unwrap();
+    draft.refresh(&saved, &events, Some(WorkflowDocumentKind::Spec));
+    assert!(!draft.dirty(WorkflowDocumentKind::Spec, &saved));
+    assert_eq!(
+        draft.spec.document_ref(),
+        session.spec.as_ref().unwrap().document_ref()
+    );
+    let reloaded = DocumentEditorDraft::from_session(&saved, &events);
+    assert!(!reloaded.dirty(WorkflowDocumentKind::Spec, &saved));
+    let saved = store
+        .apply_session_transition(
+            &session.id,
+            saved.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![
+                    SessionCommand::ApproveSpec {
+                        document_ref: reloaded.spec.document_ref(),
+                        approved_at_ms: now_ms(),
+                    },
+                    SessionCommand::StartImplementation,
+                ],
+            ),
+        )
+        .unwrap();
+    assert!(saved.authorize(WorkflowAction::PrepareAction).is_ok());
+}
+
+fn history_run(response: CompanionResponse) -> ModelRun {
+    let mut run = ModelRun::pending(
+        "/fixture".into(),
+        ModelRequest {
+            model_preference: ModelPreference::Automatic,
+            resolved_model: None,
+            conversation_id: None,
+            guided: None,
+            action: CompanionAction::Review,
+            question: "Historical review".into(),
+            language: "rust".into(),
+            guidance: GuidanceSettings::default().effective("/fixture", "rust", None),
+            task: None,
+            context: ContextSnapshot {
+                id: "capture".into(),
+                project_fingerprint: "snapshot".into(),
+                files: vec![],
+                tree: vec![],
+                omitted: vec![],
+                captured_at_ms: 0,
+                validation_environments: Default::default(),
+            },
+            evidence: vec![ReviewEvidence {
+                id: "check-1".into(),
+                kind: "test".into(),
+                status: "Failed".into(),
+                summary: "Edge case failed".into(),
+                verified_failure: true,
+                benchmark: None,
+            }],
+            prior_decisions: vec![],
+            delegation: None,
+        },
+    );
+    run.response = Some(response);
+    run
+}
+#[test]
+fn historical_review_and_task_definition_include_findings_sources_and_criteria() {
+    let mut run = history_run(CompanionResponse::Review(ReviewResponse {
+        conclusion: ReviewConclusion::NeedsChanges,
+        summary: "Boundary failure".into(),
+        findings: vec![ReviewFinding {
+            category: FindingCategory::DemonstratedProblem,
+            blocking: true,
+            problem: "Empty input fails".into(),
+            why: "Caller accepts empty values".into(),
+            next_action: "Handle the boundary".into(),
+            path: "lib.rs".into(),
+            line: 7,
+            criterion_indices: vec![0],
+            evidence_ids: vec!["check-1".into()],
+        }],
+        evidence_used: vec!["check-1".into()],
+        validation_needed: vec!["Run broader cases".into()],
+        requested_context: vec![],
+    }));
+    run.status = ModelStatus::Completed;
+    let rows = historical_run(&run);
+    let text = rows
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "Historical model assessment",
+        "Empty input fails",
+        "Caller accepts empty values",
+        "Handle the boundary",
+        "Run broader cases",
+        "Historical check evidence",
+        "check-1",
+        "Failed",
+        "Edge case failed",
+    ] {
+        assert!(text.contains(expected), "Missing {expected}");
+    }
+    assert!(
+        rows.iter()
+            .any(|r| r.source.as_ref() == Some(&("lib.rs".into(), 7)))
+    );
+    let (_dir, _store, session) = approved();
+    let mut task = session.plan.unwrap().task;
+    task.constraints = vec!["Preserve interface".into()];
+    task.steps[0].why = "Expose the greeting".into();
+    let text = historical_task(&task)
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "Historical task definition",
+        "Return the greeting",
+        "Implement",
+        "A greeting is available",
+        "Expose the greeting",
+        "Preserve interface",
+    ] {
+        assert!(text.contains(expected), "Missing {expected}");
+    }
+}
+#[test]
+fn historical_improvement_keeps_both_decisions_and_never_exposes_solution_body() {
+    for decision in [
+        ImprovementDecision::KeepCurrent,
+        ImprovementDecision::ProposeChange,
+    ] {
+        let proposal: ImprovementProposal = serde_json::from_value(serde_json::json!({"objective":"Balanced","decision":decision,"summary":"Consider the tradeoff","invariants":["Preserve duplicate behavior"],"preconditions":["Sorted random access"],"expected_complexity":"Expected logarithmic lookup","practical_costs":"Sorting first costs time","tradeoffs":["More memory"],"suggested_steps":["Inspect caller usage"],"evidence_ids":["check-1"],"validation_needed":["No measured benchmark yet"],"benchmark_plan":"Measure repeated and one-shot use"})).unwrap();
+        let rows = historical_run(&history_run(CompanionResponse::Improvement(proposal)));
+        let text = rows
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            format!("{decision:?}"),
+            "Preserve duplicate behavior".into(),
+            "Sorted random access".into(),
+            "Sorting first costs time".into(),
+            "More memory".into(),
+            "Inspect caller usage".into(),
+            "No measured benchmark yet".into(),
+            "Measure repeated and one-shot use".into(),
+            "Historical check evidence".into(),
+        ] {
+            assert!(text.contains(&expected), "Missing {expected}");
+        }
+    }
+    let rows = historical_run(&history_run(CompanionResponse::Solution(
+        SuggestedSolution {
+            summary: "Hidden example".into(),
+            language: "rust".into(),
+            path: "lib.rs".into(),
+            code: "PRIVATE_SOLUTION_BODY".into(),
+            sections: vec![],
+            tradeoffs: vec![],
+        },
+    )));
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.text.contains("PRIVATE_SOLUTION_BODY"))
+    );
+}
+
+#[test]
+fn clean_initial_document_accepts_a_proposal_and_history_shows_actual_measurements() {
+    let mut session = TaskSession::new("/fixture".into()).unwrap();
+    let mut draft = DocumentEditorDraft::from_session(&session, &[]);
+    let (_dir, _store, fixture) = approved();
+    let event = session.propose_spec(fixture.spec.unwrap(), None).unwrap();
+    draft.refresh(&session, &[event], None);
+    assert_eq!(draft.read_spec().unwrap().summary, "Add a greeting");
+    assert!(session.spec.is_none());
+    let proposal = ImprovementProposal {
+        objective: ImprovementObjective::Speed,
+        decision: ImprovementDecision::ProposeChange,
+        summary: "Measured on supplied cases only".into(),
+        invariants: vec!["Preserve outputs".into()],
+        preconditions: vec![],
+        expected_complexity: "Constant".into(),
+        practical_costs: "No allocation".into(),
+        tradeoffs: vec![],
+        suggested_steps: vec![],
+        evidence_ids: vec!["check-1".into()],
+        validation_needed: vec![],
+        benchmark_plan: "Broaden input sizes".into(),
+    };
+    let mut run = history_run(CompanionResponse::Improvement(proposal));
+    run.request.evidence[0].status = "Passed".into();
+    run.request.evidence[0].benchmark = Some(BenchmarkMeasurement {
+        method: "perf_counter_ns; alternating order; deepcopy/setup excluded".into(),
+        warmups: 2,
+        samples: 7,
+        cases: vec![BenchmarkCase {
+            label: "Representative inputs".into(),
+            baseline_ns: vec![100; 7],
+            candidate_ns: vec![25; 7],
+        }],
+    });
+    let text = historical_run(&run)
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "Historical check evidence",
+        "Measured on this snapshot only",
+        "Representative inputs",
+        "median 25",
+        "7 samples",
+    ] {
+        assert!(text.contains(expected), "Missing {expected}");
+    }
+}

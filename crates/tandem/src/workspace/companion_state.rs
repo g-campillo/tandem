@@ -118,3 +118,11 @@ pub fn solution_visible(
 pub fn clear_submitted_input(completed: bool, submitted: Option<&str>, current: &str) -> bool {
     completed && submitted.is_some_and(|submitted| current.trim() == submitted)
 }
+
+#[path = "document_drafts.rs"]
+mod document_drafts;
+pub use document_drafts::{DocumentEditorDraft, SessionDocumentDrafts};
+
+#[path = "companion_history.rs"]
+mod companion_history;
+pub use companion_history::{HistoricalRow, historical_run, historical_task};

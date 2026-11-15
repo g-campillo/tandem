@@ -2390,3 +2390,232 @@ fn explicit_hint_and_improvement_discussion_revalidate_implementation_authority(
     assert!(matches!(stale.outcome, OperationOutcome::Failed { .. }));
     assert!(!f.events().iter().any(|e|matches!(&e.payload,ConversationPayload::AssistantMessage{text} if text=="A historical improvement proposal")));
 }
+
+fn improvement(objective: ImprovementObjective) -> Value {
+    json!({"objective":objective,"decision":"KeepCurrent","summary":"Keep the current straightforward code. Performance is unmeasured.","invariants":["Preserve the value and public interface"],"preconditions":["No changed caller behavior"],"expected_complexity":"Constant work","practical_costs":"No extra allocation","tradeoffs":["Readability outweighs speculative gains"],"suggested_steps":[],"evidence_ids":[],"validation_needed":["Run the relevant tests"],"benchmark_plan":"Measure representative repeated calls before changing this code"})
+}
+#[test]
+fn structured_improvement_uses_selected_objective_and_durable_workflow_gates() {
+    for objective in [
+        ImprovementObjective::Clarity,
+        ImprovementObjective::Speed,
+        ImprovementObjective::Balanced,
+    ] {
+        let mut f = Fixture::new();
+        let mut runner = f.runner();
+        let intent = || ConversationIntent::Improve {
+            objective,
+            question: "Evaluate selected code".into(),
+        };
+        let blocked = f.run(&mut runner, "denied-improvement", intent());
+        assert!(matches!(blocked.outcome, OperationOutcome::Failed { .. }));
+        assert_eq!(f.peer.lock().unwrap().turns, 0);
+        f.approved();
+        let state = f.state();
+        f.dynamic(move |params| {
+            assert!(
+                params["input"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("APPLICATION_ACTION: Improve{objective:?}"))
+            );
+            assert!(guided(params).workflow.is_some());
+            improvement(objective)
+        });
+        let result = f.run(&mut runner, "approved-improvement", intent());
+        completed(&result);
+        assert!(matches!(
+            result.response,
+            Some(CompanionResponse::Improvement(ImprovementProposal {
+                decision: ImprovementDecision::KeepCurrent,
+                ..
+            }))
+        ));
+        assert_eq!(f.state().spec, state.spec);
+        assert_eq!(
+            f.state().plan.as_ref().unwrap().document_ref(),
+            state.plan.unwrap().document_ref()
+        );
+        assert!(f.events().iter().any(|e| matches!(&e.payload, ConversationPayload::AssistantMessage {text} if text.contains("read-only improvement"))));
+        let store = f.store.clone();
+        let session = f.session.clone();
+        f.dynamic(move |_| {
+            let mut store = store.lock().unwrap();
+            let state = store.load_session(&session).unwrap().unwrap();
+            let mut spec = state.spec.unwrap();
+            spec.summary = "Changed during improvement".into();
+            store
+                .apply_session_transition(
+                    &session,
+                    state.sequence,
+                    &SessionTransition::new(new_id(), vec![SessionCommand::SaveSpec { spec }]),
+                )
+                .unwrap();
+            improvement(objective)
+        });
+        let stale = f.run(&mut runner, "stale-structured-improvement", intent());
+        assert!(matches!(stale.outcome, OperationOutcome::Failed { .. }));
+        assert!(stale.response.is_none());
+    }
+}
+#[test]
+fn structured_improvement_rejects_forged_or_unsupported_measurements() {
+    for forged in [false, true] {
+        let mut f = Fixture::new();
+        let mut runner = f.runner();
+        f.approved();
+        let mut value = improvement(ImprovementObjective::Speed);
+        if forged {
+            value["evidence_ids"] = json!(["invented-benchmark"]);
+        } else {
+            value["summary"] = json!("Measured 4x faster on this project.");
+        }
+        f.reply(value);
+        let result = f.run(
+            &mut runner,
+            "forged-improvement",
+            ConversationIntent::Improve {
+                objective: ImprovementObjective::Speed,
+                question: "Evaluate speed".into(),
+            },
+        );
+        assert!(matches!(result.outcome, OperationOutcome::Failed { .. }));
+        assert!(result.response.is_none());
+    }
+}
+
+struct BenchmarkCapture<'a>(&'a mut ProjectConversationCapture);
+impl ConversationCapture for BenchmarkCapture<'_> {
+    fn capture(
+        &mut self,
+        session: &TaskSession,
+        action: CompanionAction,
+        language: &str,
+        guidance: &EffectiveGuidance,
+        checks: &[CheckRecord],
+        cancel: &AtomicBool,
+    ) -> Result<CapturedConversation> {
+        let mut captured = self
+            .0
+            .capture(session, action, language, guidance, checks, cancel)?;
+        captured
+            .context
+            .validation_environments
+            .insert("benchmark".into(), "recipe-v1".into());
+        Ok(captured)
+    }
+}
+#[test]
+fn structured_improvement_measurements_require_current_passed_valid_host_receipts() {
+    for mode in [
+        "current",
+        "stale",
+        "failed",
+        "incomplete",
+        "invalid",
+        "forged-output",
+    ] {
+        let mut f = Fixture::new();
+        let mut runner = f.runner();
+        f.approved();
+        let state = f.state();
+        let guidance = GuidanceSettings::default().effective(f.capture.project.key(), "rust", None);
+        let captured = f
+            .capture
+            .capture(
+                &state,
+                CompanionAction::ImproveSpeed,
+                "rust",
+                &guidance,
+                &[],
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let mut check = CheckRecord::pending(
+            state.project.clone(),
+            "benchmark".into(),
+            "recipe-v1".into(),
+        );
+        check.snapshot = Some(SnapshotManifest {
+            id: if mode == "stale" {
+                "old-snapshot".into()
+            } else {
+                captured.context.project_fingerprint
+            },
+            project: state.project.clone(),
+            files: vec![],
+            omitted: vec![],
+            total_bytes: 0,
+            captured_at_ms: now_ms(),
+        });
+        check.snapshot_unchanged = Some(true);
+        let mut measurement = BenchmarkMeasurement {
+            method: "perf_counter_ns; alternating order; deepcopy/setup excluded".into(),
+            warmups: 2,
+            samples: 7,
+            cases: vec![BenchmarkCase {
+                label: "repeated representative calls".into(),
+                baseline_ns: vec![100; 7],
+                candidate_ns: vec![25; 7],
+            }],
+        };
+        if mode == "invalid" {
+            measurement.samples = 1;
+        }
+        if mode == "forged-output" {
+            check.output = measurement.summary();
+        } else {
+            check.benchmark = Some(measurement);
+        }
+        check.finish(
+            if mode == "failed" {
+                CheckStatus::Failed
+            } else {
+                CheckStatus::Passed
+            },
+            "Benchmark receipt",
+        );
+        if mode == "incomplete" {
+            check.completed_at_ms = None;
+        }
+        f.store.lock().unwrap().save_check(&check).unwrap();
+        let check_id = check.id.clone();
+        f.dynamic(move |_| {
+            let mut value = improvement(ImprovementObjective::Speed);
+            value["summary"] = json!("Measured 4x faster on the captured representative cases.");
+            value["evidence_ids"] = json!([check_id]);
+            value
+        });
+        let input = f.input(
+            "measured-improvement",
+            ConversationIntent::Improve {
+                objective: ImprovementObjective::Speed,
+                question: "Evaluate current performance".into(),
+            },
+        );
+        let result = runner
+            .run(
+                input,
+                &mut BenchmarkCapture(&mut f.capture),
+                None,
+                Arc::new(AtomicBool::new(false)),
+                |_| Ok(()),
+            )
+            .unwrap();
+        if mode == "current" {
+            completed(&result);
+            assert!(matches!(
+                result.response,
+                Some(CompanionResponse::Improvement(_))
+            ));
+            let runs = f.store.lock().unwrap().model_runs(&state.project).unwrap();
+            assert!(runs[0].request.evidence[0].benchmark.is_some());
+        } else {
+            assert!(
+                matches!(result.outcome, OperationOutcome::Failed { .. }),
+                "{mode}"
+            );
+            assert!(result.response.is_none(), "{mode}");
+        }
+    }
+}
