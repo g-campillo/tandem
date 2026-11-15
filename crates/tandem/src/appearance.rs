@@ -76,6 +76,27 @@ pub fn path_button(button: Button, label: impl Into<SharedString>) -> Button {
         )
 }
 
+/// Content-sized actions wrap their label within a narrow utility viewport.
+pub fn wrapping_button(button: Button, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    button
+        .small()
+        .h_auto()
+        .min_h(px(28.))
+        .max_w_full()
+        .min_w_0()
+        .py_1()
+        .rounded(px(6.))
+        .accessibility_label(label.clone())
+        .child(
+            div()
+                .min_w_0()
+                .whitespace_normal()
+                .text_size(px(13.))
+                .child(label),
+        )
+}
+
 /// Shared utility-panel typography and spacing. Content stays opaque beneath
 /// the independently tinted navigation header.
 pub fn panel_body(cx: &App) -> Div {

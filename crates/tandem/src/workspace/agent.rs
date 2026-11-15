@@ -1,5 +1,9 @@
 use super::panels::note;
 use super::*;
+use crate::appearance::{
+    navigation_button, palette, panel_body, panel_heading, panel_metadata, panel_warning,
+    path_button, wrapping_button,
+};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::*;
@@ -500,27 +504,30 @@ impl Workspace {
         cx.notify();
     }
     pub(super) fn agent_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx.theme().mode);
         let busy = self.agent.busy
             || self.companion.busy
             || self.dev.check_cancel.is_some()
             || self.loading;
         let selected = self.agent.selected();
-        let mut body=div().v_flex().gap_3().child(note(if self.agent.busy{"Agent takeover · isolated copy"}else{"Companion · AI edits off"})).child(note(self.agent.status.clone()))
-            .when(self.agent.busy,|d|d.child(Button::new("stop-agent").label("Stop & Return Control").on_click(cx.listener(|this,_,_,cx|{if let Some(c)=&this.agent.cancel{c.store(true,Ordering::Relaxed);}this.agent.status="Stop requested. Completed actions are retained; waiting for the current operation to settle.".into();cx.notify();}))))
-            .child(note("Delegate an accepted step or feature. The agent can create or modify only the exact paths below; no deletions, renames, commits, installation or network access."))
-            .child(div().h_flex().gap_1().children([(DelegationScope::Step,"Current Step"),(DelegationScope::Feature,"Whole Feature")].into_iter().map(|(scope,label)|Button::new(label).label(label).disabled(busy).when(self.agent.scope==scope,|b|b.primary()).on_click(cx.listener(move|this,_,_,cx|{this.agent.scope=scope;cx.notify();})))))
+        let mut body=panel_body(cx).child(panel_heading(note(if self.agent.busy{"Agent takeover · isolated copy"}else{"Companion · AI edits off"}))).child(panel_metadata(note(self.agent.status.clone()),cx))
+            .when(self.agent.busy,|d|d.child(path_button(Button::new("stop-agent"), "Stop & Return Control").danger().on_click(cx.listener(|this,_,_,cx|{if let Some(c)=&this.agent.cancel{c.store(true,Ordering::Relaxed);}this.agent.status="Stop requested. Completed actions are retained; waiting for the current operation to settle.".into();cx.notify();}))))
+            .child(panel_warning(note("Delegate an accepted step or feature. The agent can create or modify only the exact paths below; no deletions, renames, commits, installation or network access."),cx))
+            .child(div().h_flex().flex_wrap().min_w_0().gap_2().children([(DelegationScope::Step,"Current Step"),(DelegationScope::Feature,"Whole Feature")].into_iter().map(|(scope,label)|navigation_button(wrapping_button(Button::new(label), label),self.agent.scope==scope,cx).disabled(busy).on_click(cx.listener(move|this,_,_,cx|{this.agent.scope=scope;cx.notify();})))))
             .child(Textarea::new(&self.agent.paths).aria_label("Delegated source paths"))
             .child(note("Empty paths use the selected step/feature files. Preparation captures current buffers, including unsaved work. Editing these fields does not change an already prepared grant; prepare again to change its scope."))
-            .children(self.dev.recipes.iter().map(|r|{let id=r.id.clone();let selected=self.agent.checks.contains(&id);Button::new(SharedString::from(format!("agent-check:{id}"))).label(format!("{} {}",if selected{"✓"}else{"○"},r.title)).disabled(busy).on_click(cx.listener(move|this,_,_,cx|{if !this.agent.checks.remove(&id){this.agent.checks.insert(id.clone());}cx.notify();}))}))
-            .child(Button::new("prepare-agent").label("Prepare Delegation Scope").disabled(busy||self.active_task().is_none()).on_click(cx.listener(|this,_,_,cx|this.prepare_agent(cx))));
+            .children(self.dev.recipes.iter().map(|r|{let id=r.id.clone();let selected=self.agent.checks.contains(&id);navigation_button(path_button(Button::new(SharedString::from(format!("agent-check:{id}"))), format!("{} {}",if selected{"✓"}else{"○"},r.title)),selected,cx).disabled(busy).on_click(cx.listener(move|this,_,_,cx|{if !this.agent.checks.remove(&id){this.agent.checks.insert(id.clone());}cx.notify();}))}))
+            .child(path_button(Button::new("prepare-agent"), "Prepare Delegation Scope").primary().disabled(busy||self.active_task().is_none()).on_click(cx.listener(|this,_,_,cx|this.prepare_agent(cx))));
         if let Some(run) = selected {
-            body=body.child(note(format!("{:?} · {:?} · round {}/{} · plan {}",run.status,run.grant.scope,run.round,run.grant.max_rounds,run.grant.plan_revision)))
-                .child(note(run.grant.objective.clone())).child(note(format!("Exact writable paths: {}",run.grant.paths.join(", "))))
+            body=body.child(panel_heading(note(format!("{:?} · {:?} · round {}/{} · plan {}",run.status,run.grant.scope,run.round,run.grant.max_rounds,run.grant.plan_revision))).when(run.status==AgentStatus::Failed,|d|d.text_color(p.error)).mt_3().pt_3().border_t_1().border_color(cx.theme().border))
+                .child(div().font_semibold().child(note(run.grant.objective.clone()))).child(note(format!("Exact writable paths: {}",run.grant.paths.join(", "))))
                 .child(note(format!("Allowed checks: {}",if run.grant.checks.is_empty(){"None (unvalidated handoff)".into()}else{run.grant.checks.keys().cloned().collect::<Vec<_>>().join(", ")})))
-                .child(note("Checks read an isolated snapshot and approved tool resources; only their artifact directory is writable. Original project access and network are denied. Four rounds maximum; 16 paths / 256 KiB source."));
+                .child(panel_warning(note("Checks read an isolated snapshot and approved tool resources; only their artifact directory is writable. Original project access and network are denied. Four rounds maximum; 16 paths / 256 KiB source."),cx));
             for (i, id) in run.grant.checks.keys().enumerate() {
                 if let Some(r) = self.dev.recipes.iter().find(|r| &r.id == id) {
-                    body = body.child(div().id(("agent-envelope", i)).child(note(format!(
+                    body = body.child(super::panels::code_note(
+                        ("agent-envelope", i),
+                        format!(
                             "Command: {} · {} · read resources: {}",
                             r.argv.join(" "),
                             r.version,
@@ -529,7 +536,9 @@ impl Workspace {
                                 .map(|p| p.display().to_string())
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        ))));
+                        ),
+                        cx,
+                    ));
                 }
             }
             body = body
@@ -537,10 +546,13 @@ impl Workspace {
                     run.status == AgentStatus::Prepared && run.grant.confirmed_at_ms == 0,
                     |d| {
                         d.child(
-                            Button::new("authorize-agent")
-                                .label("Authorize Scope & Start Takeover")
-                                .disabled(busy)
-                                .on_click(cx.listener(|this, _, _, cx| this.start_agent(cx))),
+                            path_button(
+                                Button::new("authorize-agent"),
+                                "Authorize Scope & Start Takeover",
+                            )
+                            .primary()
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_agent(cx))),
                         )
                     },
                 )
@@ -549,36 +561,33 @@ impl Workspace {
                     run.changed_paths().join(", ")
                 )))
                 .children(
-                    run.activity
-                        .iter()
-                        .rev()
-                        .take(8)
-                        .enumerate()
-                        .map(|(i, s)| div().id(("agent-activity", i)).child(note(s.clone()))),
+                    run.activity.iter().rev().take(8).enumerate().map(|(i, s)| {
+                        panel_metadata(note(s.clone()), cx).id(("agent-activity", i))
+                    }),
                 )
                 .children(run.limitations.iter().enumerate().map(|(i, s)| {
-                    div()
-                        .id(("agent-limit", i))
-                        .child(note(format!("Limitation: {s}")))
+                    panel_warning(note(format!("Limitation: {s}")), cx).id(("agent-limit", i))
                 }))
                 .child(note(format!("Handoff: {}", run.next_action)))
                 .child(
-                    Button::new("staged-agent-diff")
-                        .label("View / Refresh Captured Staged Diff")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.show_staged_diff(window, cx)),
-                        ),
+                    path_button(
+                        Button::new("staged-agent-diff"),
+                        "View / Refresh Captured Staged Diff",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.show_staged_diff(window, cx))),
                 )
                 .when(
                     !run.status.active() && run.status != AgentStatus::Prepared,
                     |d| {
                         d.child(
-                            Button::new("preview-agent-import")
-                                .label("Inspect Diff & Preview Import")
-                                .disabled(busy)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.agent_preview(None, window, cx)
-                                })),
+                            path_button(
+                                Button::new("preview-agent-import"),
+                                "Inspect Diff & Preview Import",
+                            )
+                            .disabled(busy)
+                            .on_click(cx.listener(
+                                |this, _, window, cx| this.agent_preview(None, window, cx),
+                            )),
                         )
                     },
                 );
@@ -590,47 +599,56 @@ impl Workspace {
             .is_some_and(|p| p.transaction.is_some())
         {
             body = body.child(
-                Button::new("commit-agent-import")
-                    .label(if self.agent.undo.is_some() {
+                path_button(
+                    Button::new("commit-agent-import"),
+                    if self.agent.undo.is_some() {
                         "Confirm Undo in Buffers"
                     } else {
                         "Import Reviewed Changes to Buffers"
-                    })
-                    .disabled(busy)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.commit_agent_import(window, cx)),
-                    ),
+                    },
+                )
+                .primary()
+                .disabled(busy)
+                .on_click(cx.listener(|this, _, window, cx| this.commit_agent_import(window, cx))),
             );
         }
         for (i, group) in self.agent.imports.iter().take(6).enumerate() {
             let id = group.id.clone();
             body = body.child(
-                Button::new(("undo-agent-import", i))
-                    .label(format!(
+                path_button(
+                    Button::new(("undo-agent-import", i)),
+                    format!(
                         "Undo Agent Import · {:?} · {} files",
                         group.status,
                         group.files.len()
-                    ))
-                    .disabled(busy || group.status != ImportStatus::Applied)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.agent_preview(Some(id.clone()), window, cx)
-                    })),
+                    ),
+                )
+                .disabled(busy || group.status != ImportStatus::Applied)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.agent_preview(Some(id.clone()), window, cx)
+                })),
             );
         }
         body.children(self.agent.runs.iter().take(8).enumerate().map(|(i, run)| {
             let id = run.id.clone();
-            Button::new(("agent-history", i))
-                .label(format!(
-                    "{:?} · {}",
-                    run.status,
-                    run.grant.objective.chars().take(48).collect::<String>()
-                ))
-                .disabled(busy)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.agent.selected = Some(id.clone());
-                    this.agent.preview = None;
-                    cx.notify();
-                }))
+            navigation_button(
+                path_button(
+                    Button::new(("agent-history", i)),
+                    format!(
+                        "{:?} · {}",
+                        run.status,
+                        run.grant.objective.chars().take(48).collect::<String>()
+                    ),
+                ),
+                self.agent.selected.as_ref() == Some(&run.id),
+                cx,
+            )
+            .disabled(busy)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.agent.selected = Some(id.clone());
+                this.agent.preview = None;
+                cx.notify();
+            }))
         }))
         .into_any_element()
     }
