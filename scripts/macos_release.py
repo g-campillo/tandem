@@ -120,7 +120,7 @@ def package(binary, notices, destination, release_id):
         write_json(resources / 'release-manifest.json', {
             'schema': 1, 'product': 'Tandem', 'release_id': release_id,
             'target': 'aarch64-apple-darwin', 'app_version': '0.1.0',
-            'codex_version': '0.169.0', 'database_schema': 4,
+            'codex_version': '0.169.0', 'database_schema': 5,
             'signature': 'ad-hoc', 'notarized': False, 'files': files,
             'source_binary_sha256':digest(binary),
             'executable_integrity':'verified by the code signature; excluded from the resource manifest to avoid a circular seal',

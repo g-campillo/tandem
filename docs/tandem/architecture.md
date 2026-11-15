@@ -1,8 +1,24 @@
 # Architecture and technical research
 
-Status: proposed. Research date: 2026-11-13. [Plan entry point](README.md).
+Status: implemented guided-companion boundaries below, with historical architecture research dated 2026-11-13 retained in the numbered sections. [Plan entry point](README.md).
 
-Evidence labels used below: **observed** means a local read-only inspection; **documented** means upstream documentation or source; **proposed** means Tandem's design; **gate** means behavior to test after approval. No runtime integration, performance, or sandbox behavior was tested in this phase.
+Evidence labels in the historical research: **observed** means a local read-only inspection; **documented** means upstream documentation or source; **proposed** means the design at that time; **gate** means a then-future check. No runtime integration, performance or sandbox behavior was tested during that research phase. Current D/S/R/partial M results are in [guided-companion.md](guided-companion.md) and [verification.md](verification.md).
+
+## Implemented guided-companion boundaries
+
+`TaskSession` is the durable authority, created before any model request. It owns the conversation, separately versioned Spec and Plan, exact human approvals, execution generation, explicit Start, pending clarification and walkthroughs. The legacy task table is a compatibility projection for outline/progress; chat, model proposals and historical manual completion cannot create approval or execution authority. Legacy adoption creates a linked session with missing documents/approvals to resolve explicitly.
+
+A `DocumentRef` binds revision/hash. The Plan definition includes its exact Spec reference. Saving changed Spec invalidates both approvals; saving changed Plan invalidates its own; no-op saves preserve approvals. Storage revalidates current optimistic sequence and workflow binding on transitions. Asynchronous requests retain session/task/document/generation bindings and cannot publish after those change.
+
+One walkthrough action is active at a time. Review binds immutable source/overlay snapshots, relevant journal state, exact check receipts and current attachments. A current passing assessment enables an atomic, exactly-once explicit Next; it does not advance itself. Final completion covers the full Spec. Historical actions/reviews remain readable without being relabelled current. User-attached command output retains unauthenticated provenance; it is not equivalent to an isolated check receipt.
+
+The host research broker bounds local reads and fixed inspection recipes without granting model filesystem/shell authority. A separate public worker sees only a screened generic brief and public results, with a snapshotted selected model. Bounded anonymous HTTPS retrieval excludes private addresses, credentials and unsupported content; local code/documents/transcript never enter that worker. Returned sources remain untrusted. Research cannot approve, edit, authorize checks or Takeover. The HTTP/TLS/HTML parsing dependency closure enters the existing locked notice inventory.
+
+The global model preference is Automatic or an explicit live catalog identity. Automatic uses the unique account default and supported default effort per operation. Missing explicit choices remain selected and block work. One operation guard owns loading/phase/cancel cleanup and stale-result rejection; the picker is disabled through all active AI work. Default solutions remain hidden, including ordinary and accessibility presentation. An explicit Reveal or standing AutomaticPreview preference targets only the current approved/started action/language and grants no edits.
+
+Ordinary editing, terminal use and separately authorized offline checks are independent of this lifecycle. Takeover requires the current workflow binding plus its existing exact path/check grant at preparation, dispatch and import; imported buffers still need action review. Document revisions revoke old execution authority while retaining staged work.
+
+Schema 5 persists sessions/documents/transitions and retains pre-migration backups. Store refuses future schemas without rewriting their data. SQLite closes before the final Store lock explicitly unlocks, so a child inheriting the descriptor cannot strand a released profile lock; exclusive nonblocking acquisition still excludes live owners. The exact earlier intermittent child's identity is unknown; the controlled regression and current test results are recorded separately from historical failures. Install/rollback switches immutable bundles without downgrading profile data.
 
 ## 1. Ranked application choices
 
@@ -64,7 +80,7 @@ flowchart LR
 | Desktop shell | Windows, menus, focus, shortcuts, accessibility, file dialogs and status; never interprets model text as a command |
 | Buffer/workspace layer | File identities, edit revisions, save baselines, dirty recovery, tabs, watch reconciliation and undo transactions. GPUI editor is the sole mutable text owner per buffer; domain receives immutable snapshots, not a second competing text model |
 | Language manager | Server lifecycle, document sync, UTF-8/UTF-16 positions, capabilities, cancellation, diagnostics and provider adapters; no assumption that a parser supplies LSP |
-| Task coordinator | Acceptance criteria, versioned plans, dependencies, transitions and decision history; conversation is supporting evidence, not authoritative state |
+| Task coordinator | Durable TaskSession, versioned Spec/Plan and human approvals, Start, action reviews and exactly-once Next; ordinary conversation grants no implementation authority |
 | Guidance resolver | Per-field inheritance, effective settings and provenance; no permission decisions |
 | Review/improvement service | Snapshot capture, structured result validation, applicability checks and evidence links; cannot mark checks passed from model assertions |
 | Codex adapter | Wire framing, request IDs, streaming, auth state, thread IDs, typed errors and runtime version; no direct UI mutation |
@@ -174,8 +190,8 @@ Use UUIDs or equivalent stable opaque IDs and integer revisions. Content hashes 
 | --- | --- |
 | Project | ID, canonical root identity, display path, trust state, language/tool settings, ignore rules |
 | Buffer | ID, project-relative path/URI, encoding/newline metadata, monotonic edit revision, saved content hash, dirty/recovery reference |
-| Task / PlanRevision | Goal, context summary, constraints, unknowns, acceptance criteria with IDs, steps/dependencies, status, decisions, revision |
-| Step | Responsibility, rationale, files/symbols, dependency IDs, completion criteria, status, temporary preferences |
+| TaskSession / SpecDocument / PlanDocument | Persistent conversation ID, sequence, exact revision/hash refs, stable criteria, plan-to-spec binding, human approvals, execution generation and explicit Start |
+| Step / Walkthrough / ActionReview | High-level dependencies, one active atomic action, exact target/evidence, immutable review binding, explicit exactly-once Next and completed history |
 | GuidanceSettings | Optional fields per layer; resolved value plus origin per field |
 | ContextSnapshot | ID, path/hash/buffer-revision manifest, selected excerpts, exclusions, acceptance/plan revision and tool environment |
 | ReviewResult / Finding | Snapshot ID, criterion links, category, blocking flag, location, problem, rationale, evidence references, smallest next action, applicability |
@@ -204,13 +220,13 @@ Example review data is Tandem's proposed domain contract, not a claimed Codex AP
 }
 ```
 
-Separate review conclusion, validation status and user completion. “No AI findings” does not equal “tests passed.” A user can complete with an explicit unresolved-evidence note; preserve that distinction. Editing relevant inputs invalidates attached evidence and completion confidence without silently rewriting task history. Dependents become “needs reassessment” when an interface or acceptance criterion changes.
+Separate model assessment, authenticated validation and user-attached evidence. “No AI findings” does not equal “tests passed.” In the implemented guided lifecycle, only a current passing action review enables explicit Next; there is no manual completion bypass. Editing relevant inputs invalidates current review applicability without rewriting historical results. Changed definitions reopen approvals and invalidate their former workflow bindings.
 
 ## 7. Context, language tooling and persistence
 
 ### Context selection
 
-Start with the task description, accepted plan, relevant open buffers, selected symbol, imports/callers and test/config excerpts. Use file-tree metadata, text search and LSP navigation to expand context. No embeddings or entire-repository upload is needed initially. Maintain a per-thread manifest of sent hashes; send changed excerpts and deletion/rename notices, not unchanged files every turn. After reconnect/compaction, send a compact accepted-plan summary and fresh manifest; never assume model context still matches disk.
+Start with the persistent conversation, current saved/proposed documents for discussion and drafting, or approved Spec/Plan and active action for implementation, plus relevant open buffers, selected symbol, imports/callers and test/config excerpts. Use file-tree metadata, text search and LSP navigation to expand context. No embeddings or entire-repository upload is needed initially. Maintain a per-thread manifest of sent hashes; send changed excerpts and deletion/rename notices, not unchanged files every turn. After reconnect/compaction, send a compact accepted-plan summary and fresh manifest; never assume model context still matches disk.
 
 When more context is needed, a structured context request returns to the task coordinator, which filters/materializes the requested paths and continues the turn sequence. This can cost an additional round trip. It does not expose arbitrary live-filesystem access or require the experimental dynamic-tool API in v0.1.
 

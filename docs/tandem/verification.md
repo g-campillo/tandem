@@ -15,6 +15,16 @@ Use focused tests for meaningful behavior. Test domain rules deterministically; 
 
 Each receipt records fixture, code/runtime versions, OS/hardware where relevant, expected behavior, actual result and unresolved limitations. Redact credentials and private source. Tests that need billing/auth are explicit opt-in suites; normal deterministic tests do not consume subscription quota.
 
+## Current guided-companion evidence
+
+At accepted Task 10 source `dd17ad88b2165672d320dc6c9b29509f550dfaa2`, the full workspace passed 298 tests with 2 ignored; strict Clippy, format, build, all-target checks and three concurrent 23-test journey runs passed. The controlled inherited-descriptor lock regression failed before the fix and passed after explicit Store unlock on final drop; it verifies exclusion and reacquisition while a child remains alive. Historical intermittent fixture failures remain retained, with their exact child/source unknown. They are not classified as pre-existing. See [the detailed current lock status](guided-companion.md#observed-real-results-on-2026-11-15); the sanitized JSON receipt retains its earlier count/status snapshot.
+
+The completed real suite used 121 reservations: one probe, Rust 52 and Python 68, within the same ledger's explicit amended caps 4/56/72, total 132. Rust's original four-step and Python's original two-step plans completed every action review, explicit Next and final full-spec validation. Wrong/missing evidence blocked and actual isolated checks accepted the alternatives. Python retained its original seven-case oracle/caller/manifest plus a nine-case snapshot-only supplemental oracle; five actual check receipts contain one failure and four passes. No Reveal, provider/API fallback or native model turn occurred. Full private receipts remain under `.tandem-local/guided-companion/approved-suite/`; these are programmatic human fixture choices, not native usability proof.
+
+Earlier actual hosted search/official source retrieval, 12 OS inspection boundaries and child/grandchild cancellation passed with preserved limitations. They are existing R evidence, not release reruns. Partial M evidence includes document save/exact approval/no-op, questions/custom multiline input, unavailable model/gates, Rust/Python disk save, narrow layout and action/composer restart. Spoken VoiceOver, native output attachment/review/Next, busy picker, all live cancellation phases, long-panel scrolling and full native journeys remain unverified. The [native checklist](guided-companion.md#disposable-native-seed-and-manual-checklist) records observations separately from targets.
+
+A concrete release additionally needs the existing Python release tests, release build, current-lock notice collection with zero unresolved entries, signed inventory verification and exact bundled runtime status. Preserve its committed source identity and private receipts. Launch only that bundle with disposable project/state paths for model/conversation/document/action presentation and offline editing checks; report the actual scenarios observed. Packaging does not install or authorize another real subscription suite. See [the reproducible release commands](local-use.md#build-and-verify-another-local-release).
+
 ## Required scenarios
 
 | ID / gate | Scenario and decisive assertion | Class |
