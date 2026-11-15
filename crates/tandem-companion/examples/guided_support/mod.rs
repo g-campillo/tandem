@@ -12,6 +12,7 @@ use std::{
 use tandem_companion::*;
 use tandem_core::*;
 pub mod sandbox;
+pub mod supplemental;
 
 pub fn require_subscription_usage(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<()> {
     ensure!(
@@ -30,6 +31,8 @@ struct Ledger {
     suites: BTreeMap<String, String>,
     #[serde(default)]
     amendments: Vec<BudgetAmendment>,
+    #[serde(default)]
+    model_selections: Vec<ModelSelectionAmendment>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,6 +79,37 @@ struct BudgetAuthorization {
 #[serde(deny_unknown_fields)]
 struct BudgetAmendment {
     authorization: BudgetAuthorization,
+    authorization_hash: String,
+    reservation_prefix_hash: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSelectionAuthorization {
+    version: u32,
+    authorized_at_utc: String,
+    user_message: String,
+    interpretation: String,
+    repo: PathBuf,
+    plan_path: PathBuf,
+    suite_directory: PathBuf,
+    ledger_path: PathBuf,
+    budget_authorization_path: PathBuf,
+    selected_model: AuthorizedModel,
+    consumed_at_authorization: Caps,
+    authorized_caps: Caps,
+    scope: String,
+    constraints: Vec<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizedModel {
+    catalog_id: String,
+    effort: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSelectionAmendment {
+    authorization: ModelSelectionAuthorization,
     authorization_hash: String,
     reservation_prefix_hash: String,
 }
@@ -246,6 +280,104 @@ impl TurnBudget {
     }
     pub fn counts(&self) -> BTreeMap<String, usize> {
         self.ledger.counts.clone()
+    }
+    pub fn model_preference(
+        &mut self,
+        authorization: Option<(&Path, &Path)>,
+        repo: &Path,
+        plan: &Path,
+        language: &str,
+    ) -> Result<ModelPreference> {
+        let Some((model_path, budget_path)) = authorization else {
+            ensure!(
+                self.ledger.model_selections.is_empty(),
+                "Recorded explicit model selection requires its original authorization; no Automatic fallback"
+            );
+            return Ok(ModelPreference::Automatic);
+        };
+        let bytes = fs::read(model_path).context("Explicit model authorization unavailable")?;
+        let selected: ModelSelectionAuthorization = serde_json::from_slice(&bytes)?;
+        let hash = content_hash(&bytes);
+        ensure!(
+            language == "python"
+                && selected.version == 1
+                && selected.user_message == "Continue"
+                && !selected.authorized_at_utc.is_empty()
+                && !selected.interpretation.is_empty()
+                && !selected.scope.is_empty()
+                && !selected.constraints.is_empty()
+                && selected.repo == repo.canonicalize()?
+                && selected.plan_path == plan
+                && selected.suite_directory
+                    == self
+                        .path
+                        .parent()
+                        .context("Suite missing")?
+                        .canonicalize()?
+                && selected.ledger_path == self.path
+                && selected.budget_authorization_path == budget_path
+                && self.ledger.amendments.len() == 1
+                && self.ledger.amendments[0].authorization_hash
+                    == content_hash(&fs::read(budget_path)?)
+                && selected.selected_model.catalog_id == "gpt-6-astra"
+                && selected.selected_model.effort == "model_supported_default"
+                && selected.authorized_caps == self.caps
+                && selected.consumed_at_authorization
+                    == Caps {
+                        probe: 1,
+                        rust: 52,
+                        python: 43,
+                        total: 96
+                    },
+            "Model authorization does not match the existing Python suite, budget, model and consumed history"
+        );
+        let baseline = selected.consumed_at_authorization.total;
+        ensure!(
+            self.ledger.reservations.len() >= baseline,
+            "Model selection history was refunded or reset"
+        );
+        let prefix = &self.ledger.reservations[..baseline];
+        let mut counts = BTreeMap::<String, usize>::new();
+        for reservation in prefix {
+            *counts.entry(reservation.language.clone()).or_default() += 1;
+        }
+        ensure!(
+            counts
+                == BTreeMap::from([
+                    ("probe".into(), 1),
+                    ("rust".into(), 52),
+                    ("python".into(), 43)
+                ])
+                && self.ledger.reservations[baseline..]
+                    .iter()
+                    .all(|r| r.language == "python"),
+            "Explicit selection permits only remaining Python turns; prior history must match"
+        );
+        let prefix_hash = content_hash(&serde_json::to_vec(prefix)?);
+        if let Some(recorded) = self.ledger.model_selections.first() {
+            ensure!(
+                self.ledger.model_selections.len() == 1
+                    && recorded.authorization_hash == hash
+                    && recorded.reservation_prefix_hash == prefix_hash
+                    && serde_json::to_value(&recorded.authorization)?
+                        == serde_json::to_value(&selected)?,
+                "Immutable explicit model selection changed"
+            );
+        } else {
+            ensure!(
+                self.total() == baseline,
+                "Initial model selection must match its exact consumed history"
+            );
+            self.ledger.model_selections.push(ModelSelectionAmendment {
+                authorization: selected,
+                authorization_hash: hash,
+                reservation_prefix_hash: prefix_hash,
+            });
+            self.persist()?;
+        }
+        Ok(ModelPreference::Explicit {
+            model: "gpt-6-astra".into(),
+        })
     }
     fn persist(&self) -> Result<()> {
         let parent = self.path.parent().context("Budget directory missing")?;
@@ -455,11 +587,14 @@ pub fn identity() -> Result<serde_json::Value> {
     let mut sources = BTreeMap::new();
     for path in [
         "crates/tandem-core/src/companion.rs",
+        "crates/tandem-core/src/conversation.rs",
+        "crates/tandem-codex/src/lib.rs",
         "crates/tandem-companion/src/conversation.rs",
         "crates/tandem-companion/src/runtime.rs",
         "crates/tandem-companion/src/public_research.rs",
         "crates/tandem-companion/examples/guided_journeys.rs",
         "crates/tandem-companion/examples/guided_support/mod.rs",
+        "crates/tandem-companion/examples/guided_support/supplemental.rs",
     ] {
         sources.insert(path, file_hash(Path::new(path))?);
     }
@@ -473,12 +608,21 @@ pub fn public_search_schema_hash() -> String {
     content_hash(&serde_json::to_vec(&json!({"type":"object","additionalProperties":false,"required":["candidates"],"properties":{"candidates":{"type":"array","maxItems":16,"items":{"type":"string"}}}})).expect("static schema serializes"))
 }
 pub fn health(root: &Path) -> Result<(CompanionSession, ResolvedModel)> {
+    health_with_preference(
+        &root.join("prerequisites.json"),
+        &ModelPreference::Automatic,
+    )
+}
+pub fn health_with_preference(
+    receipt: &Path,
+    preference: &ModelPreference,
+) -> Result<(CompanionSession, ResolvedModel)> {
     let mut session = CompanionSession::connect()?;
     let catalog = session.list_models()?;
-    let model = tandem_companion::resolve_model(&catalog, &ModelPreference::Automatic)?;
+    let model = tandem_companion::resolve_model(&catalog, preference)?;
     write_json(
-        &root.join("prerequisites.json"),
-        &json!({"identity":identity()?,"connection":session.connection,"catalog":catalog,"selected":model,"model_turns":0}),
+        receipt,
+        &json!({"identity":identity()?,"connection":session.connection,"catalog":catalog,"preference":preference,"selected":model,"model_turns":0}),
     )?;
     println!(
         "Prerequisites: {:?}; model={}, effort={:?}; zero model turns",
@@ -491,6 +635,17 @@ pub struct BudgetBackend {
     pub budget: SharedBudget,
     pub language: String,
     pub directory: PathBuf,
+    pub stop_duplicate_public_pages: bool,
+}
+pub fn duplicate_public_page_requests(reply: &ConversationReply) -> bool {
+    reply.research_requests.len() > 1
+        && reply.research_requests.first().is_some_and(|first| {
+            matches!(first, ResearchRequestKind::PublicPage { .. })
+                && reply
+                    .research_requests
+                    .iter()
+                    .all(|request| request == first)
+        })
 }
 impl ConversationBackend for BudgetBackend {
     fn check_account(&mut self, cancel: &AtomicBool) -> Result<()> {
@@ -515,14 +670,34 @@ impl ConversationBackend for BudgetBackend {
             .unwrap()
             .reserve(&self.language, "private")?;
         let id = run.id.clone();
+        let schema = tandem_codex::output_schema_json(&run.request.schema())?;
+        fs::write(
+            self.directory.join(format!("wire-schema-{id}.json")),
+            &schema,
+        )?;
         write_json(
             &self.directory.join(format!("dispatch-{id}.json")),
-            &json!({"action":run.request.action,"model":run.request.resolved_model,"schema_hash":content_hash(&serde_json::to_vec(&run.request.schema())?),"identity":identity()?}),
+            &json!({"action":run.request.action,"model":run.request.resolved_model,"schema_hash":content_hash(schema.as_bytes()),"schema_encoding":"discriminator-first protocol outputSchema; exact transmitted JSON bytes","identity":identity()?}),
         )?;
         let result = self.inner.run(run, thread, cancel, |run| {
             write_json(&self.directory.join(format!("private-{id}.json")), run)?;
             observe(run)
         })?;
+        write_json(
+            &self.directory.join(format!("connection-after-{id}.json")),
+            &self.inner.connection,
+        )?;
+        if self.stop_duplicate_public_pages
+            && matches!(&result.0.response, Some(CompanionResponse::Discussion(reply)) if duplicate_public_page_requests(reply))
+        {
+            write_json(
+                &self
+                    .directory
+                    .join(format!("harness-cancellation-{id}.json")),
+                &json!({"choice":"Harness human cancels at the completed response boundary after the same duplicate-PublicPage failure; no further broker/model rounds or refund", "run_id":id,"charged_counts":self.budget.lock().unwrap().counts()}),
+            )?;
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         println!(
             "{} private turn: {:?}; charged total={}",
             self.language,
@@ -668,6 +843,23 @@ pub fn authenticate_review(
     )
 }
 impl FixtureTask {
+    pub fn clarification_facts(&self, argv: &[String]) -> Result<serde_json::Value> {
+        self.verify_originals()?;
+        let exists = match fs::symlink_metadata(self.project.root.join(&self.path)) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "Owned module is not an ordinary file"
+                );
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(
+            json!({"module_path":self.path,"module_exists":exists,"module_observation":"Actual live filesystem; an unsaved overlay does not establish a saved file","installed_check_argv":argv,"check_cwd":".","existing_check_source":if self.language=="rust"{"tests/contract.rs"}else{"test_contract.py"},"independent_fixture_case_count":7,"independent_fixture_cases":[[0,0,0],[0,9,0],[7,9,7],[9,9,9],[12,9,9],[1000000,1,1],[1,0,0]],"case_coverage":"Each listed tuple asserts both the named function and unchanged caller","separate_independent_runner":false,"remaining_evidence_gap":"No separate runner or additional executed evidence is claimed. Any acceptance cases beyond the immutable tests and supplied actual receipts remain unverified; do not invent a runner, change tests or weaken the approved documents."}),
+        )
+    }
     pub fn create(root: &Path, language: &str) -> Result<Self> {
         ensure!(!root.exists(), "Refusing to overwrite a fixture");
         fs::create_dir_all(root)?;

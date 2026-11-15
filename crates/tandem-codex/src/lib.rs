@@ -5,6 +5,10 @@ mod installation;
 pub use installation::*;
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{
+    Serialize, Serializer,
+    ser::{SerializeMap, SerializeSeq},
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -103,6 +107,72 @@ pub trait ProtocolExchange {
     fn shutdown(&mut self) -> Result<()>;
 }
 
+/// Exact JSON bytes of the outputSchema sent to the pinned runtime.
+pub fn output_schema_json(schema: &Value) -> Result<String> {
+    Ok(serde_json::to_string(&WireValue(
+        schema,
+        WirePosition::Schema,
+    ))?)
+}
+
+fn encode_wire_message(message: &Value) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&WireValue(
+        message,
+        WirePosition::Message,
+    ))?)
+}
+
+#[derive(Clone, Copy)]
+enum WirePosition {
+    Message,
+    Params,
+    Schema,
+    Properties,
+    Data,
+}
+struct WireValue<'a>(&'a Value, WirePosition);
+impl Serialize for WireValue<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self.0 {
+            Value::Object(object) => {
+                let mut map = serializer.serialize_map(Some(object.len()))?;
+                // Structured Outputs follows schema property order. Each tagged
+                // branch must offer its discriminator first; alphabetical order
+                // otherwise offers that prefix only for certain variants.
+                let discriminator_first = matches!(self.1, WirePosition::Properties)
+                    && object
+                        .get("type")
+                        .is_some_and(|tag| tag["const"].is_string());
+                if discriminator_first {
+                    map.serialize_entry("type", &WireValue(&object["type"], WirePosition::Schema))?;
+                }
+                for (key, value) in object {
+                    if discriminator_first && key == "type" {
+                        continue;
+                    }
+                    let position = match self.1 {
+                        WirePosition::Message if key == "params" => WirePosition::Params,
+                        WirePosition::Params if key == "outputSchema" => WirePosition::Schema,
+                        WirePosition::Schema if key == "properties" => WirePosition::Properties,
+                        WirePosition::Schema | WirePosition::Properties => WirePosition::Schema,
+                        _ => WirePosition::Data,
+                    };
+                    map.serialize_entry(key, &WireValue(value, position))?;
+                }
+                map.end()
+            }
+            Value::Array(array) => {
+                let mut sequence = serializer.serialize_seq(Some(array.len()))?;
+                for value in array {
+                    sequence.serialize_element(&WireValue(value, self.1))?;
+                }
+                sequence.end()
+            }
+            value => value.serialize(serializer),
+        }
+    }
+}
+
 pub struct Client {
     child: Child,
     input: Option<ChildStdin>,
@@ -196,7 +266,9 @@ impl Client {
 
     fn send(&mut self, message: &Value) -> Result<()> {
         let input = self.input.as_mut().context("protocol input closed")?;
-        serde_json::to_writer(&mut *input, message).context("encode request")?;
+        input
+            .write_all(&encode_wire_message(message)?)
+            .context("encode request")?;
         input.write_all(b"\n").context("write request separator")?;
         input.flush().context("flush request")
     }
@@ -513,5 +585,29 @@ IFS= read -r eof
             .unwrap_err();
         assert!(error.to_string().contains("outcome unknown"));
         assert_eq!(client.next_id, 3);
+    }
+    #[test]
+    fn serialized_output_schema_keeps_discriminator_first_without_changing_stored_values() {
+        let read = json!({"type":"object","additionalProperties":false,"required":["end_line","path","start_line","type"],"properties":{"end_line":{"type":"integer"},"path":{"type":"string"},"start_line":{"type":"integer"},"type":{"type":"string","const":"ReadFileRange"}}});
+        let public = json!({"type":"object","additionalProperties":false,"required":["type","url"],"properties":{"type":{"type":"string","const":"PublicPage"},"url":{"type":"string"}}});
+        let schema = json!({"type":"object","properties":{"requests":{"type":"array","items":{"anyOf":[read,public]}}},"required":["requests"],"additionalProperties":false});
+        let message = json!({"id":2,"method":"turn/start","params":{"outputSchema":schema,"input":[{"type":"text","text":"Preserve current context"}],"stored":{"end_line":1,"type":"data"}}});
+        let canonical_before = serde_json::to_string(&message).unwrap();
+        let wire = String::from_utf8(encode_wire_message(&message).unwrap()).unwrap();
+        assert_eq!(
+            wire.matches(r#""properties":{"type":{"#).count(),
+            2,
+            "Every tagged union branch must allow the discriminator before variant fields, with either serde_json map feature configuration: {wire}"
+        );
+        assert!(wire.contains(r#""stored":{"end_line":1,"type":"data"}"#));
+        assert_eq!(serde_json::from_str::<Value>(&wire).unwrap(), message);
+        assert_eq!(serde_json::to_string(&message).unwrap(), canonical_before);
+        assert!(
+            wire.contains(&format!(
+                "\"outputSchema\":{}",
+                output_schema_json(&schema).unwrap()
+            )),
+            "Recorded schema bytes must be exactly those sent"
+        );
     }
 }

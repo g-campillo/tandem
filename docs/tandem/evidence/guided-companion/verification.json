@@ -18,16 +18,19 @@
   "source_hashes": {
     "crates/tandem-core/src/companion.rs": "3c9dc93a5ab29e7a99a2d4e0915395b686dc6483ab7ebef00be190c1ce9f2b4e",
     "crates/tandem-core/src/walkthrough.rs": "e75997fc810a74c867058351d913835b1330252314a7cb2308b937da58df9c04",
-    "crates/tandem-companion/src/runtime.rs": "e545b2ce23fbe475632b29eacb1e3699a01175386212a8e7116e90e4e200ecef",
-    "crates/tandem-companion/examples/guided_journeys.rs": "5806c7f8e227c74c22bcfadf1667c1a2f3529b83a21f9000d05cdbb0f8ec09f0",
-    "crates/tandem-companion/examples/guided_support/mod.rs": "3686d131457e7963e326eaeb64aeac8f5f97b0788d96d8d222c1a3c9aaefa71e",
-    "crates/tandem-companion/tests/guided_journey.rs": "85f2417119fd75fb004b67c6e17fbbe68a282768851d92ca3d032436c1b6f71b"
+    "crates/tandem-companion/src/runtime.rs": "92eb2d7a638b196e6efac401352e60bcce431b6bfd925033fd849381e7b3c8a7",
+    "crates/tandem-companion/examples/guided_journeys.rs": "3a3ee3f4a6b624af3608a5bb7383f2dfbc976067746c7f74bff44f4c981fa9df",
+    "crates/tandem-companion/examples/guided_support/mod.rs": "61734b926d34203675c5a9807bd72a0cc841b1ee227e355273806db8070079e6",
+    "crates/tandem-companion/tests/guided_journey.rs": "7a32bf75fff3c8e8f8617a7b66020f4de304df6a6e7a734fd29236f1624147cd",
+    "crates/tandem-codex/src/lib.rs": "f154e71fbbe0f75455a1a04fd4c75b252c92cd3718727ade0c8c761f966a0d09",
+    "crates/tandem-core/src/conversation.rs": "f834d913b518d7cd972f8822e01c1ebc2e9ae98b9c97d0ca220f88a86f37cd9b",
+    "crates/tandem-companion/examples/guided_support/supplemental.rs": "5e0096d789c7abec39598d7ad5b7f560184c107b0ce8588d90e1692404abef01"
   },
   "turn_usage": {
     "probe": 1,
-    "python": 43,
+    "python": 51,
     "rust": 52,
-    "total": 96
+    "total": 104
   },
   "authorized_caps": {
     "probe": 4,
@@ -38,11 +41,11 @@
   "automated": {
     "class": "D/S",
     "workspace": {
-      "passed": 289,
+      "passed": 293,
       "failed": 0,
       "ignored": 2
     },
-    "guided_journey_tests": 17,
+    "guided_journey_tests": 20,
     "clippy_all_targets": "passed",
     "format": "passed",
     "build": "passed",
@@ -50,7 +53,12 @@
     "new_coverage": [
       "Authorization amendment/default caps/reopen/private+public aggregate/prefix preservation/missing or unmatched authorization/no refund",
       "Ordinary saved owned module and detection of unauthorized module/caller/oracle mutation",
-      "Nonempty bounded provider reply text; typed validation/cwd/no-inline-command instructions retained in actual wire routing tests"
+      "Nonempty bounded provider reply text; typed validation/cwd/no-inline-command instructions retained in actual wire routing tests",
+      "Explicit Astra selection binds same-suite authorization/hash/original96reservationprefix; altered/missing selection fails before connection and defaultcaps are unchanged",
+      "Actual protocol serialization puts tagged discriminator first only in outputSchema; ordinary JSON/storage identity and semantic schema unchanged; works with both serde_json map configurations",
+      "Clarification choice schema matches host2..5 bound; live fixture facts report absence/presence/exact7casecoverage/installedargv and refuse mutated originals",
+      "Bounded retest recognizes duplicate PublicPages and requests ordinary cancellation without another broker/model round",
+      "Snapshot-only supplemental oracle is captured identically for checks/reviews; missing/changed overlay rejects earlier evidence, mutated oracle refuses harness dispatch"
     ]
   },
   "real": {
@@ -133,15 +141,19 @@
       "legacy_receipt_field_note": "Historical live_source_unchanged asserts protected originals and last explicit human-owned module baseline, not equality to the pre-implementation tree"
     },
     "python": {
-      "outcome": "Model did not prepare atomic actions",
-      "stage": "Saved/edited/approved actual spec and legitimate two-step plan; Start g1; no walkthrough/action or review",
-      "structured_answers": 0,
+      "outcome": "Turn51 quarantined: A question needs2\u20135 choices and also allows a custom answer",
+      "stage": "Saved approved original two-step plan/Start unchanged; actual local research and domain structured answer observed; no actions/reviews/Next",
+      "structured_answers": 2,
       "actual_research_kinds": [
+        "dependencies",
+        "doc",
+        "git",
+        "other",
         "public"
       ],
       "implementation_complete": false,
       "last_continuation_receipt": ".tandem-local/guided-companion/approved-suite/python/receipt.json",
-      "status": "partial_stopped_without_blind_retries",
+      "status": "partial_stopped_with_insufficient_remaining_allowance",
       "saved_and_approved_spec_ref": {
         "revision": 1,
         "hash": "f29a8c5d0af71fdddb7d27e9d7f74f5931d1edcaa1c8aa5c103a5d37edf4303d"
@@ -154,11 +166,42 @@
       "started_generation": 1,
       "real_action_reviews": 0,
       "consumed_action_transitions": 0,
-      "next_stage": "PrepareWalkthrough remains unfinished; actual local doc/Git/dependency research and structured answer also unmet",
-      "remaining_turns": 13,
+      "next_stage": "PrepareWalkthrough unresolved; actual live file absence and supplemental direct-check source need truthful clarification; actions/reviews/Next/full-spec unverified",
+      "remaining_turns": 5,
       "repeated_public_page_requests": "Two bounded private operations requested PublicPage while prose described missing local research; no cause established; not rerun merely to spend remaining allowance",
       "schema_diagnostic": "All12 local/public anyOf variants and clarification fields retained; pinned provider passes schema unchanged; no evidenced public/private thread crossover",
-      "additional_zero_turn_diagnosis": "Both bounded8-round operations retain explicit human request/current captured contract and all seven complete receipt batches. No demonstrated host routing defect or public/private thread crossover. Missing module snapshot explains a request for more evidence but not the repeated wrong PublicPage kind."
+      "additional_zero_turn_diagnosis": "Both bounded8-round operations retain explicit human request/current captured contract and all seven complete receipt batches. No demonstrated host routing defect or public/private thread crossover. Missing module snapshot explains a request for more evidence but not the repeated wrong PublicPage kind.",
+      "structured_answer_qualification": "First answer confirms domain; second generic harness domain answer did not answer new existence/check-coverage prerequisites",
+      "approved_documents_approvals_start_and_session_unchanged": {
+        "id": true,
+        "spec": true,
+        "plan": true,
+        "spec_approval": true,
+        "plan_approval": true,
+        "execution_generation": true,
+        "started_generation": true
+      },
+      "plan_step_titles": [
+        "Provide and independently validate the limits module",
+        "Verify the unchanged caller and contract suite"
+      ],
+      "walkthrough_count": 0,
+      "remaining_call_lower_bound": {
+        "prepare_first_walkthrough": 1,
+        "create_symbol_command_and_cumulative_validation_reviews": 4,
+        "wrong_and_missing_evidence_additional_negative_reviews": 2,
+        "first_step_only_minimum": 7,
+        "second_step_and_final_spec": "additional preparation and reviews required; no legitimate action count exists yet"
+      },
+      "last_contract_fix": "Empty choices51 quarantined; wire minItems2/maxItems5 added with failing/passing regression, no real retest",
+      "harness_answer_fix": "Subsequent answers now distinguish observed live module state, installed argv, original seven cases, supplied nine-case check-input overlay, and missing executed real-journey evidence; no model retest after this fix",
+      "remaining_call_estimate": {
+        "first_step_minimum": 7,
+        "second_step_minimum": 3,
+        "final_spec_minimum": 2,
+        "minimum_total": 12,
+        "caveat": "No real atomic actions exist yet; actual model research/clarifications may add turns. Five remaining turns are insufficient; no additional usage has been authorized."
+      }
     },
     "python_actual_input_diagnostics": {
       "actual_turn_has_explicit_draft_spec_intent": true,
@@ -194,6 +237,70 @@
       "cause": "Nested Store lock in newly added negative-review recovery; lock order corrected",
       "cleanup": "Only verified exact harness PID terminated; stale lock removed after exit; suite failure status restored; counts/reservations/amendment unchanged",
       "receipt": ".tandem-local/guided-companion/approved-suite/rust/harness-lock-order-interruption.json"
+    },
+    "discriminator_wire_diagnosis": {
+      "first_astra_response_types": [
+        "PublicPage",
+        "PublicPage",
+        "PublicPage",
+        "PublicPage"
+      ],
+      "old_schema_hash": "9e9765fc484e41847c9194ef429867049ec93788a7c5944c9c1675cd6784a5bc",
+      "new_emitted_schema_hash": "c7d34d64f3d222a7ac73ff0e81a0b4516de768d92bfaf9ef50f6f060dbcee26c",
+      "old_branch_first_fields": "Only PublicPage offered type as its first field; others began with variant fields after alphabetization",
+      "new_all12_research_variants_discriminator_first": true,
+      "full_schema_semantics_unchanged_at_retest": true,
+      "actual_turn46_types": [
+        "ReadFileRange",
+        "GitHistory",
+        "DependencyMetadata"
+      ],
+      "actual_local_receipts_observed": true,
+      "fresh_thread_and_instruction_hash": true,
+      "code_source_hashes_at_retest": {
+        "crates/tandem-codex/src/lib.rs": "73ff1aae5536f521262b50eca3f95a988f4e335753fe4032f04ac776a530eaaa",
+        "crates/tandem-companion/examples/guided_journeys.rs": "2adbdf4ed9a4332b24e37e169105290e481392e937d1ba32a3edee48784e568a",
+        "crates/tandem-companion/examples/guided_support/mod.rs": "cb5bd964006c437b548106c48dd1434b5299a6e6d7eb30ad8008b0e16b49127d",
+        "crates/tandem-companion/src/conversation.rs": "f4b75384622cb73a9a8a51224971f15958751b08e3bdfda7789f3576550eba44",
+        "crates/tandem-companion/src/public_research.rs": "742c3d21131af1dcafe96890055b4dbdfc1fa6e55a24c988ace0e997b22bbb72",
+        "crates/tandem-companion/src/runtime.rs": "92eb2d7a638b196e6efac401352e60bcce431b6bfd925033fd849381e7b3c8a7",
+        "crates/tandem-core/src/companion.rs": "3c9dc93a5ab29e7a99a2d4e0915395b686dc6483ab7ebef00be190c1ce9f2b4e"
+      },
+      "provider_cache_analysis": "Pinned core assigns current turn schema, copies to text.format, and rejects incremental reuse when text changes; no stale-format defect demonstrated",
+      "conclusion": "Before/after supports discriminatorprefix hypothesis; simultaneous instruction clarification and limited example do not establish isolated causation or broad model quality",
+      "official_key_order_documentation": "https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas",
+      "zero_turn_diagnostic": "Python jsonschema4.26.0 validated full root for all12 variants and structured question; crossvariantfields refused; does not inspect hidden provider compilation"
+    },
+    "included_usage_transient": {
+      "python45": "Pre-dispatch failure, thread_id/turn_id absent, zero receivedbytes; reservation retained",
+      "later_single_bounded_status_read": {
+        "account_is_chatgpt": true,
+        "ordinary_usage_allowed": true,
+        "primary_used_percent": 42
+      },
+      "cause": "Earlier preflight response not retained; cannot distinguish transient read failure from missing field, no quota exhaustion proven",
+      "native_model_turns": 0
+    },
+    "supplemental_direct_evidence_proposal": {
+      "status": "implemented and actual isolated kernel proof passed; not exercised in saved real Python journey",
+      "class": "R actual isolated validation kernel; workflow setup is deterministic simulated data, no AI reviews",
+      "model_turns": 0,
+      "real_journey_progress": false,
+      "source_hash": "629f738da90bbcd296a580417b4ba1859a97bbac55c8c5082157e7f40eeac69f",
+      "snapshot_input_path": "test_tandem_direct_evidence.py",
+      "original_case_count": 7,
+      "supplemental_case_count": 9,
+      "correct_alternative": "Passed original and supplemental cases",
+      "deliberate_second_argument_boundary_bug": "Passed original seven cases; Failed supplemental cases",
+      "origin_bound_before_execution": true,
+      "missing_overlay_evidence_rejected": true,
+      "changed_overlay_stale_binding_rejected": true,
+      "live_original_caller_oracle_manifest_unchanged": true,
+      "live_module_and_supplemental_files_remain_absent": true,
+      "ledger_bytes_unchanged": true,
+      "receipt": ".tandem-local/guided-companion/approved-suite/supplemental-kernel-proof-14298936-1bd0-4252-affa-24348240c6fb/receipt.json",
+      "integration": "Same fixed overlay follows harness context, checks, module overlay/save and Store restart; no original-source write or new recipe",
+      "remaining": "Saved real Python session still needs actual implementation, isolated checks and AI reviews; kernel workflow is only simulated"
     }
   },
   "native": {
@@ -246,20 +353,20 @@
     "cleanup": "Owned QA app closed normally after restart observations; fixture/profile and evidence preserved."
   },
   "limitations": [
-    "Full real Python actions/reviews/Next/full-spec journey and actual local research/structured answer remain unverified;13Python turns remain unused to avoid repeating the same behavior.",
+    "Real Python local research and structureddomainanswer now observed; actions, negative and passing reviews, exactly-once Next and finalspec still missing. Five remaining turns are below the conservative firststep-only seven-call minimum.",
     "Partial native evidence does not establish full native usability or spoken VoiceOver.",
     "Original provider/harness failures, bounded repeated-source operations, negative reviews and interruption are retained; no refunds/reset/new suite.",
-    "No model/provider/API billing fallback, completed probe/OS rerun, native model turn, managed installation, push or merge.",
+    "Only the explicitly user-authorized Astra selection changed. No provider/API billingfallback, completedprobe/OS rerun, native modelturn, managed installation, push or merge.",
     "Two original early private dispatches predate schema-hash instrumentation; exact errors and source revision retained."
   ],
   "receipts_root": ".tandem-local/guided-companion/approved-suite",
   "remaining_verification": [
-    "Real Python: actual local doc/Git/dependency research and structured answer; valid walkthrough, all file/symbol/command actions, wrong/missing-evidence rejection, valid alternative acceptance, reviewed exactly-once Next and full-spec validation",
+    "Real Python: truthful existence/check-source clarification and supplemental independent direct evidence; valid walkthrough, all file/symbol/command actions, wrong/missingevidence rejection, validalternative acceptance, exactly-once Next, secondstep and fullspec validation",
     "Native Rust/Python: command attachment/review/Next, all live AI and cancellation phases, busy model picker, complete long-panel scrolling and spoken VoiceOver; observed subset documented"
   ],
   "diagnostic_redaction": "Known schema errors retained; unclassified runtime messages, credentials and login URLs withheld with hashes",
-  "updated_at_utc": "2026-11-15T17:28:32.319906+00:00",
-  "verification_worktree_head_before_commit": "0422c9798e72f5942f9f7def9d03a5f5358fe4ef",
+  "updated_at_utc": "2026-11-15T18:05:53.367668+00:00",
+  "verification_worktree_head_before_commit": "8a4515dc645a20e2b9d338fb648b5bc9ed221ef2",
   "default_caps": {
     "probe": 4,
     "rust": 24,
@@ -278,14 +385,14 @@
     "authorization_hash": "24b89a3e3f6c617898b19b9c3db22d238271ac8e4e4abbf18bb9870110c62c70",
     "original_reservation_prefix_hash": "371529452abf6e3a98e235928e6e69f2840c529cdbd15d3ef9f5d3b77a5c9288",
     "original_reservations_preserved": 49,
-    "total_reservations": 96,
+    "total_reservations": 104,
     "no_refunds_or_reset": true,
-    "scope": "Same suite and durable sessions only; no model/provider/billing fallback",
+    "scope": "Same suite and durable sessions; explicit later Astra selection only, no provider/billingfallback",
     "remaining": {
       "probe": 3,
       "rust": 4,
-      "python": 13,
-      "total": 20
+      "python": 5,
+      "total": 12
     }
   },
   "resumed_stages": [
@@ -316,6 +423,48 @@
       "rust": 52,
       "python": 43,
       "total": 96
+    },
+    {
+      "stage": "Explicit Astra first response then unconfirmed-usage preflight stop",
+      "probe": 1,
+      "rust": 52,
+      "python": 45,
+      "total": 98
+    },
+    {
+      "stage": "Discriminator-first local research/question; Prepareprerequisites; empty-choice quarantine",
+      "probe": 1,
+      "rust": 52,
+      "python": 51,
+      "total": 104
     }
-  ]
+  ],
+  "model_selection": {
+    "authorization_hash": "351c65986a8bad418a1e429107f19fc754f5f303f1b7aacff604934dab2a36b5",
+    "selected": {
+      "catalog_id": "gpt-6-astra",
+      "model": "gpt-6-astra",
+      "effort": "medium"
+    },
+    "original_model_proof_preserved": {
+      "catalog_id": "gpt-6.1-sol",
+      "display_name": "GPT-6.1-Sol",
+      "effort": "low",
+      "model": "gpt-6.1-sol"
+    },
+    "consumed_at_authorization": {
+      "probe": 1,
+      "rust": 52,
+      "python": 43,
+      "total": 96
+    },
+    "caps_unchanged": true,
+    "new_charged_python_reservations": 8,
+    "observed_dispatched_turns": 7,
+    "predispatch_failure_reservations": 1,
+    "reservation_prefix_hash": "f31c27d011a9f2156152a51975a5d7586b01ec6fc09c869d215cf3de527fc56d",
+    "normal_fresh_instruction_model_binding": true,
+    "original96reservations_preserved": true,
+    "scope": "Explicit user choice for existing Python session; no automatic model/provider/billing fallback"
+  }
 }

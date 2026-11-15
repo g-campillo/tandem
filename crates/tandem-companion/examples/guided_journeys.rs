@@ -28,6 +28,7 @@ struct Harness {
     saw_command: bool,
     rejected_wrong: bool,
     rejected_missing: bool,
+    preference: ModelPreference,
 }
 impl Harness {
     fn new(directory: &Path, language: &str, resume: bool) -> Result<Self> {
@@ -65,6 +66,7 @@ impl Harness {
             .lock()
             .unwrap()
             .working_documents(task.project.key(), &[])?;
+        let overlays = supplemental::check_input_overlays(&task, overlays)?;
         let capture = StoredCapture {
             store: store.clone(),
             inner: ProjectConversationCapture {
@@ -81,9 +83,15 @@ impl Harness {
                     .map(str::to_owned)
                     .to_vec()
                 } else {
-                    ["README.md", "limits.py", "consumer.py", "test_contract.py"]
-                        .map(str::to_owned)
-                        .to_vec()
+                    [
+                        "README.md",
+                        "limits.py",
+                        "consumer.py",
+                        "test_contract.py",
+                        supplemental::PYTHON_DIRECT_PATH,
+                    ]
+                    .map(str::to_owned)
+                    .to_vec()
                 },
                 cache: directory.join("captures"),
                 check_environment: Some(environment.clone()),
@@ -96,11 +104,18 @@ impl Harness {
         } else {
             json!({})
         };
-        let choices = if directory.join("harness-human-choices.json").exists() {
+        let mut choices: Vec<String> = if directory.join("harness-human-choices.json").exists() {
             serde_json::from_slice(&fs::read(directory.join("harness-human-choices.json"))?)?
         } else {
             vec![]
         };
+        if language == "python" {
+            choices.push(format!("Harness human supplies independent {} only as a check-input overlay; source hash {}; original live oracle/caller untouched. Same overlay is captured for checks and reviews; no executed evidence is inferred", supplemental::PYTHON_DIRECT_PATH, content_hash(supplemental::PYTHON_DIRECT_TESTS.as_bytes())));
+            write_json(
+                &directory.join(format!("supplemental-check-input-{}.json", new_id())),
+                &json!({"class":"D harness input choice only","path":supplemental::PYTHON_DIRECT_PATH,"hash":content_hash(supplemental::PYTHON_DIRECT_TESTS.as_bytes()),"live_file_created":false,"existing_oracle_changed":false,"executed":false,"model_turns":0}),
+            )?;
+        }
         Ok(Self {
             task,
             store,
@@ -110,6 +125,7 @@ impl Harness {
             inspection,
             directory: directory.into(),
             choices,
+            preference: ModelPreference::Automatic,
             saw_create: progress["create_file"] == true,
             saw_symbol: progress["named_symbol"] == true,
             saw_command: progress["command"] == true,
@@ -135,6 +151,7 @@ impl Harness {
                 budget: budget.clone(),
                 language: self.task.language.clone(),
                 directory: self.directory.clone(),
+                stop_duplicate_public_pages: matches!(&self.preference, ModelPreference::Explicit { model } if model == "gpt-6-astra"),
             },
             BudgetPublic::connect(budget, &self.task.language, &self.directory)?,
             ResearchBroker::default(),
@@ -171,6 +188,18 @@ impl Harness {
             model_preference: preference,
         }
     }
+    fn clarification_answer(&self) -> Result<String> {
+        let recipe = self.environment.recipe(&self.task.recipe)?;
+        let mut facts = self.task.clarification_facts(&recipe.argv)?;
+        if self.task.language == "python" {
+            facts["supplemental_independent_check_input"] = json!({"path":supplemental::PYTHON_DIRECT_PATH,"hash":content_hash(supplemental::PYTHON_DIRECT_TESTS.as_bytes()),"source":"Explicit harness human check-input overlay, present in captured snapshot only; never saved to the live project","case_count":9,"coverage":"Explicit expected values for zero, equality, both orders, upperboundary in both positions and integer type","runner":"The same installed python-unittest recipe discovers this additional module in its isolated snapshot; no separate installed runner or inline script","execution_status":"No success inferred; require actual matching CheckRecord before passing a review"});
+        }
+        Ok(format!(
+            "{} Disposable harness human observations: {}",
+            domain_answer(),
+            serde_json::to_string(&facts)?
+        ))
+    }
     fn run(
         &mut self,
         runner: &mut Runner,
@@ -188,13 +217,14 @@ impl Harness {
             let Some(question) = self.state()?.pending_question else {
                 return Ok(result);
             };
-            self.choices.push("Harness human explicitly answers a real model clarification during typed work, using the independent fixture contract".into());
+            let answer = self.clarification_answer()?;
+            self.choices.push(format!("Harness human answers actual clarification {} with the agreed domain, observed live module existence, installed recipe and exact immutable fixture coverage; missing evidence is not invented", question.id));
             result = self.run_once(
                 runner,
                 ConversationIntent::Answer(ClarificationAnswer {
                     question_id: question.id,
                     choice_id: None,
-                    custom_text: Some(domain_answer()),
+                    custom_text: Some(answer),
                 }),
             )?;
         }
@@ -206,7 +236,7 @@ impl Harness {
         intent: ConversationIntent,
     ) -> Result<ConversationResult> {
         let result = runner.run(
-            self.input(intent, ModelPreference::Automatic),
+            self.input(intent, self.preference.clone()),
             &mut self.capture,
             Some(&self.inspection),
             Arc::new(AtomicBool::new(false)),
@@ -309,6 +339,10 @@ impl Harness {
             &self.task.project,
             &self.capture.inner.overlays,
         )?;
+        self.capture.inner.overlays = supplemental::check_input_overlays(
+            &self.task,
+            std::mem::take(&mut self.capture.inner.overlays),
+        )?;
         Ok(())
     }
     fn save_owned_module(&mut self, text: String) -> Result<()> {
@@ -324,9 +358,19 @@ impl Harness {
             &self.task.project,
             &self.capture.inner.overlays,
         )?;
+        self.capture.inner.overlays = supplemental::check_input_overlays(
+            &self.task,
+            std::mem::take(&mut self.capture.inner.overlays),
+        )?;
         self.task.verify_originals()
     }
     fn check(&self, expected: CheckStatus) -> Result<()> {
+        let overlays =
+            supplemental::check_input_overlays(&self.task, self.capture.inner.overlays.clone())?;
+        ensure!(
+            overlays.len() == self.capture.inner.overlays.len(),
+            "Check/review supplemental input parity missing"
+        );
         let recipe = self.environment.recipe(&self.task.recipe)?;
         let mut pending = CheckRecord::pending(
             self.task.project.key().into(),
@@ -341,7 +385,7 @@ impl Harness {
         let record = run_check(
             &self.environment,
             &self.task.project,
-            &self.capture.inner.overlays,
+            &overlays,
             &recipe,
             pending,
             &AtomicBool::new(false),
@@ -467,7 +511,13 @@ impl Harness {
         Ok(())
     }
 }
-fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str) -> Result<()> {
+fn journey(
+    root: &Path,
+    language: &str,
+    budget: SharedBudget,
+    resume_kind: &str,
+    preference: ModelPreference,
+) -> Result<()> {
     let resume = resume_kind != "none";
     if resume_kind == "authorized" {
         budget.lock().unwrap().resume_authorized(language)?;
@@ -569,6 +619,11 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
         budget.lock().unwrap().claim(language)?;
     }
     let mut h = Harness::new(&root.join(language), language, resume)?;
+    h.preference = preference;
+    if let ModelPreference::Explicit { model } = &h.preference {
+        h.choices.push(format!("User-authorized explicit {model} selection at the live catalog's supported default effort for the remaining Python allowance; original session/documents/approvals/progress and all prior reservations retained"));
+        h.save_progress()?;
+    }
     let mut r = h.runner(budget.clone())?;
     let recipe = h.environment.recipe(&h.task.recipe)?;
     let url = if language == "rust" {
@@ -600,12 +655,13 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
         }
         if let Some(question) = h.state()?.pending_question {
             h.choices.push("Harness human chooses a custom domain answer through the authoritative question command".into());
+            let answer = h.clarification_answer()?;
             h.run(
                 &mut r,
                 ConversationIntent::Answer(ClarificationAnswer {
                     question_id: question.id,
                     choice_id: None,
-                    custom_text: Some(domain_answer()),
+                    custom_text: Some(answer),
                 }),
             )?;
         } else {
@@ -805,6 +861,10 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
                     .lock()
                     .unwrap()
                     .working_documents(h.task.project.key(), &[])?;
+                h.capture.inner.overlays = supplemental::check_input_overlays(
+                    &h.task,
+                    std::mem::take(&mut h.capture.inner.overlays),
+                )?;
                 r = h.runner(budget.clone())?;
             }
             h.next(&review)?;
@@ -834,7 +894,7 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
                 .all(|run| run.request.action != CompanionAction::Reveal && run.tool_items == 0),
             "Unexpected solution request or model tool execution"
         );
-        write_json(&h.directory.join("output-schemas.json"),&runs.iter().map(|run|json!({"action":run.request.action,"schema_hash":content_hash(&serde_json::to_vec(&run.request.schema()).unwrap()),"resolved_model":run.request.resolved_model,"thread_id":run.thread_id,"turn_id":run.turn_id,"status":run.status})).collect::<Vec<_>>())?;
+        write_json(&h.directory.join("output-schemas.json"),&runs.iter().map(|run|json!({"action":run.request.action,"current_wire_schema_hash":content_hash(tandem_codex::output_schema_json(&run.request.schema()).unwrap().as_bytes()),"original_dispatch_schema_hash":"see immutable dispatch receipt; historical wire encodings are not rewritten","resolved_model":run.request.resolved_model,"thread_id":run.thread_id,"turn_id":run.turn_id,"status":run.status})).collect::<Vec<_>>())?;
         Ok(())
     })();
     let status = if result.is_ok() { "passed" } else { "failed" };
@@ -858,7 +918,15 @@ fn journey(root: &Path, language: &str, budget: SharedBudget, resume_kind: &str)
 }
 fn main() -> Result<()> {
     require_subscription_usage(std::env::args())?;
+    ensure!(
+        !std::env::args().any(|a| a == "--model-authorization")
+            || std::env::args().any(|a| a == "--resume-authorized"),
+        "Explicit model authorization is only supported for the authorized same-suite continuation"
+    );
     let directory = run_directory()?;
+    if std::env::args().any(|a| a == "--verify-supplemental-check-inputs") {
+        return supplemental::verify(&directory);
+    }
     if let Some(language) = std::env::args()
         .skip_while(|a| a != "--dump-latest-schema")
         .nth(1)
@@ -880,6 +948,10 @@ fn main() -> Result<()> {
             &root.join(format!("schema-diagnostic-{}.json", run.id)),
             &schema,
         )?;
+        fs::write(
+            root.join(format!("wire-schema-diagnostic-{}.json", run.id)),
+            tandem_codex::output_schema_json(&schema)?,
+        )?;
         println!(
             "{}",
             serde_json::to_string_pretty(&schema["$defs"]["ResearchRequestKind"])?
@@ -891,6 +963,9 @@ fn main() -> Result<()> {
         .nth(1)
     {
         return diagnose_latest(&directory, &language);
+    }
+    if std::env::args().any(|a| a == "--diagnose-availability") {
+        return diagnose_availability(&directory);
     }
     if std::env::args().any(|a| a == "--resume-authorized") {
         let args = std::env::args().collect::<Vec<_>>();
@@ -928,21 +1003,47 @@ fn main() -> Result<()> {
             );
         }
         let before = budget.lock().unwrap().counts();
+        let model_authorization = args.windows(2).find(|a| a[0] == "--model-authorization");
+        ensure!(
+            !args.iter().any(|a| a == "--model-authorization") || model_authorization.is_some(),
+            "--model-authorization path required"
+        );
+        let preference = budget.lock().unwrap().model_preference(
+            model_authorization.map(|a| (Path::new(&a[1]), Path::new(&auth[1]))),
+            repo,
+            &plan,
+            language,
+        )?;
+        if model_authorization.is_some() || args.iter().any(|a| a == "--check-prerequisites") {
+            let receipt = directory
+                .join(language)
+                .join(format!("model-selection-prerequisites-{}.json", new_id()));
+            let _ = health_with_preference(&receipt, &preference)?;
+            if args.iter().any(|a| a == "--check-prerequisites") {
+                return Ok(());
+            }
+        }
         let receipt_path = directory
             .join(language)
             .join(format!("authorized-continuation-{}.json", new_id()));
         write_json(
             &receipt_path,
-            &json!({"language":language,"before":before,"status":"started","authorization_hash":content_hash(&fs::read(&auth[1])?)}),
+            &json!({"language":language,"before":before,"status":"started","authorization_hash":content_hash(&fs::read(&auth[1])?),"model_preference":preference,"model_authorization_hash":model_authorization.map(|a|fs::read(&a[1]).map(|bytes|content_hash(&bytes))).transpose()?}),
         )?;
-        let result = journey(&directory, language, budget.clone(), "authorized");
+        let result = journey(
+            &directory,
+            language,
+            budget.clone(),
+            "authorized",
+            preference.clone(),
+        );
         println!(
             "Same-suite authorized {language} continuation AFTER: {:?}",
             budget.lock().unwrap().counts()
         );
         write_json(
             &receipt_path,
-            &json!({"language":language,"before":before,"after":budget.lock().unwrap().counts(),"status":if result.is_ok(){"passed"}else{"failed"},"error":result.as_ref().err().map(|e|format!("{e:#}")),"authorization_hash":content_hash(&fs::read(&auth[1])?),"identity":identity()?}),
+            &json!({"language":language,"before":before,"after":budget.lock().unwrap().counts(),"status":if result.is_ok(){"passed"}else{"failed"},"error":result.as_ref().err().map(|e|format!("{e:#}")),"authorization_hash":content_hash(&fs::read(&auth[1])?),"model_preference":preference,"model_authorization_hash":model_authorization.map(|a|fs::read(&a[1]).map(|bytes|content_hash(&bytes))).transpose()?,"identity":identity()?}),
         )?;
         return result;
     }
@@ -982,7 +1083,13 @@ fn main() -> Result<()> {
         "none"
     };
     for language in ["rust", "python"] {
-        if let Err(error) = journey(&directory, language, budget.clone(), resume) {
+        if let Err(error) = journey(
+            &directory,
+            language,
+            budget.clone(),
+            resume,
+            ModelPreference::Automatic,
+        ) {
             errors.push(format!("{language}: {error:#}"));
         }
     }
@@ -991,6 +1098,49 @@ fn main() -> Result<()> {
         "Bounded journeys stopped honestly:\n{}",
         errors.join("\n")
     );
+    Ok(())
+}
+fn diagnose_availability(directory: &Path) -> Result<()> {
+    // One bounded status read, no thread/start, turn/start, retry or model work.
+    let runtime = tandem_codex::discover_runtime()?;
+    tandem_codex::verify_runtime(&runtime.binary)?;
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME missing")?)
+        .join("Library/Application Support/Tandem/codex-m0");
+    let mut client = tandem_codex::Client::start_with_overrides(
+        &runtime.binary,
+        &home,
+        directory,
+        &[
+            "forced_login_method=\"chatgpt\"".into(),
+            "model_provider=\"openai\"".into(),
+            "cli_auth_credentials_store=\"keyring\"".into(),
+        ],
+    )?;
+    let account = client.request(
+        "account/read",
+        json!({"refreshToken":false}),
+        std::time::Duration::from_secs(15),
+    )?;
+    let limits = client.request(
+        "account/rateLimits/read",
+        json!({"excludeResetCreditDetails":true,"supportsLunaReserve":false}),
+        std::time::Duration::from_secs(15),
+    );
+    let mut windows = json!({});
+    if let Ok(value) = &limits {
+        for name in ["primary", "secondary"] {
+            let window = &value["rateLimits"][name];
+            windows[name] = json!({"used_percent":window["usedPercent"].as_f64(),"resets_at":window["resetsAt"].as_i64(),"limit_window_seconds":window["limitWindowSeconds"].as_i64()});
+        }
+    }
+    let allowed = limits
+        .as_ref()
+        .ok()
+        .and_then(|v| v["ordinaryUsageAllowed"].as_bool());
+    let receipt = json!({"model_turns":0,"account_is_chatgpt":account.pointer("/account/type").and_then(serde_json::Value::as_str)==Some("chatgpt"),"rate_limits_request_success":limits.is_ok(),"ordinary_usage_allowed":allowed,"ready_from_included_usage_field":allowed==Some(true),"windows":windows,"error_hash":limits.err().map(|e|content_hash(e.to_string().as_bytes())),"limitations":["A later status read cannot reconstruct the earlier failed preflight response. No model work or availability retry was dispatched."]});
+    let path = directory.join(format!("availability-diagnostic-{}.json", new_id()));
+    write_json(&path, &receipt)?;
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
     Ok(())
 }
 fn domain_answer() -> String {

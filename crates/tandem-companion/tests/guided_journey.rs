@@ -165,6 +165,16 @@ fn every_generated_output_schema_requires_nullable_fields_and_closed_objects() {
             );
         }
         strict(&schema, &format!("{action:?}"));
+        if let Some(choices) = schema.pointer("/$defs/ClarificationQuestion/properties/choices") {
+            assert_eq!(
+                choices["minItems"], 2,
+                "{action:?}: a generated clarification must offer at least two actual choices"
+            );
+            assert_eq!(
+                choices["maxItems"], 5,
+                "{action:?}: provider and host question bounds must match"
+            );
+        }
     }
 }
 
@@ -174,16 +184,28 @@ fn saved_owned_fixture_module_preserves_immutable_caller_and_oracle() {
         let temp = tempfile::tempdir().unwrap();
         let mut task =
             support::FixtureTask::create(&temp.path().join("project"), language).unwrap();
+        let argv = vec!["installed-fixture-runner".into(), "contract".into()];
+        let absent = task.clarification_facts(&argv).unwrap();
+        assert_eq!(absent["module_exists"], false);
+        assert_eq!(absent["module_path"], task.path);
+        assert_eq!(absent["installed_check_argv"], json!(argv));
+        assert_eq!(absent["independent_fixture_case_count"], 7);
+        assert_eq!(absent["separate_independent_runner"], false);
         let document = task.project.open_document(&task.path, true).unwrap();
         let saved = task.project.save(&document).unwrap();
         task.record_human_save(&saved).unwrap();
         task.verify_originals().unwrap();
+        assert_eq!(
+            task.clarification_facts(&argv).unwrap()["module_exists"],
+            true
+        );
         let reopened =
             support::FixtureTask::reopen_before_implementation(&task.project.root, language)
                 .unwrap();
         reopened.verify_originals().unwrap();
         std::fs::write(task.project.root.join(&task.path), "unauthorized mutation").unwrap();
         assert!(task.verify_originals().is_err());
+        assert!(task.clarification_facts(&argv).is_err());
         std::fs::write(task.project.root.join(&task.path), "").unwrap();
         let oracle = if language == "rust" {
             "tests/contract.rs"
@@ -197,6 +219,233 @@ fn saved_owned_fixture_module_preserves_immutable_caller_and_oracle() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn supplemental_oracle_is_snapshot_only_and_missing_or_changed_overlay_rejects_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let task = support::FixtureTask::create(&temp.path().join("project"), "python").unwrap();
+    let mut module = task.project.open_document(&task.path, true).unwrap();
+    module.snapshot(task.alternative.clone());
+    let overlays =
+        support::supplemental::check_input_overlays(&task, vec![module.clone()]).unwrap();
+    let selected = vec![support::supplemental::PYTHON_DIRECT_PATH.into()];
+    let context = capture_context(
+        &task.project,
+        &overlays,
+        &selected,
+        &temp.path().join("context"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        context
+            .files
+            .iter()
+            .any(|f| f.path == support::supplemental::PYTHON_DIRECT_PATH
+                && f.text == support::supplemental::PYTHON_DIRECT_TESTS)
+    );
+    let snapshot = tandem_checks::materialize(
+        &task.project,
+        &overlays,
+        &temp.path().join("check"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let mut record = CheckRecord::pending(
+        task.project.key().into(),
+        "python-unittest".into(),
+        "simulated-tool".into(),
+    );
+    record.snapshot = Some(snapshot.manifest);
+    record.snapshot_unchanged = Some(true);
+    record.finish(
+        CheckStatus::Passed,
+        "SIMULATED evidence matching only; not an executed check",
+    );
+    let recipes = vec![("python-unittest".into(), "simulated-tool".into())];
+    assert_eq!(
+        matching_check_evidence(&context, &[record.clone()], &recipes).len(),
+        1
+    );
+    let missing = capture_context(
+        &task.project,
+        &[module],
+        &selected,
+        &temp.path().join("missing"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(matching_check_evidence(&missing, &[record.clone()], &recipes).is_empty());
+    let mut changed = overlays.clone();
+    changed
+        .iter_mut()
+        .find(|d| d.path == support::supplemental::PYTHON_DIRECT_PATH)
+        .unwrap()
+        .snapshot("# altered oracle\n".into());
+    let stale = capture_context(
+        &task.project,
+        &changed,
+        &selected,
+        &temp.path().join("stale"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(matching_check_evidence(&stale, &[record], &recipes).is_empty());
+    assert!(support::supplemental::check_input_overlays(&task, changed).is_err());
+    assert!(
+        !task
+            .project
+            .root
+            .join(support::supplemental::PYTHON_DIRECT_PATH)
+            .exists()
+    );
+    task.verify_originals().unwrap();
+}
+
+#[test]
+fn repeated_public_pages_stop_bounded_retests_without_blocking_real_local_requests() {
+    let page = ResearchRequestKind::PublicPage {
+        url: "https://docs.python.org/3/library/functions.html#min".into(),
+    };
+    let mut reply = ConversationReply {
+        text: "Request actual context.".into(),
+        question: None,
+        findings: vec![],
+        research_requests: vec![page.clone()],
+    };
+    assert!(!support::duplicate_public_page_requests(&reply));
+    reply.research_requests.push(page);
+    assert!(support::duplicate_public_page_requests(&reply));
+    reply
+        .research_requests
+        .push(ResearchRequestKind::DependencyMetadata {
+            ecosystem: DependencyEcosystem::Python,
+        });
+    assert!(!support::duplicate_public_page_requests(&reply));
+}
+
+#[test]
+fn explicit_model_authorization_preserves_budget_and_requires_same_selection_on_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let suite = root.join("approved-suite");
+    std::fs::create_dir(&suite).unwrap();
+    let path = suite.join("turn-budget.json");
+    let plan = root.join("plan.md");
+    let cap_path = root.join("caps.json");
+    let model_path = root.join("model.json");
+    let mut budget = support::TurnBudget::open(&path).unwrap();
+    assert_eq!(
+        budget
+            .model_preference(None, &root, &plan, "python")
+            .unwrap(),
+        ModelPreference::Automatic
+    );
+    budget.reserve("probe", "public").unwrap();
+    for language in ["rust", "python"] {
+        budget.claim(language).unwrap();
+        for _ in 0..24 {
+            budget.reserve(language, "private").unwrap();
+        }
+        budget.finish(language, "failed").unwrap();
+    }
+    drop(budget);
+    let caps = json!({"probe":4,"rust":56,"python":56,"total":116});
+    let cap_auth = json!({"version":2,"authorized_at_utc":"2026-11-15","user_message":"Continue on","interpretation":"Same suite","repo":root,"plan_path":plan,"suite_directory":suite,"ledger_path":path,"previous_caps":{"probe":4,"rust":24,"python":24,"total":52},"authorized_caps":caps,"consumed_at_authorization":{"probe":1,"rust":24,"python":24,"total":49},"constraints":["Preserve charges"]});
+    std::fs::write(&cap_path, serde_json::to_vec(&cap_auth).unwrap()).unwrap();
+    let mut budget = support::TurnBudget::open_authorized(&path, &cap_path, &root, &plan).unwrap();
+    for _ in 24..52 {
+        budget.reserve("rust", "private").unwrap();
+    }
+    for _ in 24..43 {
+        budget.reserve("python", "private").unwrap();
+    }
+    let before: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let auth = json!({"version":1,"authorized_at_utc":"2026-11-15","user_message":"Continue","interpretation":"Explicit Astra selection","repo":root,"plan_path":plan,"suite_directory":suite,"ledger_path":path,"budget_authorization_path":cap_path,"selected_model":{"catalog_id":"gpt-6-astra","effort":"model_supported_default"},"consumed_at_authorization":{"probe":1,"rust":52,"python":43,"total":96},"authorized_caps":caps,"scope":"Existing Python only","constraints":["No fallback or reset"]});
+    assert!(
+        budget
+            .model_preference(Some((&model_path, &cap_path)), &root, &plan, "python")
+            .is_err()
+    );
+    for (field, value) in [
+        (
+            "selected_model",
+            json!({"catalog_id":"other","effort":"model_supported_default"}),
+        ),
+        (
+            "authorized_caps",
+            json!({"probe":4,"rust":56,"python":57,"total":117}),
+        ),
+        ("suite_directory", json!(root.join("other"))),
+        (
+            "consumed_at_authorization",
+            json!({"probe":1,"rust":52,"python":42,"total":95}),
+        ),
+    ] {
+        let mut wrong = auth.clone();
+        wrong[field] = value;
+        std::fs::write(&model_path, serde_json::to_vec(&wrong).unwrap()).unwrap();
+        assert!(
+            budget
+                .model_preference(Some((&model_path, &cap_path)), &root, &plan, "python")
+                .is_err(),
+            "{field}"
+        );
+    }
+    std::fs::write(&model_path, serde_json::to_vec(&auth).unwrap()).unwrap();
+    assert!(
+        budget
+            .model_preference(Some((&model_path, &cap_path)), &root, &plan, "rust")
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
+        before
+    );
+    let preference = budget
+        .model_preference(Some((&model_path, &cap_path)), &root, &plan, "python")
+        .unwrap();
+    assert_eq!(
+        preference,
+        ModelPreference::Explicit {
+            model: "gpt-6-astra".into()
+        }
+    );
+    assert!(
+        resolve_model(&ModelCatalog { models: vec![] }, &preference).is_err(),
+        "missing selection cannot fall back"
+    );
+    assert_eq!(budget.total(), 96);
+    budget.reserve("python", "private").unwrap();
+    drop(budget);
+    let mut budget = support::TurnBudget::open_authorized(&path, &cap_path, &root, &plan).unwrap();
+    assert!(
+        budget
+            .model_preference(None, &root, &plan, "python")
+            .is_err()
+    );
+    assert_eq!(
+        budget
+            .model_preference(Some((&model_path, &cap_path)), &root, &plan, "python")
+            .unwrap(),
+        preference
+    );
+    let mut changed = auth.clone();
+    changed["scope"] = json!("Changed provenance");
+    std::fs::write(&model_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(
+        budget
+            .model_preference(Some((&model_path, &cap_path)), &root, &plan, "python")
+            .is_err()
+    );
+    let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        &after["reservations"].as_array().unwrap()[..96],
+        before["reservations"].as_array().unwrap()
+    );
+    assert_eq!(after["amendments"], before["amendments"]);
+    assert_eq!(after["model_selections"].as_array().unwrap().len(), 1);
 }
 
 #[test]

@@ -52,6 +52,7 @@ pub struct QuestionChoice {
 pub struct ClarificationQuestion {
     pub id: String,
     pub prompt: String,
+    #[schemars(length(min = 2, max = 5))]
     pub choices: Vec<QuestionChoice>,
 }
 
