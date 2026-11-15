@@ -85,7 +85,7 @@ fn main() -> Result<()> {
             ExplanationDepth::Concise
         });
         let guidance = settings.effective(project.key(), language, None);
-        let mut request=ModelRequest{
+        let mut request=ModelRequest{ model_preference: ModelPreference::Automatic, resolved_model: None, conversation_id: Some(new_id()),
             delegation:None,action:CompanionAction::Analyze,question:"Implement double for integer values from 0 through 1,000,000 inclusive. Return twice the input. Existing tests cover the contract; do not add requirements outside this input domain. Keep the plan to one implementation step. Keep all solution code hidden.".into(),language:language.into(),guidance,task:None,context:capture(&[])?,evidence:vec![],prior_decisions:vec![]};
         let (run, mut binding) = session.run(
             ModelRun::pending(project.key().into(), request.clone()),

@@ -158,6 +158,9 @@ fn schema_four_migration_preserves_every_legacy_row_and_creates_backup() {
 }
 fn legacy_run(task: Option<&TaskPlan>) -> String {
     let request = ModelRequest {
+        model_preference: ModelPreference::Automatic,
+        resolved_model: None,
+        conversation_id: None,
         action: CompanionAction::Review,
         question: "Check the greeting".into(),
         language: "rust".into(),

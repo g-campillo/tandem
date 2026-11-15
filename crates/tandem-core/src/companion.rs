@@ -245,6 +245,15 @@ pub struct ReviewEvidence {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRequest {
+    #[serde(default)]
+    pub model_preference: ModelPreference,
+    /// A logical operation resolves once; follow-up subturns copy this snapshot.
+    #[serde(default)]
+    pub resolved_model: Option<ResolvedModel>,
+    /// TaskSession id for managed conversations. Legacy callers may supply their
+    /// retained conversation id until explicitly adopted into a TaskSession.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
     pub action: CompanionAction,
     pub question: String,
     pub language: String,
@@ -473,6 +482,8 @@ pub struct ModelRun {
     pub binding: ReviewBinding,
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
+    #[serde(default)]
+    pub thread_binding: Option<ThreadBinding>,
     pub response: Option<CompanionResponse>,
     pub detail: String,
     pub started_at_ms: i64,
@@ -492,6 +503,7 @@ impl ModelRun {
             request,
             thread_id: None,
             turn_id: None,
+            thread_binding: None,
             response: None,
             detail: "Preparing selected context".into(),
             started_at_ms: now_ms(),
@@ -500,6 +512,33 @@ impl ModelRun {
             cancel_requested: false,
             tool_items: 0,
         }
+    }
+    /// Compatibility for the old Analyze-to-task name change. Managed
+    /// TaskSessions keep their durable id and do not need this transfer.
+    pub fn legacy_task_thread(
+        &self,
+        task_id: &str,
+        preference: &ModelPreference,
+    ) -> Option<ThreadBinding> {
+        if self.status != ModelStatus::Completed || self.request.action != CompanionAction::Analyze
+        {
+            return None;
+        }
+        let model = self.request.resolved_model.as_ref()?;
+        if let ModelPreference::Explicit { model: selected } = preference
+            && selected != &model.model
+        {
+            return None;
+        }
+        let mut binding = self.thread_binding.clone()?;
+        let hash = binding.instructions_hash.as_deref()?;
+        if self.thread_id.as_ref() != Some(&binding.thread_id)
+            || !binding.reusable_for(&self.request.thread_identity(&self.id), model, hash)
+        {
+            return None;
+        }
+        binding.identity.as_mut()?.session_id = task_id.to_string();
+        Some(binding)
     }
     pub fn finish(&mut self, status: ModelStatus, detail: impl Into<String>) {
         self.status = status;
@@ -523,6 +562,64 @@ impl ModelRun {
 pub struct ThreadBinding {
     pub thread_id: String,
     pub manifest: BTreeMap<String, String>,
+    /// None means Unknown for legacy rows; it never inherits a current choice.
+    #[serde(default)]
+    pub resolved_model: Option<ResolvedModel>,
+    #[serde(default)]
+    pub identity: Option<ThreadIdentity>,
+    #[serde(default)]
+    pub instructions_hash: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreadMode {
+    PrivateCompanion,
+    Delegation,
+    PublicResearch,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadIdentity {
+    pub session_id: String,
+    pub channel: String,
+    pub language: String,
+    pub mode: ThreadMode,
+}
+impl ModelRequest {
+    pub fn thread_identity(&self, fallback: &str) -> ThreadIdentity {
+        ThreadIdentity {
+            session_id: self
+                .conversation_id
+                .clone()
+                .or_else(|| self.task.as_ref().map(|t| t.id.clone()))
+                .unwrap_or_else(|| fallback.to_string()),
+            channel: match self.action {
+                CompanionAction::Reveal => "solution",
+                CompanionAction::Delegate => "delegation",
+                _ => "main",
+            }
+            .into(),
+            language: self.language.clone(),
+            mode: if self.action == CompanionAction::Delegate {
+                ThreadMode::Delegation
+            } else {
+                ThreadMode::PrivateCompanion
+            },
+        }
+    }
+}
+impl ThreadBinding {
+    pub fn reusable_for(
+        &self,
+        identity: &ThreadIdentity,
+        model: &ResolvedModel,
+        instructions_hash: &str,
+    ) -> bool {
+        self.identity.as_ref() == Some(identity)
+            && self
+                .resolved_model
+                .as_ref()
+                .is_some_and(|m| m.same_configuration(model))
+            && self.instructions_hash.as_deref() == Some(instructions_hash)
+    }
 }
 
 #[cfg(test)]
@@ -530,6 +627,9 @@ mod tests {
     use super::*;
     fn request(action: CompanionAction) -> ModelRequest {
         ModelRequest {
+            model_preference: ModelPreference::Automatic,
+            resolved_model: None,
+            conversation_id: None,
             delegation: None,
             action,
             question: "Explain".into(),

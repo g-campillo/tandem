@@ -8,7 +8,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-use tandem_codex::Client;
+use tandem_codex::{Client, ProtocolExchange};
 use tandem_core::*;
 
 const RUNTIME_HASH: &str = "739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002";
@@ -44,8 +44,8 @@ pub struct ConnectionState {
     pub limits: Vec<String>,
 }
 
-pub struct CompanionSession {
-    client: Client,
+pub struct CompanionSession<E: ProtocolExchange = Client> {
+    client: E,
     scratch: PathBuf,
     resumed: BTreeSet<String>,
     pub connection: ConnectionState,
@@ -121,9 +121,18 @@ impl CompanionSession {
             settings.push(format!("features.{feature}=false"));
         }
         let client = Client::start_with_overrides(binary, credential_home, scratch, &settings)?;
-        let mut session = Self {
+        let mut session = Self::with_exchange(client, scratch.into());
+        session.refresh()?;
+        Ok(session)
+    }
+}
+impl<E: ProtocolExchange> CompanionSession<E> {
+    /// Injects protocol exchange for deterministic tests/adapters, without
+    /// providing an alternate executable path to the production connector.
+    pub fn with_exchange(client: E, scratch: PathBuf) -> Self {
+        Self {
             client,
-            scratch: scratch.into(),
+            scratch,
             resumed: BTreeSet::new(),
             connection: ConnectionState {
                 kind: ConnectionKind::Unavailable,
@@ -131,16 +140,71 @@ impl CompanionSession {
                 plan: None,
                 limits: vec![],
             },
-        };
-        session.refresh()?;
-        Ok(session)
+        }
+    }
+    pub fn list_models(&mut self) -> Result<ModelCatalog> {
+        ensure!(
+            self.refresh()?.kind == ConnectionKind::Ready,
+            "{}",
+            self.connection.detail
+        );
+        self.list_models_ready()
+    }
+    fn list_models_ready(&mut self) -> Result<ModelCatalog> {
+        let mut catalog = ModelCatalog { models: vec![] };
+        let mut cursor: Option<String> = None;
+        let mut cursors = BTreeSet::new();
+        for _ in 0..10 {
+            let page = self.availability_request(
+                "model/list",
+                json!({"includeHidden":false,"limit":100,"cursor":cursor}),
+            )?;
+            let (models, next) = crate::models::parse_catalog_page(page)?;
+            catalog.models.extend(models);
+            // Detect repeated pages immediately, including distinct cursors.
+            let mut ids = BTreeSet::new();
+            let mut names = BTreeSet::new();
+            ensure!(
+                catalog
+                    .models
+                    .iter()
+                    .all(|m| ids.insert(&m.catalog_id) && names.insert(&m.model)),
+                "The runtime model catalog contains duplicate identities; refresh availability"
+            );
+            match next {
+                None => {
+                    crate::models::validate_catalog(&catalog)?;
+                    return Ok(catalog);
+                }
+                Some(next) => {
+                    ensure!(
+                        cursors.insert(next.clone()),
+                        "The runtime model catalog repeated a pagination cursor; refresh availability"
+                    );
+                    cursor = Some(next);
+                }
+            }
+        }
+        bail!("The runtime model catalog exceeds the 10 page limit; refresh availability")
+    }
+    /// Call once at the logical operation boundary; copy this snapshot to every
+    /// subturn so catalog/default changes cannot reroute an operation mid-run.
+    pub fn resolve_model(&mut self, preference: &ModelPreference) -> Result<ResolvedModel> {
+        crate::resolve_model(&self.list_models()?, preference)
+    }
+    fn availability_request(&mut self, method: &str, params: Value) -> Result<Value> {
+        match self.client.request(method, params, REQUEST_TIMEOUT) {
+            Ok(value) => Ok(value),
+            Err(_) => {
+                self.connection.kind = ConnectionKind::Unavailable;
+                self.connection.limits.clear();
+                self.connection.detail = "Companion availability could not be read. Reconnect or retry explicitly; saved work is preserved.".into();
+                bail!("{}", self.connection.detail)
+            }
+        }
     }
     pub fn refresh(&mut self) -> Result<ConnectionState> {
-        let account = self.client.request(
-            "account/read",
-            json!({"refreshToken":false}),
-            REQUEST_TIMEOUT,
-        )?;
+        let account = self.availability_request("account/read", json!({"refreshToken":false}))?;
         let account_type = account.pointer("/account/type").and_then(Value::as_str);
         let mut state = ConnectionState {
             kind: ConnectionKind::SignedOut,
@@ -264,6 +328,7 @@ impl CompanionSession {
         mut observe: impl FnMut(&ModelRun) -> Result<()>,
     ) -> Result<(ModelRun, Option<ThreadBinding>)> {
         let mut new_binding = None;
+        let mut thread_requested = false;
         let validation = (|| -> Result<()> {
             ensure!(
                 !crate::credential_like_data(&serde_json::to_value(&run.request)?),
@@ -311,12 +376,39 @@ impl CompanionSession {
         } else {
             format!("{INSTRUCTIONS}\n{IMPROVEMENT_RULES}")
         };
+        let instructions_hash = content_hash(instructions.as_bytes());
+        let identity = run.request.thread_identity(&run.id);
         let result = (|| -> Result<()> {
             ensure!(
                 self.refresh()?.kind == ConnectionKind::Ready,
                 "{}",
                 self.connection.detail
             );
+            run.request.model_preference.validate()?;
+            let resolved = match &run.request.resolved_model {
+                Some(snapshot) => {
+                    snapshot.validate()?;
+                    snapshot.clone()
+                }
+                None => {
+                    crate::resolve_model(&self.list_models_ready()?, &run.request.model_preference)?
+                }
+            };
+            if let ModelPreference::Explicit { model } = &run.request.model_preference {
+                ensure!(
+                    *model == resolved.model,
+                    "The operation's model snapshot does not match the selected model"
+                );
+            }
+            run.request.resolved_model = Some(resolved.clone());
+            run.sequence += 1;
+            observe(&run)?; // Persist the immutable selection before creating a thread.
+            let binding = binding
+                .filter(|binding| binding.reusable_for(&identity, &resolved, &instructions_hash));
+            let mut config = json!({});
+            if let Some(effort) = &resolved.effort {
+                config["model_reasoning_effort"] = json!(effort);
+            }
             if cancel.load(Ordering::Relaxed) {
                 run.finish(
                     ModelStatus::Cancelled,
@@ -327,7 +419,9 @@ impl CompanionSession {
             let mut manifest = std::collections::BTreeMap::new();
             let thread = if let Some(binding) = binding {
                 if !self.resumed.contains(&binding.thread_id) {
-                    let result=self.client.request("thread/resume",json!({"threadId":binding.thread_id,"cwd":self.scratch,"permissions":"tandem_companion","approvalPolicy":"never","excludeTurns":true,"baseInstructions":instructions}),REQUEST_TIMEOUT)?;
+                    thread_requested = true;
+                    let result=self.client.request("thread/resume",json!({"threadId":binding.thread_id,"model":resolved.model,"modelProvider":"openai","config":config,"cwd":self.scratch,"permissions":"tandem_companion","approvalPolicy":"never","excludeTurns":true,"baseInstructions":instructions}),REQUEST_TIMEOUT)?;
+                    verify_thread_model(&result, &resolved)?;
                     ensure!(
                         result.pointer("/thread/id").and_then(Value::as_str)
                             == Some(&binding.thread_id),
@@ -340,13 +434,9 @@ impl CompanionSession {
                 }
                 binding.thread_id
             } else {
-                let result=self.client.request("thread/start",json!({"cwd":self.scratch,"permissions":"tandem_companion","approvalPolicy":"never","baseInstructions":instructions,"developerInstructions":"Only the current Tandem action and any recorded broker grant apply. You cannot call executable tools or directly edit files."}),REQUEST_TIMEOUT)?;
-                if let Some(sources) = result["instructionSources"].as_array() {
-                    ensure!(
-                        sources.is_empty(),
-                        "Unexpected automatically loaded instructions; connection stopped"
-                    );
-                }
+                thread_requested = true;
+                let result=self.client.request("thread/start",json!({"model":resolved.model,"modelProvider":"openai","config":config,"allowProviderModelFallback":false,"cwd":self.scratch,"permissions":"tandem_companion","approvalPolicy":"never","baseInstructions":instructions,"developerInstructions":"Only the current Tandem action and any recorded broker grant apply. You cannot call executable tools or directly edit files."}),REQUEST_TIMEOUT)?;
+                verify_thread_model(&result, &resolved)?;
                 let id = result
                     .pointer("/thread/id")
                     .and_then(Value::as_str)
@@ -370,7 +460,13 @@ impl CompanionSession {
                 serde_json::to_string(&run.request.evidence)?,
                 serde_json::to_string(&run.request.delegation)?
             );
-            let turn=self.client.request("turn/start",json!({"threadId":thread,"input":[{"type":"text","text":prompt}],"effort":"medium","permissions":"tandem_companion","approvalPolicy":"never","outputSchema":run.request.schema()}),REQUEST_TIMEOUT)?;
+            let mut params = json!({"threadId":thread,"model":resolved.model,"input":[{"type":"text","text":prompt}],"permissions":"tandem_companion","approvalPolicy":"never","outputSchema":run.request.schema()});
+            if let Some(effort) = &resolved.effort {
+                params["effort"] = json!(effort);
+            }
+            thread_requested = true;
+            let turn = self.client.request("turn/start", params, REQUEST_TIMEOUT)?;
+            verify_optional_model(&turn, &resolved)?;
             let turn = turn
                 .pointer("/turn/id")
                 .and_then(Value::as_str)
@@ -415,6 +511,11 @@ impl CompanionSession {
                     continue;
                 }
                 match event["method"].as_str() {
+                    Some("model/rerouted") => {
+                        if params["toModel"].as_str() != Some(&resolved.model) {
+                            return Err(UnexpectedModel.into());
+                        }
+                    }
                     Some("turn/started") => started = true,
                     Some("item/agentMessage/delta") => {
                         run.received_bytes = run
@@ -456,7 +557,7 @@ impl CompanionSession {
                     Some("turn/completed") if params["turn"]["id"] == turn => {
                         match params["turn"]["status"].as_str(){
                             Some("completed")=>{let value=answer.context("The companion returned no valid structured result")?;match run.request.parse_response(value){
-                                Ok(response)=>{run.response=Some(response);run.finish(ModelStatus::Completed,if run.cancel_requested{"The response completed before cancellation took effect"}else{"Response complete for the captured context"});new_binding=Some(ThreadBinding{thread_id:thread,manifest:run.request.context.manifest()});},
+                                Ok(response)=>{run.response=Some(response);run.finish(ModelStatus::Completed,if run.cancel_requested{"The response completed before cancellation took effect"}else{"Response complete for the captured context"});new_binding=Some(ThreadBinding{thread_id:thread,manifest:run.request.context.manifest(),resolved_model:Some(resolved.clone()),identity:Some(identity.clone()),instructions_hash:Some(instructions_hash.clone())});run.thread_binding=new_binding.clone();},
                                 Err(_)=>run.finish(ModelStatus::Quarantined,"The response did not satisfy its content or evidence contract and was not shown. Refine the request or try again."),
                             }},
                             Some("interrupted")=>run.finish(ModelStatus::Cancelled,"Turn interrupted. Your code and completed responses are preserved."),
@@ -480,6 +581,7 @@ impl CompanionSession {
             Ok(())
         })();
         if let Err(error) = result {
+            let substituted = error.is::<UnexpectedModel>();
             if let (Some(thread), Some(turn)) = (&run.thread_id, &run.turn_id) {
                 let _ = self.client.request(
                     "turn/interrupt",
@@ -491,14 +593,16 @@ impl CompanionSession {
                 self.connection.kind = ConnectionKind::Unavailable;
                 self.connection.limits.clear();
                 self.connection.detail="Companion transport was stopped after an uncertain response. Reconnect or retry explicitly.".into();
-            } else if self.connection.kind == ConnectionKind::Ready {
+            } else if thread_requested {
                 let _ = self.client.shutdown();
                 self.resumed.clear();
                 self.connection.kind = ConnectionKind::Unavailable;
                 self.connection.limits.clear();
                 self.connection.detail="The companion request failed before a confirmed start. Reconnect or retry explicitly; saved work is preserved.".into();
             }
-            let detail = if run.turn_id.is_some() {
+            let detail = if substituted {
+                error.to_string()
+            } else if run.turn_id.is_some() {
                 "The connection ended without a confirmed terminal result. Work is preserved; continue explicitly.".to_string()
             } else if self.connection.kind == ConnectionKind::Unavailable {
                 self.connection.detail.clone()
@@ -506,7 +610,9 @@ impl CompanionSession {
                 error.to_string()
             };
             run.finish(
-                if run.turn_id.is_some() {
+                if substituted {
+                    ModelStatus::Quarantined
+                } else if run.turn_id.is_some() {
                     ModelStatus::Interrupted
                 } else {
                     ModelStatus::Failed
@@ -515,10 +621,46 @@ impl CompanionSession {
             );
             // A possibly active turn is never resumed or replayed automatically.
             new_binding = None;
+            run.thread_binding = None;
+            run.response = None;
         }
         observe(&run)?;
         Ok((run, new_binding))
     }
+}
+
+#[derive(Debug)]
+struct UnexpectedModel;
+impl std::fmt::Display for UnexpectedModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The runtime substituted a different model or reasoning effort. Its response was quarantined; refresh availability or select another model. The saved choice is retained.")
+    }
+}
+impl std::error::Error for UnexpectedModel {}
+fn verify_thread_model(result: &Value, selected: &ResolvedModel) -> Result<()> {
+    if result["model"].as_str() != Some(&selected.model)
+        || result["modelProvider"].as_str() != Some("openai")
+        || result["reasoningEffort"].as_str() != selected.effort.as_deref()
+    {
+        return Err(UnexpectedModel.into());
+    }
+    if let Some(sources) = result["instructionSources"].as_array() {
+        ensure!(
+            sources.is_empty(),
+            "Unexpected automatically loaded instructions; connection stopped"
+        );
+    }
+    Ok(())
+}
+fn verify_optional_model(result: &Value, selected: &ResolvedModel) -> Result<()> {
+    for path in ["/model", "/turn/model"] {
+        if let Some(model) = result.pointer(path)
+            && model.as_str() != Some(&selected.model)
+        {
+            return Err(UnexpectedModel.into());
+        }
+    }
+    Ok(())
 }
 
 pub fn classify_failure(error: &Value) -> (ConnectionKind, String) {
@@ -527,7 +669,7 @@ pub fn classify_failure(error: &Value) -> (ConnectionKind, String) {
         "unauthorized"=>(ConnectionKind::SignedOut,"ChatGPT sign-in expired or was rejected. Sign in again; your work is preserved.".into()),
         "usageLimitExceeded"|"rateLimitExceeded"|"sessionBudgetExceeded"=>(ConnectionKind::UsageLimited,"Subscription usage is currently limited. Wait for availability and refresh status; Tandem will not switch billing or purchase a reset.".into()),
         "contextWindowExceeded"=>(ConnectionKind::Unavailable,"This conversation reached its context limit. Start a fresh conversation from the saved task and selected context.".into()),
-        "modelNotFound"=>(ConnectionKind::Unavailable,"The selected model is unavailable for this account. Reconnect to refresh the supported default.".into()),
+        "modelNotFound"=>(ConnectionKind::Unavailable,"The selected model is unavailable for this account. Refresh availability or select another model; the saved choice is retained.".into()),
         _=>(ConnectionKind::Unavailable,"The companion connection failed. Editing and saved work remain available; retry explicitly.".into())
     }
 }
@@ -541,6 +683,9 @@ mod tests {
         assert_eq!(session.connection.kind, ConnectionKind::Ready);
         session.client.shutdown().unwrap();
         let request = ModelRequest {
+            model_preference: ModelPreference::Automatic,
+            resolved_model: None,
+            conversation_id: None,
             delegation: None,
             action: CompanionAction::Ask,
             question: "This request must not reach a model".into(),

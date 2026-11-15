@@ -27,6 +27,9 @@ fn captured_working_version_keeps_closed_drafts_and_prefers_live_buffers() {
 }
 fn request() -> ModelRequest {
     ModelRequest {
+        model_preference: ModelPreference::Automatic,
+        resolved_model: None,
+        conversation_id: None,
         delegation: None,
         action: CompanionAction::Guide,
         question: "Explain the next step".into(),
@@ -75,6 +78,7 @@ fn restart_preserves_completed_responses_and_interrupts_pending_work_without_rep
                 &ThreadBinding {
                     thread_id: "thread-active".into(),
                     manifest: Default::default(),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -184,4 +188,147 @@ fn schema_four_migration_backs_up_before_upgrading_to_five() {
             .to_string_lossy()
             .starts_with("workspace-schema4-backup-")
     }));
+}
+
+#[test]
+fn model_choice_and_snapshot_survive_restart_without_changing_guidance_or_transcript() {
+    let directory = tempfile::tempdir().unwrap();
+    let choice = ModelPreference::Explicit {
+        model: "runtime-choice".into(),
+    };
+    let resolved = ResolvedModel {
+        model: "runtime-choice".into(),
+        catalog_id: "catalog-entry".into(),
+        display_name: "Chosen model".into(),
+        effort: Some("high".into()),
+    };
+    let (session_id, history, completed_id, guidance);
+    {
+        let mut store = Store::open(directory.path()).unwrap();
+        assert_eq!(
+            store.model_preference().unwrap(),
+            ModelPreference::Automatic
+        );
+        let session = store.create_session("p").unwrap();
+        let session = store
+            .append_user_message(
+                &session.id,
+                session.sequence,
+                "message",
+                "Retain this conversation across model changes",
+            )
+            .unwrap();
+        session_id = session.id.clone();
+        history = serde_json::to_value(store.conversation_events(&session.id, None, 20).unwrap())
+            .unwrap();
+        guidance = serde_json::to_value(store.guidance().unwrap()).unwrap();
+        store.save_model_preference(&choice).unwrap();
+        let mut req = request();
+        req.conversation_id = Some(session.id.clone());
+        req.model_preference = choice.clone();
+        req.resolved_model = Some(resolved.clone());
+        let mut run = ModelRun::pending("p".into(), req);
+        run.finish(ModelStatus::Completed, "Historical explanation");
+        completed_id = run.id.clone();
+        store.save_model_run(&run).unwrap();
+        store
+            .save_model_preference(&ModelPreference::Automatic)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(store.conversation_events(&session.id, None, 20).unwrap())
+                .unwrap(),
+            history
+        );
+        store.save_model_preference(&choice).unwrap();
+        let mut changed_guidance = store.guidance().unwrap();
+        changed_guidance.sequence += 1;
+        store.save_guidance(&changed_guidance).unwrap();
+        assert_eq!(store.model_preference().unwrap(), choice);
+    }
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.model_preference().unwrap(), choice);
+    let current_guidance = store.guidance().unwrap();
+    assert_eq!(
+        current_guidance.defaults,
+        serde_json::from_value::<GuidanceSettings>(guidance)
+            .unwrap()
+            .defaults
+    );
+    assert_eq!(
+        serde_json::to_value(store.conversation_events(&session_id, None, 20).unwrap()).unwrap(),
+        history
+    );
+    let saved = store
+        .model_runs("p")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == completed_id)
+        .unwrap();
+    assert_eq!(saved.request.resolved_model, Some(resolved));
+    assert_eq!(
+        saved.request.conversation_id.as_deref(),
+        Some(session_id.as_str())
+    );
+}
+
+#[test]
+fn legacy_model_metadata_is_unknown_and_never_inherits_current_selection() {
+    let binding: ThreadBinding =
+        serde_json::from_value(serde_json::json!({"thread_id":"old","manifest":{}})).unwrap();
+    assert!(
+        binding.resolved_model.is_none()
+            && binding.identity.is_none()
+            && binding.instructions_hash.is_none()
+    );
+    let mut old = serde_json::to_value(ModelRun::pending("p".into(), request())).unwrap();
+    let object = old["request"].as_object_mut().unwrap();
+    object.remove("resolved_model");
+    object.remove("model_preference");
+    object.remove("conversation_id");
+    old.as_object_mut().unwrap().remove("thread_binding");
+    let old: ModelRun = serde_json::from_value(old).unwrap();
+    assert!(old.request.resolved_model.is_none() && old.thread_binding.is_none());
+    assert_eq!(old.request.model_preference, ModelPreference::Automatic);
+}
+
+#[test]
+fn legacy_plan_acceptance_only_transfers_a_known_matching_model_and_conversation() {
+    let mut req = request();
+    req.action = CompanionAction::Analyze;
+    req.conversation_id = Some("draft".into());
+    let resolved = ResolvedModel {
+        model: "a".into(),
+        catalog_id: "entry-a".into(),
+        display_name: "Model A".into(),
+        effort: Some("high".into()),
+    };
+    req.resolved_model = Some(resolved.clone());
+    let mut run = ModelRun::pending("p".into(), req);
+    run.thread_id = Some("thread".into());
+    run.thread_binding = Some(ThreadBinding {
+        thread_id: "thread".into(),
+        manifest: Default::default(),
+        resolved_model: Some(resolved),
+        identity: Some(run.request.thread_identity(&run.id)),
+        instructions_hash: Some("instructions".into()),
+    });
+    run.finish(ModelStatus::Completed, "Plan proposal");
+    let transferred = run
+        .legacy_task_thread("accepted-task", &ModelPreference::Automatic)
+        .unwrap();
+    assert_eq!(transferred.identity.unwrap().session_id, "accepted-task");
+    assert!(
+        run.legacy_task_thread(
+            "accepted-task",
+            &ModelPreference::Explicit {
+                model: "different".into()
+            }
+        )
+        .is_none()
+    );
+    run.thread_binding.as_mut().unwrap().resolved_model = None;
+    assert!(
+        run.legacy_task_thread("accepted-task", &ModelPreference::Automatic)
+            .is_none()
+    );
 }

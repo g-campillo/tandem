@@ -95,6 +95,14 @@ fn runtime_command(binary: &Path, home: &Path, cwd: &Path) -> Command {
     command
 }
 
+/// Request/notification boundary for deterministic runtime adapters. Production
+/// CompanionSession still discovers and verifies its pinned executable.
+pub trait ProtocolExchange {
+    fn request(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value>;
+    fn poll_event(&mut self, timeout: Duration) -> Result<Option<Value>>;
+    fn shutdown(&mut self) -> Result<()>;
+}
+
 pub struct Client {
     child: Child,
     input: Option<ChildStdin>,
@@ -329,6 +337,18 @@ impl Client {
         let _ = self.child.kill();
         self.child.wait().context("reap app-server")?;
         Ok(())
+    }
+}
+
+impl ProtocolExchange for Client {
+    fn request(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+        Client::request(self, method, params, timeout)
+    }
+    fn poll_event(&mut self, timeout: Duration) -> Result<Option<Value>> {
+        Client::poll_event(self, timeout)
+    }
+    fn shutdown(&mut self) -> Result<()> {
+        Client::shutdown(self)
     }
 }
 

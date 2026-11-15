@@ -1,3 +1,4 @@
+use crate::ModelPreference;
 use crate::conversation::{bounded_structure, bounded_text, stable_id};
 use crate::{
     AgentRun, AgentStatus, CheckRecord, CheckStatus, ClarificationAnswer, ClarificationQuestion,
@@ -113,6 +114,28 @@ impl Store {
         store.reconcile_interrupted_agents()?;
         store.reconcile_interrupted_session_operations()?;
         Ok(store)
+    }
+
+    pub fn model_preference(&self) -> Result<ModelPreference> {
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM settings WHERE key='model_preference'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let preference: ModelPreference = value
+            .map(|s| serde_json::from_str(&s).context("Model preference is damaged"))
+            .transpose()?
+            .unwrap_or_default();
+        preference.validate()?;
+        Ok(preference)
+    }
+    pub fn save_model_preference(&mut self, preference: &ModelPreference) -> Result<()> {
+        preference.validate()?;
+        self.connection.execute("INSERT INTO settings(key,value) VALUES('model_preference',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(preference)?])?;
+        Ok(())
     }
 
     pub fn guidance(&self) -> Result<GuidanceSettings> {

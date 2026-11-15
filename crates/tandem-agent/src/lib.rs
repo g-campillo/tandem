@@ -267,6 +267,8 @@ impl AgentExecution<'_> {
         let mut receipts = Vec::new();
         let result = (|| -> Result<()> {
             inspect_delegation(&mut run)?;
+            let model_preference = self.store.lock().unwrap().model_preference()?;
+            let resolved_model = self.session.resolve_model(&model_preference)?;
             let stage = stage_project(&run)?;
             let context_cache = PathBuf::from(&run.directory).join("context-captures");
             for round in 1..=run.grant.max_rounds {
@@ -342,6 +344,9 @@ impl AgentExecution<'_> {
                     .map_or("rust", Document::language)
                     .to_string();
                 let request = ModelRequest {
+                    model_preference: model_preference.clone(),
+                    resolved_model: Some(resolved_model.clone()),
+                    conversation_id: Some(run.id.clone()),
                     action: CompanionAction::Delegate,
                     question: run.grant.objective.clone(),
                     language: language.clone(),

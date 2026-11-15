@@ -542,7 +542,24 @@ impl Workspace {
             omitted: vec![],
             captured_at_ms: now_ms(),
         };
+        let preference = self.store.lock().unwrap().model_preference();
+        let model_preference = match preference {
+            Ok(preference) => preference,
+            Err(error) => {
+                self.message(format!("Request not started: {error}"), true, cx);
+                return;
+            }
+        };
+        let conversation_id = Some(
+            self.dev
+                .selected_task
+                .clone()
+                .unwrap_or_else(|| self.companion.draft_id.clone()),
+        );
         let request = ModelRequest {
+            model_preference,
+            resolved_model: None,
+            conversation_id,
             delegation: None,
             action,
             question,
@@ -793,7 +810,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(CompanionResponse::Plan(mut proposal)) = run.response else {
+        let Some(CompanionResponse::Plan(mut proposal)) = run.response.clone() else {
             return;
         };
         let Some(fields) = &self.companion.proposal_fields else {
@@ -836,16 +853,13 @@ impl Workspace {
             );
             let task = proposal.into_plan(&run.project, run.request.task.as_ref())?;
             self.store.lock().unwrap().save_task(&task)?;
-            if let Some(thread) = run.thread_id {
+            let preference = self.store.lock().unwrap().model_preference()?;
+            if let Some(binding) = run.legacy_task_thread(&task.id, &preference) {
                 let name = format!("{}:main:{}", task.id, run.request.language);
-                self.store.lock().unwrap().save_companion_thread(
-                    &run.project,
-                    &name,
-                    &ThreadBinding {
-                        thread_id: thread,
-                        manifest: run.request.context.manifest(),
-                    },
-                )?;
+                self.store
+                    .lock()
+                    .unwrap()
+                    .save_companion_thread(&run.project, &name, &binding)?;
             }
             Ok(task)
         })();
