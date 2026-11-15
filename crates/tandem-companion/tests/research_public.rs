@@ -47,6 +47,36 @@ fn public_brief_filters_private_data_without_forwarding_a_private_request() {
         vec!["Rust Iterator collect documentation"]
     );
 }
+#[test]
+fn encoded_credentials_and_malformed_encodings_are_withheld_from_queries_and_url_paths() {
+    for unsafe_text in [
+        "sk-abcdefghijklmnopqrstuv",
+        "%73k-abcdefghijklmnopqrstuv",
+        "s%6B-abcdefghijklmnopqrstuv",
+        "sk%2dabcdefghijklmnopqrstuv",
+        "sk-%61bcdefghijklmnopqrstuv",
+        "%2573k-abcdefghijklmnopqrstuv",
+        "%50RIVATE_PROJECT_SENTINEL",
+        "%",
+        "%7",
+        "%GG",
+        "%FF",
+    ] {
+        let mut input = brief();
+        input.queries = vec![format!("Documentation {unsafe_text}")];
+        input.urls = vec![format!("https://example.org/docs/{unsafe_text}")];
+        let screened = screen_public_brief(input, &["PRIVATE_PROJECT_SENTINEL".into()]).unwrap();
+        assert_eq!(screened.omissions.len(), 2, "{unsafe_text}");
+        let safe = screened.brief.unwrap();
+        assert!(safe.brief().queries.is_empty(), "{unsafe_text}");
+        assert!(safe.brief().urls.is_empty(), "{unsafe_text}");
+    }
+    let mut input = brief();
+    input.queries = vec!["Rust %49terator documentation".into()];
+    input.urls = vec!["https://example.org/%49terator".into()];
+    let screened = screen_public_brief(input, &[]).unwrap();
+    assert!(screened.omissions.is_empty());
+}
 #[derive(Default)]
 struct HttpFake {
     dns: VecDeque<Vec<IpAddr>>,
@@ -252,6 +282,9 @@ struct SearchPeer {
     unsupported: bool,
     threads: usize,
     shutdown: bool,
+    before_search: Vec<Value>,
+    between_search: Vec<Value>,
+    answer_item: Option<Value>,
 }
 #[derive(Clone)]
 struct SearchFake(Arc<Mutex<SearchPeer>>);
@@ -278,6 +311,9 @@ impl ProtocolExchange for SearchFake {
                 if p.unknown_tool {
                     p.events.push_back(json!({"method":"item/started","params":{"threadId":thread,"turnId":turn,"item":{"type":"commandExecution","id":"tool"}}}));
                 }
+                for item in p.before_search.clone() {
+                    p.events.push_back(json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":item}}));
+                }
                 if !p.narrative_only {
                     let correlated = if p.wrong_correlation {
                         "private-thread"
@@ -286,9 +322,20 @@ impl ProtocolExchange for SearchFake {
                     };
                     for method in ["item/started", "item/completed"] {
                         p.events.push_back(json!({"method":method,"params":{"threadId":correlated,"turnId":turn,"item":{"type":"webSearch","id":"search-1","query":"Rust Iterator docs","action":{"type":"search","queries":["Rust Iterator docs"]}}}}));
+                        if method == "item/started" {
+                            for item in p.between_search.clone() {
+                                p.events.push_back(json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":item}}));
+                            }
+                        }
                     }
                 }
-                p.events.push_back(json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"type":"agentMessage","text":json!({"candidates":["https://doc.rust-lang.org/std/iter/trait.Iterator.html"]}).to_string()}}}));
+                let item = p.answer_item.clone().unwrap_or_else(|| {
+                    candidate_answer(
+                        &["https://doc.rust-lang.org/std/iter/trait.Iterator.html"],
+                        None,
+                    )
+                });
+                p.events.push_back(json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":item}}));
                 p.events.push_back(json!({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":turn,"status":"completed"}}}));
                 json!({"turn":{"id":turn}})
             }
@@ -303,6 +350,147 @@ impl ProtocolExchange for SearchFake {
         self.0.lock().unwrap().shutdown = true;
         Ok(())
     }
+}
+fn agent_message(text: &str, phase: Option<&str>) -> Value {
+    let mut item = json!({"type":"agentMessage","text":text});
+    if let Some(phase) = phase {
+        item["phase"] = json!(phase);
+    }
+    item
+}
+fn candidate_answer(candidates: &[&str], phase: Option<&str>) -> Value {
+    agent_message(&json!({"candidates":candidates}).to_string(), phase)
+}
+fn search_with_state(state: SearchPeer) -> (PublicSearchOutcome, Vec<PublicResearchProgress>) {
+    let mut runtime = PublicResearchSession::with_exchange(
+        SearchFake(Arc::new(Mutex::new(state))),
+        PathBuf::from("/empty-public-scratch"),
+    );
+    let safe = screen_public_brief(brief(), &[]).unwrap().brief.unwrap();
+    let mut progress = vec![];
+    let result = runtime
+        .search(&safe, &selected(), &AtomicBool::new(false), |p| {
+            progress.push(p.clone());
+            Ok(())
+        })
+        .unwrap();
+    (result, progress)
+}
+#[test]
+fn rejected_candidates_produce_sanitized_partial_or_unavailable_receipts() {
+    let rejected = [
+        "https://example.org/docs?q=Iterator",
+        "https://example.org/sk-abcdefghijklmnopqrstuv",
+        "https://user:privatevalue@example.org/docs",
+        "https://example.internal/PRIVATE_PROJECT_SENTINEL",
+    ];
+    for mixed in [false, true] {
+        let mut candidates = rejected.to_vec();
+        if mixed {
+            candidates.push("https://example.org/docs");
+        }
+        let (result, _) = search_with_state(SearchPeer {
+            answer_item: Some(candidate_answer(&candidates, None)),
+            ..Default::default()
+        });
+        assert_eq!(
+            result.receipt.status,
+            if mixed {
+                ResearchReceiptStatus::Partial
+            } else {
+                ResearchReceiptStatus::Unavailable
+            }
+        );
+        assert_eq!(result.candidates.len(), usize::from(mixed));
+        assert_eq!(result.receipt.omissions.len(), rejected.len());
+        for omission in &result.receipt.omissions {
+            assert!(omission.locator.is_none());
+            assert!(!omission.reason.is_empty() && omission.reason.len() <= 256);
+        }
+        let receipt = serde_json::to_string(&result.receipt).unwrap();
+        for secret in rejected {
+            assert!(!receipt.contains(secret));
+        }
+        for secret in [
+            "abcdefghijklmnopqrstuv",
+            "privatevalue",
+            "PRIVATE_PROJECT_SENTINEL",
+        ] {
+            assert!(!receipt.contains(secret));
+        }
+    }
+    let (empty, _) = search_with_state(SearchPeer {
+        answer_item: Some(candidate_answer(&[], None)),
+        ..Default::default()
+    });
+    assert_eq!(empty.receipt.status, ResearchReceiptStatus::Complete);
+    assert!(empty.candidates.is_empty() && empty.receipt.omissions.is_empty());
+}
+#[test]
+fn phased_commentary_and_partial_answers_do_not_replace_the_final_candidates() {
+    let hidden = "UNVALIDATED_PROGRESS_SENTINEL";
+    let mut null_phase = candidate_answer(&["https://example.org/docs"], None);
+    null_phase["phase"] = Value::Null;
+    for answer in [
+        candidate_answer(&["https://example.org/docs"], Some("final_answer")),
+        candidate_answer(&["https://example.org/docs"], None),
+        null_phase,
+    ] {
+        let (result, progress) = search_with_state(SearchPeer {
+            before_search: vec![agent_message(hidden, Some("commentary"))],
+            between_search: vec![
+                agent_message(hidden, Some("commentary")),
+                agent_message(hidden, Some("partial_answer")),
+            ],
+            answer_item: Some(answer),
+            ..Default::default()
+        });
+        assert_eq!(result.receipt.status, ResearchReceiptStatus::Complete);
+        assert_eq!(result.candidates, vec!["https://example.org/docs"]);
+        assert_eq!(result.observations.len(), 2);
+        assert!(!format!("{progress:?}").contains(hidden));
+    }
+}
+#[test]
+fn invalid_or_missing_final_answers_and_excess_interim_text_are_unavailable() {
+    for answer in [
+        agent_message("invalid final JSON", Some("final_answer")),
+        agent_message("invalid legacy JSON", None),
+        candidate_answer(&["https://example.org/docs"], Some("commentary")),
+        candidate_answer(&["https://example.org/docs"], Some("partial_answer")),
+        candidate_answer(&["https://example.org/docs"], Some("unknown_phase")),
+    ] {
+        let (result, _) = search_with_state(SearchPeer {
+            before_search: vec![agent_message("Searching", Some("commentary"))],
+            answer_item: Some(answer),
+            ..Default::default()
+        });
+        assert_eq!(result.receipt.status, ResearchReceiptStatus::Unavailable);
+        assert!(result.candidates.is_empty());
+    }
+    let (result, _) = search_with_state(SearchPeer {
+        before_search: vec![agent_message(&"x".repeat(64 * 1024), Some("commentary"))],
+        between_search: vec![agent_message(
+            &"x".repeat(64 * 1024),
+            Some("partial_answer"),
+        )],
+        answer_item: Some(candidate_answer(
+            &["https://example.org/docs"],
+            Some("final_answer"),
+        )),
+        ..Default::default()
+    });
+    assert_eq!(result.receipt.status, ResearchReceiptStatus::Unavailable);
+    let (result, _) = search_with_state(SearchPeer {
+        narrative_only: true,
+        before_search: vec![agent_message("I searched", Some("commentary"))],
+        answer_item: Some(candidate_answer(
+            &["https://example.org/docs"],
+            Some("final_answer"),
+        )),
+        ..Default::default()
+    });
+    assert_eq!(result.receipt.status, ResearchReceiptStatus::Unavailable);
 }
 fn selected() -> ResolvedModel {
     ResolvedModel {

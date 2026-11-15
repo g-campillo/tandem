@@ -66,9 +66,12 @@ pub fn screen_public_brief(
     })
 }
 fn public_text_safe(text: &str, private_identifiers: &[String], is_url: bool) -> bool {
-    let decoded = percent_encoding::percent_decode_str(text).decode_utf8_lossy();
+    let Ok(decoded) = percent_encoding::percent_decode_str(text).decode_utf8() else {
+        return false;
+    };
     let lower = decoded.to_lowercase();
     if crate::credential_like(text)
+        || crate::credential_like(&decoded)
         || decoded.chars().any(char::is_control)
         || private_identifiers
             .iter()
@@ -819,6 +822,7 @@ impl<E: ProtocolExchange> PublicResearchSession<E> {
         let mut turn = None;
         let mut observations = vec![];
         let mut candidates = vec![];
+        let mut omissions = vec![];
         let result = (|| -> Result<()> {
             still_active(cancel, Instant::now() + Duration::from_secs(180))?;
             ensure!(
@@ -861,6 +865,7 @@ impl<E: ProtocolExchange> PublicResearchSession<E> {
             let deadline = Instant::now() + Duration::from_secs(180);
             let mut events = 0;
             let mut streamed = 0usize;
+            let mut completed_text_bytes = 0usize;
             loop {
                 still_active(cancel, deadline)?;
                 let Some(event) = self.session.client.poll_event(Duration::from_millis(100))?
@@ -903,11 +908,20 @@ impl<E: ProtocolExchange> PublicResearchSession<E> {
                         "Public candidate limit exceeded"
                     );
                     for candidate in answer.candidates {
-                        if let Ok(url) = public_url(&candidate) {
-                            let url = url.to_string();
-                            if !candidates.contains(&url) {
-                                candidates.push(url);
+                        match public_url(&candidate) {
+                            Ok(url) => {
+                                let url = url.to_string();
+                                if !candidates.contains(&url) {
+                                    candidates.push(url);
+                                }
                             }
+                            // Rejected URLs can contain credentials or private
+                            // data. Neither the URL nor parser errors are safe
+                            // receipt metadata.
+                            Err(_) => omissions.push(ResearchOmission {
+                                locator: None,
+                                reason: "A returned public candidate was withheld because its URL was unsafe or unsupported".into(),
+                            }),
                         }
                     }
                     return Ok(());
@@ -1001,9 +1015,30 @@ impl<E: ProtocolExchange> PublicResearchSession<E> {
                             Some("agentMessage") if method == "item/completed" => {
                                 let text =
                                     item["text"].as_str().context("Candidate answer missing")?;
-                                ensure!(text.len() <= 128 * 1024, "Candidate answer too large");
-                                ensure!(answer.is_none(), "Ambiguous candidate answers");
-                                answer = Some(serde_json::from_str::<Value>(text)?);
+                                completed_text_bytes =
+                                    completed_text_bytes.saturating_add(text.len());
+                                ensure!(
+                                    completed_text_bytes <= 128 * 1024,
+                                    "Public completed text exceeded limit"
+                                );
+                                // Pinned MessagePhase permits progress and
+                                // partial text before the terminal answer. Do
+                                // not parse, retain or publish that raw text.
+                                // Absent/null phase keeps legacy behavior: one
+                                // completed message must be the candidate JSON.
+                                let final_answer = match item.get("phase") {
+                                    None | Some(Value::Null) => true,
+                                    Some(Value::String(phase)) => match phase.as_str() {
+                                        "commentary" | "partial_answer" => false,
+                                        "final_answer" => true,
+                                        _ => bail!("Unknown public message phase"),
+                                    },
+                                    _ => bail!("Malformed public message phase"),
+                                };
+                                if final_answer {
+                                    ensure!(answer.is_none(), "Ambiguous candidate answers");
+                                    answer = Some(serde_json::from_str::<Value>(text)?);
+                                }
                             }
                             Some("agentMessage" | "reasoning" | "userMessage" | "plan") => {}
                             _ => bail!("Unexpected public tool refused"),
@@ -1030,11 +1065,20 @@ impl<E: ProtocolExchange> PublicResearchSession<E> {
         let status = if cancel.load(Ordering::Relaxed) {
             ResearchReceiptStatus::Cancelled
         } else if result.is_ok() {
-            ResearchReceiptStatus::Complete
+            if omissions.is_empty() {
+                ResearchReceiptStatus::Complete
+            } else if candidates.is_empty() {
+                ResearchReceiptStatus::Unavailable
+            } else {
+                ResearchReceiptStatus::Partial
+            }
         } else {
             ResearchReceiptStatus::Unavailable
         };
-        let content = if result.is_ok() {
+        let content = if matches!(
+            status,
+            ResearchReceiptStatus::Complete | ResearchReceiptStatus::Partial
+        ) {
             format!(
                 "Unverified search candidates; fetch each source before citing:\n{}",
                 candidates.join("\n")
@@ -1042,11 +1086,9 @@ impl<E: ProtocolExchange> PublicResearchSession<E> {
         } else {
             String::new()
         };
-        let omissions = if result.is_ok() {
-            vec![]
-        } else {
-            vec![ResearchOmission {locator:None,reason:if status==ResearchReceiptStatus::Cancelled {"Public search cancelled"} else {"Hosted search unavailable or unverified for the selected model. Retry explicitly or select another available model; local discussion remains available."}.into()}]
-        };
+        if result.is_err() {
+            omissions.push(ResearchOmission {locator:None,reason:if status==ResearchReceiptStatus::Cancelled {"Public search cancelled"} else {"Hosted search unavailable or unverified for the selected model. Retry explicitly or select another available model; local discussion remains available."}.into()});
+        }
         let receipt = ResearchReceipt::new(request, vec![], status, content, omissions)?;
         observe(&PublicResearchProgress::Completed {
             receipt: Box::new(receipt.clone()),
