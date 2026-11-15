@@ -619,7 +619,6 @@ impl Render for Workspace {
                                 .items_stretch()
                                 .min_h_0()
                                 .flex_shrink_0()
-                                .bg(p.surface)
                                 .child(self.development_panel(geometry.utility, cx)),
                         )
                     }),

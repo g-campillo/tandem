@@ -215,7 +215,7 @@ impl Workspace {
                     .when(record.output_truncated,|d|d.child(panel_warning(note("Output reached its capture limit."), cx)))
                     .children(record.diagnostics.iter().enumerate().map(|(i,item)|{let item=item.clone();path_button(Button::new(("check-diagnostic",i)), format!("Captured {}:{} {}",item.path,item.line,item.message)).on_click(cx.listener(move|this,_,window,cx|this.open_file(item.path.clone(),false,Some(item.line as usize),window,cx)))}))
                     .child(panel_heading(note("Output (last 80 lines)")))
-                    .child(panel_code(div().id("check-output"), cx).overflow_x_scroll().child(div().v_flex().whitespace_nowrap().children(record.output.lines().rev().take(80).collect::<Vec<_>>().into_iter().rev().enumerate().map(|(i,line)|div().id(("output-line",i)).flex_shrink_0().child(note(line.chars().take(350).collect::<String>()))))))
+                    .child(panel_code(div().id("check-output"), cx).h_flex().overflow_x_scroll().child(div().v_flex().flex_none().w_auto().min_w_full().whitespace_nowrap().children(record.output.lines().rev().take(80).collect::<Vec<_>>().into_iter().rev().enumerate().map(|(i,line)|div().id(("output-line",i)).flex_shrink_0().child(note(line.chars().take(350).collect::<String>()))))))
             })
             .when(!self.dev.checks.is_empty(),|d|d.child(panel_heading(note("Recent receipts"))).children(self.dev.checks.iter().take(10).map(|record|{
                 let id=record.id.clone();path_button(Button::new(SharedString::from(format!("receipt:{id}"))), format!("{} · {:?} · {}",record.recipe_id,record.status,&id[..8])).on_click(cx.listener(move|this,_,_,cx|{this.dev.selected_check=Some(id.clone());cx.notify();}))
@@ -283,6 +283,14 @@ pub(super) fn code_note(
     panel_code(div().id(id), cx)
         .p_2()
         .rounded(px(6.))
+        .h_flex()
         .overflow_x_scroll()
-        .child(div().whitespace_nowrap().child(note(text)))
+        .child(
+            div()
+                .flex_none()
+                .w_auto()
+                .min_w_full()
+                .whitespace_nowrap()
+                .child(note(text)),
+        )
 }
