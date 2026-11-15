@@ -1427,6 +1427,24 @@ impl Store {
         data.map(|data| serde_json::from_str(&data).context("Action review input is damaged"))
             .transpose()
     }
+    /// All eligible journal versions, independent of the Checks panel's recent
+    /// receipt limit. Callers can fingerprint these without expanding evidence
+    /// sent to a model. Origins use the same policy as atomic Next.
+    pub fn action_check_journal(&self, session: &TaskSession) -> Result<Vec<CheckRecord>> {
+        Ok(action_check_journal(&self.connection, session)?
+            .into_iter()
+            .map(|(check, _)| check)
+            .collect())
+    }
+    /// The same omitted adverse/incomplete receipt guard used by atomic Next.
+    /// A stable fingerprint alone cannot certify evidence that was left out.
+    pub fn validate_action_check_journal(
+        &self,
+        session: &TaskSession,
+        input: &ActionReviewInput,
+    ) -> Result<()> {
+        ensure_action_checks_captured(&self.connection, session, input)
+    }
     pub fn record_action_review(
         &mut self,
         session_id: &str,
@@ -2292,25 +2310,7 @@ fn ensure_action_checks_captured(
     session: &TaskSession,
     input: &ActionReviewInput,
 ) -> Result<()> {
-    let rows = connection.prepare(
-        "SELECT c.data,o.scope FROM check_run c JOIN check_action_origin o ON o.check_id=c.id WHERE c.root=?1 AND o.scope IS NOT NULL",
-    )?.query_map([&session.project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (data, scope) in rows {
-        let origin: crate::ActionEvidenceScope = serde_json::from_str(&scope)?;
-        if !origin.is_eligible_check_origin(session) {
-            continue;
-        }
-        let check: CheckRecord = serde_json::from_str(&data)?;
-        if input.context.validation_environments.get(&check.recipe_id)
-            != Some(&check.recipe_fingerprint)
-            || check
-                .snapshot
-                .as_ref()
-                .is_some_and(|s| s.id != input.binding.project_fingerprint)
-        {
-            continue;
-        }
+    for (check, origin) in relevant_action_checks(connection, session, input)? {
         // An already completed pass may be omitted by a manual attachment or
         // cumulative review. It adds no adverse evidence and grants no authority
         // here. Pending, failed, incomplete or later runs must never be hidden.
@@ -2327,6 +2327,37 @@ fn ensure_action_checks_captured(
         );
     }
     Ok(())
+}
+
+fn relevant_action_checks(
+    connection: &Connection,
+    session: &TaskSession,
+    input: &ActionReviewInput,
+) -> Result<Vec<(CheckRecord, crate::ActionEvidenceScope)>> {
+    Ok(action_check_journal(connection, session)?
+        .into_iter()
+        .filter(|(check, _)| input.check_is_relevant(check))
+        .collect())
+}
+
+fn action_check_journal(
+    connection: &Connection,
+    session: &TaskSession,
+) -> Result<Vec<(CheckRecord, crate::ActionEvidenceScope)>> {
+    let rows = connection.prepare(
+        "SELECT c.data,o.scope FROM check_run c JOIN check_action_origin o ON o.check_id=c.id WHERE c.root=?1 AND o.scope IS NOT NULL",
+    )?.query_map([&session.project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut checks = vec![];
+    for (data, scope) in rows {
+        let origin: crate::ActionEvidenceScope = serde_json::from_str(&scope)?;
+        if !origin.is_eligible_check_origin(session) {
+            continue;
+        }
+        let check: CheckRecord = serde_json::from_str(&data)?;
+        checks.push((check, origin));
+    }
+    Ok(checks)
 }
 
 fn authenticate_local_evidence(

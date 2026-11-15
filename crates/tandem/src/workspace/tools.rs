@@ -798,6 +798,7 @@ impl Workspace {
                         cx,
                     ),
                 }
+                view.invalidate_check_review();
                 cx.notify();
             });
         })
@@ -805,6 +806,7 @@ impl Workspace {
         cx.notify();
     }
     fn receive_check(&mut self, record: CheckRecord, cx: &mut Context<Self>) {
+        self.invalidate_check_review();
         if record.completed_at_ms.is_some() {
             self.status = format!(
                 "{} · {:?}. {}",
@@ -824,6 +826,22 @@ impl Workspace {
             self.dev.checks.truncate(30);
         }
         cx.notify();
+    }
+    /// All start/progress/terminal check paths reconcile against durable review
+    /// evidence. Clearing a busy flag never restores a cached review by itself.
+    pub(super) fn invalidate_check_review(&mut self) {
+        if let (Some(session), Some((review, _))) =
+            (&self.companion.session, &self.companion.review)
+            && companion_state::review_checks_current(
+                &self.store.lock().unwrap(),
+                session,
+                review,
+                self.companion.review_check_version.as_ref(),
+            )
+            .is_err()
+        {
+            self.companion.review_stale = true;
+        }
     }
 }
 

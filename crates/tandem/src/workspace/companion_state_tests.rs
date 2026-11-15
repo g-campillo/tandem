@@ -2594,3 +2594,355 @@ fn check_dispatch_fences_local_transitions_and_preserves_independent_offline_che
         "managed sessions without approval/current action keep independent check authority, never legacy action authority"
     );
 }
+
+#[test]
+fn saved_review_requires_matching_local_recapture_before_restoring_its_check_freshness() {
+    let (dir, mut store, session, project) = ui_walk_fixture();
+    let session = save_ui_walk(&mut store, &session);
+    let mut record = ui_pending_check(&mut store, &session);
+    ui_finish_check(
+        &dir,
+        &mut store,
+        &session,
+        &project,
+        &mut record,
+        CheckStatus::Passed,
+    );
+    let input = ui_check_capture(&dir, &store, &session, &project);
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Reviewed before restart".into(),
+        }),
+    );
+    drop(store);
+    let mut store = Store::open(&dir.path().join("state")).unwrap();
+    let session = store.load_session(&session.id).unwrap().unwrap();
+    assert!(!review_presentation(&store, &session, &review, None, true, true).next_enabled);
+    let fresh = ui_check_capture(&dir, &store, &session, &project);
+    review_matches_capture(&session, &review, &fresh).unwrap();
+    let version =
+        capture_review_check_version(&fresh, &store.action_check_journal(&session).unwrap());
+    assert!(
+        review_presentation(&store, &session, &review, Some(&version), true, true).next_enabled
+    );
+    let _rerun = ui_pending_check(&mut store, &session);
+    // An older local completion cannot install its previously positive cache.
+    assert!(review_checks_current(&store, &session, &review, Some(&version)).is_err());
+    let changed = ui_check_capture(&dir, &store, &session, &project);
+    assert!(review_matches_capture(&session, &review, &changed).is_err());
+    let changed_version =
+        capture_review_check_version(&changed, &store.action_check_journal(&session).unwrap());
+    assert!(review_checks_current(&store, &session, &review, Some(&changed_version)).is_err());
+}
+
+#[test]
+fn journal_freshness_preserves_omitted_old_passes_but_cannot_certify_omitted_adverse_evidence() {
+    let (dir, mut store, session, project) = ui_walk_fixture();
+    let session = save_ui_walk(&mut store, &session);
+    for _ in 0..31 {
+        let mut record = ui_pending_check(&mut store, &session);
+        ui_finish_check(
+            &dir,
+            &mut store,
+            &session,
+            &project,
+            &mut record,
+            CheckStatus::Passed,
+        );
+    }
+    let input = ui_check_capture(&dir, &store, &session, &project);
+    assert_eq!(
+        input.commands.len(),
+        30,
+        "model evidence budget is unchanged"
+    );
+    let version =
+        capture_review_check_version(&input, &store.action_check_journal(&session).unwrap());
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Latest receipts reviewed".into(),
+        }),
+    );
+    assert!(
+        review_presentation(&store, &session, &review, Some(&version), true, true).next_enabled
+    );
+    let _pending = ui_pending_check(&mut store, &session);
+    // Even if a caller captured a stable fingerprint around an incomplete input,
+    // the shared atomic journal guard prevents it from certifying that input.
+    let incomplete_version =
+        capture_review_check_version(&input, &store.action_check_journal(&session).unwrap());
+    assert!(review_checks_current(&store, &session, &review, Some(&incomplete_version)).is_err());
+    assert!(
+        !review_presentation(
+            &store,
+            &session,
+            &review,
+            Some(&incomplete_version),
+            true,
+            true
+        )
+        .next_enabled
+    );
+}
+
+#[test]
+fn same_input_check_rerun_keeps_the_old_review_historical_after_terminal_cleanup() {
+    for status in [
+        CheckStatus::Failed,
+        CheckStatus::Interrupted,
+        CheckStatus::Cancelled,
+        CheckStatus::Unvalidated,
+        CheckStatus::Passed,
+    ] {
+        let (dir, mut store, session, project) = ui_walk_fixture();
+        let session = save_ui_walk(&mut store, &session);
+        let mut passed = ui_pending_check(&mut store, &session);
+        ui_finish_check(
+            &dir,
+            &mut store,
+            &session,
+            &project,
+            &mut passed,
+            CheckStatus::Passed,
+        );
+        let input = ui_check_capture(&dir, &store, &session, &project);
+        let version =
+            capture_review_check_version(&input, &store.action_check_journal(&session).unwrap());
+        let guidance = GuidanceSettings::default().effective(
+            project.key(),
+            "rust",
+            session.plan.as_ref().map(|p| &p.task),
+        );
+        let completed = OperationOutcome::Completed {
+            summary: "Initial check reviewed".into(),
+        };
+        let (session, review, _) = ui_review(&mut store, &session, &input, Some(completed.clone()));
+        assert!(current_review_candidate(
+            &session,
+            &review,
+            Some(&completed),
+            "rust",
+            &guidance
+        ));
+        assert_eq!(
+            review_presentation(&store, &session, &review, Some(&version), true, true),
+            ReviewPresentation {
+                label: "Current passing review · Next rechecks inputs",
+                next_enabled: true,
+            }
+        );
+        let mut rerun = ui_pending_check(&mut store, &session);
+        assert!(rerun.snapshot.is_none());
+        assert_eq!(
+            review_presentation(&store, &session, &review, Some(&version), true, false),
+            ReviewPresentation {
+                label: "Review history · applies to its captured inputs",
+                next_enabled: false,
+            },
+            "Preparing invalidates a saved review before snapshot capture"
+        );
+        assert!(review_checks_current(&store, &session, &review, Some(&version)).is_err());
+        if status == CheckStatus::Unvalidated {
+            rerun.finish(
+                status.clone(),
+                "Required tool unavailable before capturing inputs",
+            );
+            store.save_check(&rerun).unwrap();
+            assert!(rerun.snapshot.is_none());
+        } else {
+            ui_finish_check(
+                &dir,
+                &mut store,
+                &session,
+                &project,
+                &mut rerun,
+                status.clone(),
+            );
+            assert_eq!(
+                rerun.snapshot.as_ref().unwrap().id,
+                input.binding.project_fingerprint
+            );
+        }
+        assert!(review_matches_capture(&session, &review, &input).is_ok());
+        // An older callback can still match the original source/workflow input
+        // and publish a positive cache. Presentation must check the journal too.
+        assert_eq!(
+            review_presentation(&store, &session, &review, Some(&version), true, true),
+            ReviewPresentation {
+                label: "Review history · applies to its captured inputs",
+                next_enabled: false,
+            },
+            "old review appeared Current after same-input {status:?} rerun cleared the check busy flag"
+        );
+        assert!(review_checks_current(&store, &session, &review, Some(&version)).is_err());
+        store.save_check(&rerun).unwrap();
+        assert!(
+            !review_presentation(&store, &session, &review, Some(&version), true, true)
+                .next_enabled
+        );
+    }
+}
+
+#[test]
+fn check_progress_and_receipt_version_changes_require_fresh_review_but_duplicates_do_not() {
+    let (dir, mut store, session, project) = ui_walk_fixture();
+    let session = save_ui_walk(&mut store, &session);
+    let mut record = ui_pending_check(&mut store, &session);
+    ui_finish_check(
+        &dir,
+        &mut store,
+        &session,
+        &project,
+        &mut record,
+        CheckStatus::Passed,
+    );
+    let input = ui_check_capture(&dir, &store, &session, &project);
+    let version =
+        capture_review_check_version(&input, &store.action_check_journal(&session).unwrap());
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Reviewed".into(),
+        }),
+    );
+    for _ in 0..2 {
+        store.save_check(&record).unwrap();
+        assert!(review_checks_current(&store, &session, &review, Some(&version)).is_ok());
+        assert!(
+            review_presentation(&store, &session, &review, Some(&version), true, true).next_enabled
+        );
+    }
+    let before_progress = record.clone();
+    record.sequence += 1;
+    record.status = CheckStatus::Running;
+    record.completed_at_ms = None;
+    record.exit_code = None;
+    record.output.push_str("\nnew progress");
+    store.save_check(&record).unwrap();
+    assert!(review_checks_current(&store, &session, &review, Some(&version)).is_err());
+    assert!(
+        !review_presentation(&store, &session, &review, Some(&version), true, true).next_enabled
+    );
+    // A delayed old delivery cannot roll the durable journal back.
+    store.save_check(&before_progress).unwrap();
+    assert!(
+        !review_presentation(&store, &session, &review, Some(&version), true, true).next_enabled
+    );
+    ui_finish_check(
+        &dir,
+        &mut store,
+        &session,
+        &project,
+        &mut record,
+        CheckStatus::Passed,
+    );
+    assert!(review_checks_current(&store, &session, &review, Some(&version)).is_err());
+    let fresh = ui_check_capture(&dir, &store, &session, &project);
+    let new_version =
+        capture_review_check_version(&fresh, &store.action_check_journal(&session).unwrap());
+    assert!(review_matches_capture(&session, &review, &fresh).is_err());
+    let (session, new_review, _) = ui_review(
+        &mut store,
+        &session,
+        &fresh,
+        Some(OperationOutcome::Completed {
+            summary: "New evidence reviewed".into(),
+        }),
+    );
+    assert!(
+        review_presentation(
+            &store,
+            &session,
+            &new_review,
+            Some(&new_version),
+            true,
+            true
+        )
+        .next_enabled
+    );
+    assert!(
+        !review_presentation(
+            &store,
+            &session,
+            &new_review,
+            Some(&new_version),
+            false,
+            true
+        )
+        .next_enabled
+    );
+}
+
+#[test]
+fn unrelated_check_updates_preserve_current_review_and_never_restore_stale_authority() {
+    let (dir, mut store, session, project) = ui_walk_fixture();
+    // Independent history has no managed action origin, even with an identical
+    // recipe and snapshot.
+    let mut independent =
+        CheckRecord::pending(project.key().into(), "cargo-check".into(), "recipe".into());
+    store.save_check(&independent).unwrap();
+    let session = save_ui_walk(&mut store, &session);
+    let mut passed = ui_pending_check(&mut store, &session);
+    ui_finish_check(
+        &dir,
+        &mut store,
+        &session,
+        &project,
+        &mut passed,
+        CheckStatus::Passed,
+    );
+    let input = ui_check_capture(&dir, &store, &session, &project);
+    let version =
+        capture_review_check_version(&input, &store.action_check_journal(&session).unwrap());
+    let (session, review, _) = ui_review(
+        &mut store,
+        &session,
+        &input,
+        Some(OperationOutcome::Completed {
+            summary: "Reviewed".into(),
+        }),
+    );
+    ui_finish_check(
+        &dir,
+        &mut store,
+        &session,
+        &project,
+        &mut independent,
+        CheckStatus::Failed,
+    );
+    let mut other_recipe =
+        CheckRecord::pending(project.key().into(), "other-recipe".into(), "other".into());
+    bind_check_record(&mut other_recipe, Some(&session), None);
+    store.save_check(&other_recipe).unwrap();
+    let mut old_snapshot = ui_pending_check(&mut store, &session);
+    old_snapshot.snapshot = passed.snapshot.clone();
+    old_snapshot.snapshot.as_mut().unwrap().id = "other-inputs".into();
+    old_snapshot.finish(CheckStatus::Failed, "Historical inputs");
+    store.save_check(&old_snapshot).unwrap();
+    assert!(
+        review_presentation(&store, &session, &review, Some(&version), true, true).next_enabled
+    );
+    assert!(
+        !review_presentation(&store, &session, &review, Some(&version), false, true).next_enabled
+    );
+
+    // Unrelated records must not evict an adverse run from freshness decisions,
+    // even though the Checks panel only loads thirty recent records.
+    let _pending = ui_pending_check(&mut store, &session);
+    for _ in 0..31 {
+        let unrelated =
+            CheckRecord::pending(project.key().into(), "unrelated".into(), "recipe".into());
+        store.save_check(&unrelated).unwrap();
+    }
+    assert!(
+        !review_presentation(&store, &session, &review, Some(&version), true, true).next_enabled
+    );
+}

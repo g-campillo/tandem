@@ -64,7 +64,7 @@ pub(super) enum LocalAction {
 }
 enum LocalResult {
     Attachment(Box<(ActionCommandEvidence, ActionReviewBinding)>),
-    Next(Box<ActionReviewInput>),
+    Next(Box<(ActionReviewInput, companion_state::ReviewCheckVersion)>),
 }
 
 impl Workspace {
@@ -156,7 +156,10 @@ impl Workspace {
         self.companion.attachment_fields = Some(AttachmentFields::new(scope, draft, window, cx));
     }
     fn review_can_advance(&self) -> bool {
-        !self.companion.review_stale
+        self.review_presentation().next_enabled
+    }
+    fn review_presentation(&self) -> companion_state::ReviewPresentation {
+        let inputs_current = !self.companion.review_stale
             && self.companion.review_epoch == Some(self.companion.code_epoch)
             && self.companion.review_source_generation
                 == Some(self.source_generation.load(Ordering::Relaxed))
@@ -178,7 +181,25 @@ impl Workspace {
                         &self.effective_guidance(),
                     )
                 })
-            })
+            });
+        let (Some(session), Some((review, _))) = (&self.companion.session, &self.companion.review)
+        else {
+            return companion_state::ReviewPresentation {
+                label: "Review history · applies to its captured inputs",
+                next_enabled: false,
+            };
+        };
+        companion_state::review_presentation(
+            &self.store.lock().unwrap(),
+            session,
+            review,
+            self.companion.review_check_version.as_ref(),
+            inputs_current,
+            !self.companion.busy
+                && !self.agent.busy
+                && !self.loading
+                && self.dev.check_cancel.is_none(),
+        )
     }
     pub(super) fn continue_walkthrough(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.companion.session else {
@@ -301,9 +322,17 @@ impl Workspace {
                     binding,
                 ))))
             } else {
-                let checks = store.lock().unwrap().checks(project.key())?;
-                let checks =
-                    super::companion::action_checks(&store.lock().unwrap(), &session, &checks)?;
+                let (checks, journal) = {
+                    let store = store.lock().unwrap();
+                    (
+                        super::companion::action_checks(
+                            &store,
+                            &session,
+                            &store.checks(project.key())?,
+                        )?,
+                        store.action_check_journal(&session)?,
+                    )
+                };
                 capture.attachments = store
                     .lock()
                     .unwrap()
@@ -321,15 +350,15 @@ impl Workspace {
                     )?
                     .review
                     .context("Missing review capture")?;
-                Ok::<_, anyhow::Error>(LocalResult::Next(Box::new(
-                    super::companion::authenticate_capture(
-                        &store.lock().unwrap(),
-                        &session,
-                        input,
-                        &language,
-                        &guidance,
-                    )?,
-                )))
+                let input = super::companion::authenticate_capture(
+                    &store.lock().unwrap(),
+                    &session,
+                    input,
+                    &language,
+                    &guidance,
+                )?;
+                let version = companion_state::capture_review_check_version(&input, &journal);
+                Ok::<_, anyhow::Error>(LocalResult::Next(Box::new((input, version))))
             }
         });
         let weak = cx.entity().downgrade();
@@ -353,16 +382,19 @@ impl Workspace {
                             view.companion.review_stale=true;
                             view.companion.status="Saved UserAttachedOutput · Unvalidated. Bound to this action and captured inputs; request Review.".into();
                         }
-                        LocalResult::Next(input)=> {
+                        LocalResult::Next(captured)=> {
+                            let (input,check_version)=*captured;
                             let session=view.companion.session.as_ref().context("No conversation")?;
                             let review=&view.companion.review.as_ref().context("Review this action first")?.0;
                             companion_state::review_matches_capture(session,review,&input)?;
                             if kind==LocalAction::RefreshReview {
                                 let outcome=view.companion.review.as_ref().unwrap().1.as_ref();
                                 anyhow::ensure!(companion_state::current_review_candidate(session,review,outcome,&requested_language,&view.effective_guidance()),"The saved review did not complete; request Review again");
+                                companion_state::review_checks_current(&view.store.lock().unwrap(),session,review,Some(&check_version))?;
                                 view.companion.review_stale=false;
                                 view.companion.review_epoch=Some(code_epoch);
                                 view.companion.review_source_generation=Some(source_generation);
+                                view.companion.review_check_version=Some(check_version);
                                 view.companion.status="Saved passing review matches current inputs. Next is available.".into();
                                 return Ok(());
                             }
@@ -540,13 +572,9 @@ impl Workspace {
             ));
         }
         if let Some((review, outcome)) = &self.companion.review {
-            let current = !busy && self.review_can_advance();
+            let presentation = self.review_presentation();
             body = body
-                .child(panel_heading(note(if current {
-                    "Current passing review · Next rechecks inputs"
-                } else {
-                    "Review history · applies to its captured inputs"
-                })))
+                .child(panel_heading(note(presentation.label)))
                 .child(note(format!("{:?} · {}", review.outcome, review.summary)));
             if !matches!(outcome, Some(OperationOutcome::Completed { .. })) {
                 body = body.child(panel_warning(

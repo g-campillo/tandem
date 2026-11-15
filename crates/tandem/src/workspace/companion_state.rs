@@ -369,6 +369,76 @@ pub fn current_review_candidate(
         && review.binding.language == language
         && review.binding.guidance_fingerprint == guidance.fingerprint()
 }
+
+/// A cached source/workflow match cannot outlive the check receipts it reviewed.
+/// Use the durable journal rather than the check panel's asynchronously delivered
+/// updates, so a late review or local capture cannot restore an older pass.
+#[derive(Clone, Debug)]
+pub struct ReviewCheckVersion {
+    binding: ActionReviewBinding,
+    fingerprint: String,
+}
+
+pub fn capture_review_check_version(
+    input: &ActionReviewInput,
+    journal: &[CheckRecord],
+) -> ReviewCheckVersion {
+    ReviewCheckVersion {
+        binding: input.binding.clone(),
+        fingerprint: input.check_journal_fingerprint(journal),
+    }
+}
+
+pub fn review_checks_current(
+    store: &Store,
+    session: &TaskSession,
+    review: &ActionReview,
+    version: Option<&ReviewCheckVersion>,
+) -> Result<()> {
+    let input = store
+        .action_review_input(&session.id, &review.id)?
+        .ok_or_else(|| anyhow::anyhow!("Saved review inputs are unavailable"))?;
+    ensure!(
+        input.binding == review.binding,
+        "Saved review inputs differ"
+    );
+    let version = version.ok_or_else(|| anyhow::anyhow!("Check saved review freshness first"))?;
+    ensure!(version.binding == review.binding, "Review inputs changed");
+    ensure!(
+        version.fingerprint
+            == input.check_journal_fingerprint(&store.action_check_journal(session)?),
+        "Local checks changed; review the current evidence again before Next"
+    );
+    store.validate_action_check_journal(session, &input)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReviewPresentation {
+    pub label: &'static str,
+    pub next_enabled: bool,
+}
+
+/// Shared by the native review label, Next button, and command handler. The
+/// caller supplies the existing source, attachment, outcome and workflow gate.
+pub fn review_presentation(
+    store: &Store,
+    session: &TaskSession,
+    review: &ActionReview,
+    version: Option<&ReviewCheckVersion>,
+    inputs_current: bool,
+    idle: bool,
+) -> ReviewPresentation {
+    let current = inputs_current && review_checks_current(store, session, review, version).is_ok();
+    ReviewPresentation {
+        label: if current && idle {
+            "Current passing review · Next rechecks inputs"
+        } else {
+            "Review history · applies to its captured inputs"
+        },
+        next_enabled: current && idle,
+    }
+}
 /// Both bindings are captured by the real evidence adapter. No initial/frozen
 /// review snapshot can be used to authorize Next after source/evidence changes.
 pub fn advance_review(

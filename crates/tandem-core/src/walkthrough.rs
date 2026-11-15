@@ -774,6 +774,34 @@ pub struct ActionReviewInput {
     pub commands: Vec<ActionCommandEvidence>,
 }
 impl ActionReviewInput {
+    /// Pending and uncertain runs may precede snapshot capture. A different
+    /// recipe version or known different inputs belongs only to history.
+    pub fn check_is_relevant(&self, check: &CheckRecord) -> bool {
+        self.context.validation_environments.get(&check.recipe_id)
+            == Some(&check.recipe_fingerprint)
+            && check
+                .snapshot
+                .as_ref()
+                .is_none_or(|s| s.id == self.binding.project_fingerprint)
+    }
+
+    /// Fingerprint exact versions, not just success/busy state. This snapshot is
+    /// local freshness metadata and does not add receipts to model evidence.
+    /// The caller must supply journal rows authenticated for eligible origins.
+    pub fn check_journal_fingerprint(&self, checks: &[CheckRecord]) -> String {
+        let versions = checks
+            .iter()
+            .filter(|check| self.check_is_relevant(check))
+            .map(|check| {
+                (
+                    &check.id,
+                    content_hash(&serde_json::to_vec(check).expect("Check serializes")),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        content_hash(&serde_json::to_vec(&versions).expect("Check versions serialize"))
+    }
+
     pub fn capture(
         session: &TaskSession,
         context: ContextSnapshot,

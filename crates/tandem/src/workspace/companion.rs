@@ -87,6 +87,7 @@ pub struct CaptureMailbox {
     requested: bool,
     code_epoch: u64,
     source_generation: u64,
+    check_version: Option<companion_state::ReviewCheckVersion>,
     response: Option<std::result::Result<Vec<Document>, String>>,
 }
 struct FreshCapture {
@@ -117,13 +118,17 @@ impl ConversationCapture for FreshCapture {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let checks = if matches!(
+        let (checks, journal) = if matches!(
             action,
             CompanionAction::ReviewAction | CompanionAction::Reveal
         ) {
-            action_checks(&self.store.lock().unwrap(), session, checks)?
+            let store = self.store.lock().unwrap();
+            (
+                action_checks(&store, session, &store.checks(&session.project)?)?,
+                store.action_check_journal(session)?,
+            )
         } else {
-            checks.to_vec()
+            (checks.to_vec(), vec![])
         };
         if matches!(
             action,
@@ -148,6 +153,10 @@ impl ConversationCapture for FreshCapture {
                 language,
                 guidance,
             )?);
+            self.mailbox.lock().unwrap().check_version = captured
+                .review
+                .as_ref()
+                .map(|input| companion_state::capture_review_check_version(input, &journal));
         }
         Ok(captured)
     }
@@ -256,6 +265,7 @@ pub struct CompanionUi {
     pub review_commands: Vec<ActionCommandEvidence>,
     pub review_epoch: Option<u64>,
     pub review_source_generation: Option<u64>,
+    pub review_check_version: Option<companion_state::ReviewCheckVersion>,
     pub review_stale: bool,
     pub review_refresh_pending: bool,
     pub local_action: Option<super::walkthrough_view::LocalAction>,
@@ -329,6 +339,7 @@ impl CompanionUi {
             review_commands: vec![],
             review_epoch: None,
             review_source_generation: None,
+            review_check_version: None,
             review_stale: false,
             review_refresh_pending: false,
             local_action: None,
@@ -498,6 +509,7 @@ impl Workspace {
                 self.companion.review_epoch = None;
                 self.companion.review_stale = true;
                 self.companion.review_source_generation = None;
+                self.companion.review_check_version = None;
                 self.companion.attachment_fields = None;
                 self.companion.documents = None;
                 self.companion.composer = draft.clone();
@@ -1073,10 +1085,12 @@ impl Workspace {
                 if view.epoch!=epoch || view.project.as_ref().is_none_or(|p|p.key()!=project_key) || view.companion.operation_id.as_ref()!=Some(&id) || view.companion.foreground.as_ref().is_none_or(|op|!op.owns(&id,&session_id)) || view.companion.session.as_ref().is_none_or(|s|s.id!=session_id) { return; }
                 let captured_epoch=mailbox.lock().unwrap().code_epoch;
                 let captured_source=mailbox.lock().unwrap().source_generation;
+                let captured_check_version=mailbox.lock().unwrap().check_version.clone();
                 view.companion.busy=false; view.companion.cancel=None; view.companion.capture=None; view.companion.operation_id=None; view.companion.foreground=None;
                 let document_proposal=result.as_ref().is_ok_and(|r|matches!(r.outcome,OperationOutcome::Completed{..})&&!r.historical&&matches!(r.response,Some(CompanionResponse::SpecDraft(_)|CompanionResponse::PlanDraft(_))));
                 view.reload_conversation(document_proposal,window,cx);
-                if matches!(initial_action, CompanionAction::ReviewAction) || result.as_ref().is_ok_and(|r|r.review.is_some()) { view.companion.review_epoch=Some(captured_epoch); view.companion.review_source_generation=Some(captured_source); view.companion.review_stale=captured_epoch!=view.companion.code_epoch || captured_source!=view.source_generation.load(Ordering::Relaxed) || !result.as_ref().is_ok_and(|r|matches!(r.outcome,OperationOutcome::Completed{..})&&!r.historical&&r.review.is_some()); }
+                if matches!(initial_action, CompanionAction::ReviewAction) || result.as_ref().is_ok_and(|r|r.review.is_some()) { view.companion.review_epoch=Some(captured_epoch); view.companion.review_source_generation=Some(captured_source); view.companion.review_check_version=captured_check_version; view.companion.review_stale=captured_epoch!=view.companion.code_epoch || captured_source!=view.source_generation.load(Ordering::Relaxed) || !result.as_ref().is_ok_and(|r|matches!(r.outcome,OperationOutcome::Completed{..})&&!r.historical&&r.review.is_some()); }
+                view.invalidate_check_review();
                 match result {
                     Ok(result)=>{
                         let completed=matches!(result.outcome,OperationOutcome::Completed{..}) && !result.historical;
