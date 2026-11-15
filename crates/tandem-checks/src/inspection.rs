@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use base64::Engine;
 use serde_json::json;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
@@ -340,6 +340,7 @@ fn copy_git_tree(
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct PreparedInspection {
     runtime: PathBuf,
     project: PathBuf,
@@ -352,6 +353,7 @@ pub struct PreparedInspection {
     denies: Vec<PathBuf>,
     env: BTreeMap<String, String>,
     required_hashes: Vec<(PathBuf, String)>,
+    git_leaf_checks: Vec<(Vec<String>, Vec<String>)>,
 }
 impl PreparedInspection {
     pub fn argv(&self) -> &[String] {
@@ -362,6 +364,65 @@ impl PreparedInspection {
     }
     pub fn environment(&self) -> &BTreeMap<String, String> {
         &self.env
+    }
+    /// Run these fixed commands through the same restricted executor before the
+    /// content command. Their output is validation data, never returned text.
+    pub fn git_leaf_inspections(&self) -> Vec<Self> {
+        self.git_leaf_checks
+            .iter()
+            .map(|(argv, _)| {
+                let mut command = self.clone();
+                command.argv = argv.clone();
+                command.git_leaf_checks.clear();
+                command
+            })
+            .collect()
+    }
+    pub fn validate_git_leaves(&self, outputs: &[InspectionOutput]) -> Result<()> {
+        ensure!(
+            outputs.len() == self.git_leaf_checks.len(),
+            "Historical file validation is incomplete"
+        );
+        let mut present = BTreeSet::new();
+        for ((_, paths), output) in self.git_leaf_checks.iter().zip(outputs) {
+            ensure!(
+                output.exit_code == Some(0)
+                    && !output.truncated
+                    && !output.cancelled
+                    && !output.timed_out,
+                "Historical file validation did not complete"
+            );
+            let text = std::str::from_utf8(&output.output)?;
+            ensure!(
+                text.is_empty() || text.ends_with('\0'),
+                "Historical file validation is incomplete"
+            );
+            let mut seen = BTreeSet::new();
+            for entry in text.split_terminator('\0') {
+                let (metadata, path) = entry.split_once('\t').context("Invalid Git tree entry")?;
+                let fields = metadata.split(' ').collect::<Vec<_>>();
+                ensure!(
+                    fields.len() == 3
+                        && matches!(fields[0], "100644" | "100755")
+                        && fields[1] == "blob"
+                        && matches!(fields[2].len(), 40 | 64)
+                        && fields[2].bytes().all(|c| c.is_ascii_hexdigit())
+                        && paths.iter().any(|p| p == path)
+                        && seen.insert(path),
+                    "History requires literal regular file leaves; directories and links are unavailable"
+                );
+                present.insert(path);
+            }
+        }
+        // A deleted/created file can be absent on one side of a diff, but every
+        // requested path must be a regular file on at least one captured side.
+        ensure!(
+            self.git_leaf_checks
+                .iter()
+                .all(|(_, paths)| paths.iter().all(|p| present.contains(p.as_str()))),
+            "One or more historical files are missing"
+        );
+        Ok(())
     }
     pub fn provenance(&self) -> ResearchCommand {
         ResearchCommand {
@@ -416,6 +477,7 @@ pub fn prepare_inspection(
         ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
         ("LANG".into(), "C.UTF-8".into()),
     ]);
+    let mut git_leaf_checks = Vec::new();
     let (tool, args) = match &request.kind {
         ResearchRequestKind::GitHistory { .. }
         | ResearchRequestKind::GitShow { .. }
@@ -461,14 +523,39 @@ pub fn prepare_inspection(
             ] {
                 args.extend(["-c".into(), config.into()]);
             }
+            let revisions_and_paths = match &request.kind {
+                ResearchRequestKind::GitShow {
+                    commit,
+                    path: Some(path),
+                } => {
+                    vec![(commit, vec![path.clone()])]
+                }
+                ResearchRequestKind::GitDiff { base, head, paths } => {
+                    vec![(base, paths.clone()), (head, paths.clone())]
+                }
+                _ => vec![],
+            };
+            for (commit, paths) in revisions_and_paths {
+                let mut check = vec![tool.executable.display().to_string()];
+                check.extend(args.clone());
+                check.extend([
+                    "ls-tree".into(),
+                    "--full-tree".into(),
+                    "-z".into(),
+                    format!("{commit}^{{commit}}"),
+                    "--".into(),
+                ]);
+                check.extend(paths.iter().cloned());
+                git_leaf_checks.push((check, paths));
+            }
             match &request.kind {
                 ResearchRequestKind::GitHistory { path, limit } => {
                     args.extend([
                         "log".into(),
                         format!("-{limit}"),
-                        "--format=%H%x09%s".into(),
+                        "--format=%H".into(),
                         "--no-show-signature".into(),
-                        "HEAD".into(),
+                        "HEAD^{commit}".into(),
                         "--".into(),
                     ]);
                     args.extend(path.clone());
@@ -479,15 +566,15 @@ pub fn prepare_inspection(
                             "show".into(),
                             "--no-ext-diff".into(),
                             "--no-textconv".into(),
-                            format!("{commit}:{path}"),
+                            format!("{commit}^{{commit}}:{path}"),
                         ]);
                     } else {
                         args.extend([
                             "show".into(),
                             "--no-patch".into(),
-                            "--format=%H%x09%s".into(),
+                            "--format=%H".into(),
                             "--no-show-signature".into(),
-                            commit.clone(),
+                            format!("{commit}^{{commit}}"),
                             "--".into(),
                         ]);
                     }
@@ -499,8 +586,8 @@ pub fn prepare_inspection(
                         "--no-textconv".into(),
                         "--no-renames".into(),
                         "--ignore-submodules=all".into(),
-                        base.clone(),
-                        head.clone(),
+                        format!("{base}^{{commit}}"),
+                        format!("{head}^{{commit}}"),
                         "--".into(),
                     ]);
                     args.extend(paths.iter().cloned());
@@ -508,6 +595,7 @@ pub fn prepare_inspection(
                 _ => args.extend([
                     "status".into(),
                     "--porcelain=v1".into(),
+                    "-z".into(),
                     "--untracked-files=all".into(),
                     "--no-renames".into(),
                     "--ignore-submodules=all".into(),
@@ -668,6 +756,7 @@ pub fn prepare_inspection(
         denies,
         env,
         required_hashes,
+        git_leaf_checks,
     };
     result.permission_config()?;
     Ok(result)

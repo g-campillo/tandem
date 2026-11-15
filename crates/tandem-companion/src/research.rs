@@ -22,6 +22,7 @@ pub struct ResearchSnapshot {
     git: Option<GitSnapshot>,
     git_limitation: Option<String>,
     excluded_paths: BTreeSet<String>,
+    history_policy_gaps: BTreeSet<String>,
 }
 impl ResearchSnapshot {
     pub fn capture(
@@ -36,6 +37,12 @@ impl ResearchSnapshot {
         let mut files = BTreeMap::new();
         let mut eligible = Vec::new();
         let mut excluded_paths = BTreeSet::new();
+        let mut policy_directories = BTreeSet::from([String::new()]);
+        for file in &snapshot.manifest.files {
+            for directory in Path::new(&file.path).parent().unwrap().ancestors() {
+                policy_directories.insert(directory.to_str().unwrap().to_string());
+            }
+        }
         let ignored: BTreeSet<_> = snapshot
             .manifest
             .files
@@ -71,6 +78,31 @@ impl ResearchSnapshot {
             }
         }
         snapshot.manifest.files = eligible;
+        // A policy may ignore itself or be filtered as sensitive. Its absence
+        // from the capture must never turn a deleted ignored leaf into an
+        // eligible history path. Record only the gap, never the policy's bytes.
+        let history_policy_gaps: BTreeSet<_> = policy_directories
+            .into_iter()
+            .filter(|directory| {
+                [".gitignore", ".ignore"].iter().any(|name| {
+                    let policy = Path::new(directory).join(name);
+                    match std::fs::symlink_metadata(project.root.join(&policy)) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                        _ => !files.contains_key(policy.to_str().unwrap()),
+                    }
+                })
+            })
+            .collect();
+        if !history_policy_gaps.is_empty() {
+            snapshot.manifest.id = content_hash(
+                format!(
+                    "{}:{}",
+                    snapshot.manifest.id,
+                    serde_json::to_string(&history_policy_gaps)?
+                )
+                .as_bytes(),
+            );
+        }
         let (git, git_limitation) = match capture_git(project, &directory.join("git"), cancel) {
             Ok(Some(git)) => (Some(git), None),
             Ok(None) => (None, Some("Folder has no Git history".into())),
@@ -90,6 +122,7 @@ impl ResearchSnapshot {
             git,
             git_limitation,
             excluded_paths,
+            history_policy_gaps,
         })
     }
     pub fn id(&self) -> &str {
@@ -102,11 +135,27 @@ impl ResearchSnapshot {
         if !safe_path_shape(path) {
             return false;
         }
-        if self.excluded_paths.contains(path) {
+        if self
+            .excluded_paths
+            .iter()
+            .any(|p| Path::new(path).starts_with(p))
+        {
             return false;
         }
         if self.files.contains_key(path) {
             return true;
+        }
+        // Deleted leaves are supported only under captured directories whose
+        // ancestor ignore policies were retained. Unknown directories fail closed.
+        if !Path::new(path)
+            .parent()
+            .is_some_and(|parent| self.snapshot.input.join(parent).is_dir())
+            || self
+                .history_policy_gaps
+                .iter()
+                .any(|directory| Path::new(path).starts_with(directory))
+        {
+            return false;
         }
         // A captured-but-filtered file can never be expanded through history.
         if self
@@ -114,7 +163,7 @@ impl ResearchSnapshot {
             .manifest
             .omitted
             .iter()
-            .any(|o| o.path == path)
+            .any(|o| Path::new(path).starts_with(&o.path))
         {
             return false;
         }
@@ -476,7 +525,7 @@ impl<E: InspectionExecutor> ResearchBroker<E> {
                     .iter()
                     .any(|p| !capture.allowed_history_path(p))
                 {
-                    result.unavailable("Historical path is ignored or excluded from this capture");
+                    result.unavailable("Historical path or its ignore policy is unavailable, ignored or excluded from this capture");
                     return Ok(());
                 }
                 if matches!(
@@ -519,116 +568,153 @@ impl<E: InspectionExecutor> ResearchBroker<E> {
                         return Ok(());
                     }
                 };
-                let mut provenance = None;
-                let output = self.executor.execute(&command, cancel, &mut |command| {
-                    provenance = Some(command.clone());
-                    observe(&ResearchProgress::CommandStarted {
-                        request_id: request.id.clone(),
-                        command: command.clone(),
-                    })
-                });
-                result.command = provenance;
-                match output {
-                    Err(_) => {
-                        if result.command.is_some() {
-                            result.status = ResearchReceiptStatus::Interrupted;
-                            result.omit("Inspection terminal result is unknown; no check success was recorded");
-                        } else {
-                            result.unavailable(
-                                "Inspection could not start with the configured runtime",
-                            );
+                let mut leaf_outputs = Vec::new();
+                for check in command.git_leaf_inspections() {
+                    let Some(output) =
+                        self.run_inspection(&check, request, context, cancel, observe, result)
+                    else {
+                        return Ok(());
+                    };
+                    leaf_outputs.push(output);
+                }
+                if command.validate_git_leaves(&leaf_outputs).is_err() {
+                    result.unavailable("History requires existing literal regular file leaves; directories, links and incomplete validation are unavailable");
+                    return Ok(());
+                }
+                if let Some(output) =
+                    self.run_inspection(&command, request, context, cancel, observe, result)
+                {
+                    let text = String::from_utf8(output.output).ok();
+                    let git_status = matches!(
+                        request.kind,
+                        ResearchRequestKind::Inspect {
+                            recipe: InspectionRecipe::GitStatus
                         }
-                    }
-                    Ok(output) => {
-                        if let Some(command) = &mut result.command {
-                            command.exit_code = output.exit_code;
-                            command.output_truncated = output.truncated;
-                            command.cancelled = output.cancelled;
-                            command.timed_out = output.timed_out;
-                        }
-                        if output.cancelled {
-                            result.status = ResearchReceiptStatus::Cancelled;
-                        } else if output.timed_out {
-                            result.unavailable("Inspection timed out after 15 seconds");
-                        } else if output.exit_code != Some(0) {
-                            result.unavailable("Inspection did not complete successfully; tooling or offline metadata may be unavailable");
-                        }
-                        let text = String::from_utf8(output.output).ok();
-                        if let Some(text) =
-                            text.filter(|s| !s.contains('\0') && !credential_like(s))
-                        {
-                            if matches!(
-                                request.kind,
-                                ResearchRequestKind::Inspect {
-                                    recipe: InspectionRecipe::GitStatus
+                    );
+                    if let Some(text) =
+                        text.filter(|s| (git_status || !s.contains('\0')) && !credential_like(s))
+                    {
+                        if git_status {
+                            // Porcelain -z uses exact, unquoted file paths. Only
+                            // currently captured eligible leaves can be exposed.
+                            for line in text.split_inclusive('\0') {
+                                if line.ends_with('\0')
+                                    && line
+                                        .get(3..line.len() - 1)
+                                        .is_some_and(|path| capture.files.contains_key(path))
+                                {
+                                    result.content.push_str(&line[..line.len() - 1]);
+                                    result.content.push('\n');
+                                } else {
+                                    result.omit("Excluded Git status paths were withheld");
                                 }
-                            ) {
-                                for line in text.lines() {
-                                    if line
-                                        .get(3..)
-                                        .is_some_and(|path| capture.allowed_history_path(path))
-                                    {
-                                        result.content.push_str(line);
-                                        result.content.push('\n');
-                                    } else {
-                                        result.omit("Excluded Git status paths were withheld");
-                                    }
-                                }
-                            } else {
-                                result.content = text;
                             }
                         } else {
-                            result.omit("Binary or credential-like inspection output was withheld");
+                            result.content = text;
                         }
-                        if output.truncated {
-                            result.omit("Inspection output reached its byte limit");
-                        }
-                        if !capture.unchanged() {
-                            result.content.clear();
-                            result
-                                .unavailable("Inspection changed captured inputs; result withheld");
-                        }
-                        let (locator, provenance) = match &request.kind {
-                            ResearchRequestKind::GitHistory { path, .. } => (
-                                SourceLocator::GitHistory { path: path.clone() },
-                                ResearchProvenance::Git,
-                            ),
-                            ResearchRequestKind::GitShow { commit, path } => (
-                                SourceLocator::Git {
-                                    commit: commit.clone(),
-                                    path: path.clone(),
-                                },
-                                ResearchProvenance::Git,
-                            ),
-                            ResearchRequestKind::GitDiff { base, head, paths } => (
-                                SourceLocator::GitDiff {
-                                    base: base.clone(),
-                                    head: head.clone(),
-                                    paths: paths.clone(),
-                                },
-                                ResearchProvenance::Git,
-                            ),
-                            ResearchRequestKind::Inspect { recipe } => (
-                                SourceLocator::Inspection { recipe: *recipe },
-                                ResearchProvenance::FixedInspection,
-                            ),
-                            _ => unreachable!(),
-                        };
-                        if matches!(
-                            result.status,
-                            ResearchReceiptStatus::Complete | ResearchReceiptStatus::Partial
-                        ) {
-                            result.source(
-                                locator,
-                                content_hash(result.content.as_bytes()),
-                                provenance,
-                            );
-                        }
+                    } else {
+                        result.omit("Binary or credential-like inspection output was withheld");
+                    }
+                    if output.truncated {
+                        result.omit("Inspection output reached its byte limit");
+                    }
+                    if !capture.unchanged() {
+                        result.content.clear();
+                        result.unavailable("Inspection changed captured inputs; result withheld");
+                    }
+                    let (locator, provenance) = match &request.kind {
+                        ResearchRequestKind::GitHistory { path, .. } => (
+                            SourceLocator::GitHistory { path: path.clone() },
+                            ResearchProvenance::Git,
+                        ),
+                        ResearchRequestKind::GitShow { commit, path } => (
+                            SourceLocator::Git {
+                                commit: commit.clone(),
+                                path: path.clone(),
+                            },
+                            ResearchProvenance::Git,
+                        ),
+                        ResearchRequestKind::GitDiff { base, head, paths } => (
+                            SourceLocator::GitDiff {
+                                base: base.clone(),
+                                head: head.clone(),
+                                paths: paths.clone(),
+                            },
+                            ResearchProvenance::Git,
+                        ),
+                        ResearchRequestKind::Inspect { recipe } => (
+                            SourceLocator::Inspection { recipe: *recipe },
+                            ResearchProvenance::FixedInspection,
+                        ),
+                        _ => unreachable!(),
+                    };
+                    if matches!(
+                        result.status,
+                        ResearchReceiptStatus::Complete | ResearchReceiptStatus::Partial
+                    ) {
+                        result.source(locator, content_hash(result.content.as_bytes()), provenance);
                     }
                 }
             }
         }
         Ok(())
+    }
+    fn run_inspection(
+        &mut self,
+        command: &PreparedInspection,
+        request: &ResearchRequest,
+        context: &ResearchContext<'_>,
+        cancel: &AtomicBool,
+        observe: &mut impl FnMut(&ResearchProgress) -> Result<()>,
+        result: &mut ResearchResult,
+    ) -> Option<InspectionOutput> {
+        if cancel.load(Ordering::Relaxed) {
+            result.status = ResearchReceiptStatus::Cancelled;
+            return None;
+        }
+        if !context.capture.unchanged() {
+            result.unavailable("Captured inputs changed; capture a new research snapshot");
+            return None;
+        }
+        result.command = None;
+        let output = self.executor.execute(command, cancel, &mut |command| {
+            result.command = Some(command.clone());
+            observe(&ResearchProgress::CommandStarted {
+                request_id: request.id.clone(),
+                command: command.clone(),
+            })
+        });
+        let output = match output {
+            Ok(output) => output,
+            Err(_) => {
+                if result.command.is_some() {
+                    result.status = ResearchReceiptStatus::Interrupted;
+                    result.omit(
+                        "Inspection terminal result is unknown; no check success was recorded",
+                    );
+                } else {
+                    result.unavailable("Inspection could not start with the configured runtime");
+                }
+                return None;
+            }
+        };
+        if let Some(command) = &mut result.command {
+            command.exit_code = output.exit_code;
+            command.output_truncated = output.truncated;
+            command.cancelled = output.cancelled;
+            command.timed_out = output.timed_out;
+        }
+        if output.cancelled {
+            result.status = ResearchReceiptStatus::Cancelled;
+        } else if output.timed_out {
+            result.unavailable("Inspection timed out after 15 seconds");
+        } else if output.exit_code != Some(0) {
+            result.unavailable("Inspection did not complete successfully; tooling or offline metadata may be unavailable");
+        } else {
+            return Some(output);
+        }
+        // Failed Git commands can echo unvalidated paths/objects in diagnostics.
+        None
     }
 }
 struct ResearchResult {

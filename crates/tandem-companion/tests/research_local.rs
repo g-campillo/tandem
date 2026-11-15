@@ -361,6 +361,445 @@ impl InspectionExecutor for FixtureGitExecutor {
     }
 }
 
+fn historical_fixture() -> (tempfile::TempDir, Project, String, String) {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("project");
+    std::fs::create_dir_all(root.join("src/space dir")).unwrap();
+    git(&root, &["init", "-q"]);
+    for (path, text) in [
+        (".gitignore", "src/ignored.txt\n"),
+        ("src/code.rs", "first symbol\n"),
+        ("src/deleted.rs", "deleted symbol\n"),
+        ("src/[code].rs", "first literal\n"),
+        ("src/.env", "ordinary excluded environment record\n"),
+        ("src/ignored.txt", "ordinary ignored record\n"),
+        ("src/space dir/.env", "ordinary excluded nested record\n"),
+    ] {
+        std::fs::write(root.join(path), text).unwrap();
+    }
+    std::os::unix::fs::symlink(".env", root.join("src/link")).unwrap();
+    git(&root, &["add", "-f", "."]);
+    git(&root, &["commit", "-qm", "first src/.env src/ignored.txt"]);
+    let first = git(&root, &["rev-parse", "HEAD"]);
+    std::fs::remove_file(root.join("src/deleted.rs")).unwrap();
+    for (path, text) in [
+        ("src/code.rs", "second symbol\n"),
+        ("src/[code].rs", "second literal\n"),
+        ("src/.env", "changed excluded environment record\n"),
+        ("src/ignored.txt", "changed ignored record\n"),
+    ] {
+        std::fs::write(root.join(path), text).unwrap();
+    }
+    git(&root, &["add", "-f", "."]);
+    git(&root, &["commit", "-qm", "second src/space dir/.env"]);
+    let second = git(&root, &["rev-parse", "HEAD"]);
+    let project = Project::open(&root).unwrap();
+    (fixture, project, first, second)
+}
+
+fn inspect_history(
+    capture: &ResearchSnapshot,
+    environment: &tandem_checks::InspectionEnvironment,
+    kind: ResearchRequestKind,
+) -> ResearchReceipt {
+    let mut context =
+        ResearchContext::new(capture, "session", "operation", Some(environment), &[]).unwrap();
+    context.begin_round(1).unwrap();
+    ResearchBroker::with_executor(FixtureGitExecutor)
+        .execute(request(kind), &mut context, &AtomicBool::new(false), |_| {
+            Ok(())
+        })
+        .unwrap()
+}
+
+#[test]
+fn historical_object_ids_must_resolve_to_commits_before_returning_output() {
+    let (fixture, project, first, second) = historical_fixture();
+    let blob = git(&project.root, &["rev-parse", "HEAD:src/.env"]);
+    let tree = git(&project.root, &["rev-parse", "HEAD:src"]);
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let environment = git_environment(fixture.path());
+    for object in [blob, tree] {
+        for kind in [
+            ResearchRequestKind::GitShow {
+                commit: object.clone(),
+                path: None,
+            },
+            ResearchRequestKind::GitShow {
+                commit: object.clone(),
+                path: Some("src/code.rs".into()),
+            },
+            ResearchRequestKind::GitDiff {
+                base: object.clone(),
+                head: second.clone(),
+                paths: vec!["src/code.rs".into()],
+            },
+            ResearchRequestKind::GitDiff {
+                base: first.clone(),
+                head: object.clone(),
+                paths: vec!["src/code.rs".into()],
+            },
+        ] {
+            let receipt = inspect_history(&capture, &environment, kind);
+            assert_eq!(receipt.status, ResearchReceiptStatus::Unavailable);
+            assert!(receipt.content.is_empty(), "{}", receipt.content);
+            assert!(receipt.sources.is_empty());
+        }
+    }
+    assert!(capture.unchanged());
+}
+
+#[test]
+fn historical_directories_cannot_expand_into_excluded_descendants_or_tree_listings() {
+    let (fixture, project, first, second) = historical_fixture();
+    // Current eligibility cannot authorize a symlink at a historical revision.
+    std::fs::remove_file(project.root.join("src/link")).unwrap();
+    std::fs::write(project.root.join("src/link"), "current regular file\n").unwrap();
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let environment = git_environment(fixture.path());
+    for path in ["src", "src/space dir", "src/link"] {
+        for kind in [
+            ResearchRequestKind::GitShow {
+                commit: first.clone(),
+                path: Some(path.into()),
+            },
+            ResearchRequestKind::GitDiff {
+                base: first.clone(),
+                head: second.clone(),
+                paths: vec![path.into()],
+            },
+        ] {
+            let receipt = inspect_history(&capture, &environment, kind);
+            assert_eq!(receipt.status, ResearchReceiptStatus::Unavailable, "{path}");
+            assert!(receipt.content.is_empty(), "{}", receipt.content);
+            assert!(receipt.sources.is_empty());
+        }
+    }
+    assert!(capture.unchanged());
+}
+
+#[test]
+fn historical_literal_leaves_and_deleted_files_remain_available_from_the_capture() {
+    let (fixture, project, first, second) = historical_fixture();
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let environment = git_environment(fixture.path());
+    // Later live changes must not supply either revision or path-validation data.
+    git(
+        &project.root,
+        &["commit", "--allow-empty", "-qm", "live only"],
+    );
+    std::fs::write(project.root.join(".gitignore"), "src/\n").unwrap();
+    for (path, expected) in [
+        ("src/[code].rs", "first literal\n"),
+        ("src/deleted.rs", "deleted symbol\n"),
+    ] {
+        let show = inspect_history(
+            &capture,
+            &environment,
+            ResearchRequestKind::GitShow {
+                commit: first.clone(),
+                path: Some(path.into()),
+            },
+        );
+        assert_eq!(show.status, ResearchReceiptStatus::Complete);
+        assert_eq!(show.content, expected);
+        let diff = inspect_history(
+            &capture,
+            &environment,
+            ResearchRequestKind::GitDiff {
+                base: first.clone(),
+                head: second.clone(),
+                paths: vec![path.into()],
+            },
+        );
+        assert_eq!(diff.status, ResearchReceiptStatus::Complete);
+        assert!(diff.content.contains(expected.trim_end()));
+        assert!(!diff.content.contains("excluded"));
+    }
+    for path in ["src/*", ":(glob)src/**", "src/[ci]*.rs"] {
+        let receipt = inspect_history(
+            &capture,
+            &environment,
+            ResearchRequestKind::GitDiff {
+                base: first.clone(),
+                head: second.clone(),
+                paths: vec![path.into()],
+            },
+        );
+        assert_eq!(receipt.status, ResearchReceiptStatus::Unavailable, "{path}");
+        assert!(receipt.content.is_empty());
+    }
+    assert!(capture.unchanged());
+}
+
+#[test]
+fn historical_metadata_and_status_withhold_excluded_leaf_names() {
+    let (fixture, project, first, _) = historical_fixture();
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let environment = git_environment(fixture.path());
+    for kind in [
+        ResearchRequestKind::GitHistory {
+            path: None,
+            limit: 50,
+        },
+        ResearchRequestKind::GitHistory {
+            path: Some("src".into()),
+            limit: 50,
+        },
+        ResearchRequestKind::GitShow {
+            commit: first.clone(),
+            path: None,
+        },
+        ResearchRequestKind::Inspect {
+            recipe: InspectionRecipe::GitStatus,
+        },
+    ] {
+        let receipt = inspect_history(&capture, &environment, kind);
+        assert!(matches!(
+            receipt.status,
+            ResearchReceiptStatus::Complete | ResearchReceiptStatus::Partial
+        ));
+        for excluded in [".env", "ignored.txt", "src/link"] {
+            assert!(!receipt.content.contains(excluded), "{}", receipt.content);
+        }
+    }
+    assert!(capture.unchanged());
+}
+
+#[test]
+fn historical_directory_diffs_withhold_ordinary_excluded_values() {
+    let (fixture, project, first, second) = historical_fixture();
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let environment = git_environment(fixture.path());
+    let receipt = inspect_history(
+        &capture,
+        &environment,
+        ResearchRequestKind::GitDiff {
+            base: first,
+            head: second,
+            paths: vec!["src".into()],
+        },
+    );
+    assert!(receipt.content.is_empty(), "{}", receipt.content);
+    assert_eq!(receipt.status, ResearchReceiptStatus::Unavailable);
+}
+
+#[test]
+fn historical_status_withholds_quoted_excluded_paths() {
+    let (fixture, project, _, _) = historical_fixture();
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let receipt = inspect_history(
+        &capture,
+        &git_environment(fixture.path()),
+        ResearchRequestKind::Inspect {
+            recipe: InspectionRecipe::GitStatus,
+        },
+    );
+    assert!(!receipt.content.contains(".env"), "{}", receipt.content);
+}
+
+#[test]
+fn historical_expansion_preserves_excluded_ancestors_and_deleted_ignore_policy() {
+    let (fixture, project, first, second) = historical_fixture();
+    let root = &project.root;
+    std::fs::create_dir(root.join("src/was-directory")).unwrap();
+    std::fs::write(
+        root.join("src/was-directory/file.rs"),
+        "historical linked descendant\n",
+    )
+    .unwrap();
+    git(root, &["add", "src/was-directory"]);
+    git(root, &["commit", "-qm", "directory before link"]);
+    let directory_commit = git(root, &["rev-parse", "HEAD"]);
+    std::fs::remove_file(root.join("src/was-directory/file.rs")).unwrap();
+    std::fs::remove_dir(root.join("src/was-directory")).unwrap();
+    std::os::unix::fs::symlink(fixture.path(), root.join("src/was-directory")).unwrap();
+    std::fs::remove_file(root.join("src/ignored.txt")).unwrap();
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let environment = git_environment(fixture.path());
+    for kind in [
+        ResearchRequestKind::GitShow {
+            commit: directory_commit,
+            path: Some("src/was-directory/file.rs".into()),
+        },
+        ResearchRequestKind::GitShow {
+            commit: first.clone(),
+            path: Some("src/ignored.txt".into()),
+        },
+        ResearchRequestKind::GitDiff {
+            base: first,
+            head: second,
+            paths: vec!["src/ignored.txt".into()],
+        },
+    ] {
+        let receipt = inspect_history(&capture, &environment, kind);
+        assert_eq!(receipt.status, ResearchReceiptStatus::Unavailable);
+        assert!(receipt.content.is_empty());
+        assert!(receipt.command.is_none());
+    }
+}
+
+#[test]
+fn historical_leaf_validation_must_finish_before_any_content_command() {
+    let (fixture, project, first, second) = historical_fixture();
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let environment = git_environment(fixture.path());
+    for output in [
+        InspectionOutput {
+            output: b"unvalidated diagnostic src/.env".to_vec(),
+            exit_code: Some(1),
+            ..Default::default()
+        },
+        InspectionOutput {
+            output: b"unvalidated truncated record".to_vec(),
+            exit_code: Some(0),
+            truncated: true,
+            ..Default::default()
+        },
+        InspectionOutput {
+            exit_code: Some(137),
+            timed_out: true,
+            ..Default::default()
+        },
+        InspectionOutput {
+            exit_code: Some(137),
+            cancelled: true,
+            ..Default::default()
+        },
+        InspectionOutput {
+            output: format!("100644 blob {}\tsrc/code.rs", "a".repeat(40)).into_bytes(),
+            exit_code: Some(0),
+            ..Default::default()
+        },
+    ] {
+        let stopped = output.cancelled;
+        let mut context =
+            ResearchContext::new(&capture, "session", "operation", Some(&environment), &[])
+                .unwrap();
+        context.begin_round(1).unwrap();
+        let mut broker = ResearchBroker::with_executor(FakeExecutor {
+            output,
+            ..Default::default()
+        });
+        let receipt = broker
+            .execute(
+                request(ResearchRequestKind::GitDiff {
+                    base: first.clone(),
+                    head: second.clone(),
+                    paths: vec!["src/code.rs".into()],
+                }),
+                &mut context,
+                &AtomicBool::new(false),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.status,
+            if stopped {
+                ResearchReceiptStatus::Cancelled
+            } else {
+                ResearchReceiptStatus::Unavailable
+            }
+        );
+        assert!(receipt.content.is_empty());
+        assert!(receipt.sources.is_empty());
+        assert!(receipt.command.is_some());
+        assert!(
+            broker
+                .executor()
+                .commands
+                .iter()
+                .all(|argv| argv.iter().any(|arg| arg == "ls-tree"))
+        );
+        assert!(capture.unchanged());
+    }
+}
+
+#[test]
+fn historical_expansion_cannot_lose_a_withheld_ignore_policy() {
+    let (fixture, project, first, _) = historical_fixture();
+    // An ignore file can exclude itself from the source capture while still
+    // excluding historical leaves, including leaves deleted from the live tree.
+    std::fs::remove_file(project.root.join("src/ignored.txt")).unwrap();
+    for (policy, text) in [
+        (".gitignore", ".gitignore\nsrc/ignored.txt\n"),
+        (
+            ".gitignore",
+            "src/ignored.txt\npassword = 'private-fixture-value'\n",
+        ),
+        ("src/.ignore", ".ignore\nignored.txt\n"),
+    ] {
+        std::fs::write(project.root.join(".gitignore"), "").unwrap();
+        std::fs::write(project.root.join(policy), text).unwrap();
+        let capture = ResearchSnapshot::capture(
+            &project,
+            &[],
+            &fixture.path().join("cache"),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let receipt = inspect_history(
+            &capture,
+            &git_environment(fixture.path()),
+            ResearchRequestKind::GitShow {
+                commit: first.clone(),
+                path: Some("src/ignored.txt".into()),
+            },
+        );
+        assert_eq!(receipt.status, ResearchReceiptStatus::Unavailable);
+        assert!(receipt.content.is_empty());
+        assert!(receipt.command.is_none());
+    }
+}
+
 #[test]
 fn git_research_uses_captured_history_and_ignores_executable_repository_configuration() {
     let fixture = tempfile::tempdir().unwrap();
@@ -679,6 +1118,7 @@ fn linked_worktree_history_is_captured_without_granting_live_git_metadata_reads(
     std::fs::write(root.join("code"), "first").unwrap();
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "fixture"]);
+    let commit = git(&root, &["rev-parse", "HEAD"]);
     let worktree = fixture.path().join("worktree");
     git(
         &root,
@@ -712,7 +1152,7 @@ fn linked_worktree_history_is_captured_without_granting_live_git_metadata_reads(
         )
         .unwrap();
     assert_eq!(receipt.status, ResearchReceiptStatus::Complete);
-    assert!(receipt.content.contains("fixture"));
+    assert_eq!(receipt.content, format!("{commit}\n"));
     let command = receipt.command.unwrap();
     assert!(!command.argv.iter().any(|arg| arg.contains(".git")));
     assert!(capture.unchanged());
