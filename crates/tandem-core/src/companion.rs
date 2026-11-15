@@ -262,8 +262,10 @@ pub struct ReviewEvidence {
 pub struct ConversationReply {
     pub text: String,
     pub question: Option<ClarificationQuestion>,
+    #[schemars(length(max = 32))]
     pub findings: Vec<ResearchFinding>,
     /// Requests have no model-chosen receipt identity or execution authority.
+    #[schemars(length(max = 4))]
     pub research_requests: Vec<ResearchRequestKind>,
 }
 impl ConversationReply {
@@ -473,6 +475,7 @@ impl ModelRequest {
         };
         let mut value = serde_json::to_value(schema).unwrap();
         value.as_object_mut().unwrap().remove("$schema");
+        strict_output_schema(&mut value);
         value
     }
     pub fn parse_response(&self, value: Value) -> Result<CompanionResponse> {
@@ -754,6 +757,36 @@ impl ModelRequest {
             );
         }
         Ok(())
+    }
+}
+
+/// The runtime submits a strict structured-output schema. Optional Rust fields
+/// still admit null, but must be present in `required`; Schemars deliberately
+/// omits them for ordinary deserialization schemas. Normalize only the wire
+/// contract, leaving the independent response parser and authority gates intact.
+/// See https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas.
+fn strict_output_schema(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("default");
+            if let Some(variants) = object.remove("oneOf") {
+                object.insert("anyOf".into(), variants);
+            }
+            if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                let required = properties.keys().cloned().map(Value::String).collect();
+                object.insert("required".into(), Value::Array(required));
+                object.insert("additionalProperties".into(), Value::Bool(false));
+            }
+            for child in object.values_mut() {
+                strict_output_schema(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                strict_output_schema(child);
+            }
+        }
+        _ => {}
     }
 }
 

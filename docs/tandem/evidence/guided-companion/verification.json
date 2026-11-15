@@ -1,0 +1,162 @@
+{
+  "task": 10,
+  "date": "2026-11-15",
+  "base_sha": "b7e24ff111bbdab14d3cc2e14fe088d5e2e05a50",
+  "status": "deterministic_passed_real_journeys_partial_native_blocked",
+  "runtime": {
+    "version": "codex-cli 0.169.0",
+    "sha256": "739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002",
+    "store_schema": 5,
+    "exec_server_sha256": "0532760c03ec71af4ce4d7a8f745399dabdae2b9ee0283ec849c4997facdb918"
+  },
+  "resolved_model": {
+    "catalog_id": "gpt-6.1-sol",
+    "display_name": "GPT-6.1-Sol",
+    "effort": "low",
+    "model": "gpt-6.1-sol"
+  },
+  "source_hashes": {
+    "crates/tandem-core/src/companion.rs": "5e0cf1250ecfbd59afbb84d0168a74814ff9531b6cac696bc9255eb5dc924bf6",
+    "crates/tandem-companion/src/conversation.rs": "f4b75384622cb73a9a8a51224971f15958751b08e3bdfda7789f3576550eba44",
+    "crates/tandem-companion/src/runtime.rs": "faed8a5f9de34df65a7e27c1086a1316af047c888406dc79019e96a4ac06585e",
+    "crates/tandem-companion/src/public_research.rs": "742c3d21131af1dcafe96890055b4dbdfc1fa6e55a24c988ace0e997b22bbb72"
+  },
+  "turn_usage": {
+    "probe": 1,
+    "rust": 24,
+    "python": 24,
+    "total": 49
+  },
+  "authorized_caps": {
+    "probe": 4,
+    "rust": 24,
+    "python": 24,
+    "aggregate": 52
+  },
+  "automated": {
+    "class": "D/S",
+    "workspace": {
+      "passed": 287,
+      "failed": 0,
+      "ignored": 2
+    },
+    "guided_journey_tests": 15,
+    "clippy_all_targets": "passed",
+    "format": "passed",
+    "build": "passed"
+  },
+  "real": {
+    "probe": {
+      "status": "passed_after_smaller_direct_source_selection",
+      "hosted_search_events_observed": true,
+      "search_turns": 1,
+      "prior_oversize_failures_preserved": 3,
+      "direct_source": {
+        "body_hash": "8d0450a49714d8811120473ffa37f4e63d94c653ab0d42bf908086b1785ab665",
+        "downloaded_bytes": 7033,
+        "final_url": "https://doc.rust-lang.org/std/cmp/fn.min.html",
+        "http_status": 200,
+        "title": "min in std::cmp - Rust"
+      }
+    },
+    "python_section": {
+      "status": "Complete",
+      "source": {
+        "body_hash": "acbca5a4b8b227688a43000561ed54783acd81a5b97acaada7cc1f3ceaea167b",
+        "downloaded_bytes": 330541,
+        "final_url": "https://docs.python.org/3/builtins/functions.html#min",
+        "http_status": 200,
+        "title": "Built-in functions \u2014 Python 3.15.2 documentation"
+      },
+      "returned_bytes": 1080,
+      "model_turns": 0,
+      "scope": "requested visible HTML section only; body hash covers retrieved document"
+    },
+    "os_inspection": {
+      "assertions_passed": 12,
+      "network_denied": true,
+      "protected_owned_live_sentinel_tool_environment_inputs": true,
+      "model_turns": 0
+    },
+    "process_cancellation": {
+      "cancelled": true,
+      "exit_code": 137,
+      "observed_child_and_grandchild": 2,
+      "survivors": [],
+      "model_turns": 0
+    },
+    "isolated_validation_kernel_suite": "Rust and Python independent actual checks passed, including alternative/faulty implementations and network/live-source boundaries; these do not establish AI reviews or a guided journey",
+    "rust": {
+      "saved_and_approved_spec_ref": {
+        "hash": "8e931970b07be69bb6bc6230dd615e443b312cad603b14a95d5e5aa6c8271089",
+        "revision": 1
+      },
+      "saved_and_approved_plan_ref": {
+        "hash": "b10aa30a5f864a6edc91dfb2dd736b7b740af9f1e354755d08c330890896aa29",
+        "revision": 1
+      },
+      "unchanged_generated_plan_steps": 4,
+      "started_generation": 1,
+      "next_stage": "PrepareWalkthrough; exhausted24-turn cap",
+      "real_action_reviews": 0,
+      "implementation_complete": false,
+      "structured_answers": 1,
+      "actual_research_kinds": [
+        "dependencies",
+        "doc",
+        "git",
+        "public"
+      ]
+    },
+    "python": {
+      "outcome": "Original24-turn cap reached; no further dispatch permitted",
+      "stage": "DraftSpec unfinished; no saved spec/plan, approvals, Start, action or review",
+      "structured_answers": 0,
+      "actual_research_kinds": [
+        "public"
+      ],
+      "implementation_complete": false,
+      "last_continuation_receipt": ".tandem-local/guided-companion/approved-suite/python/final-draft-spec-continuation.json"
+    },
+    "python_actual_input_diagnostics": {
+      "actual_turn_has_explicit_draft_spec_intent": true,
+      "actual_turn_contains_original_human_goal": true,
+      "actual_turn_contains_independent_contract": true,
+      "complete_receipt_count": 24,
+      "partial_receipt_count": 3,
+      "pending_question_in_authoritative_input": false,
+      "complete_selected_source_bodies_and_ids_present": true
+    },
+    "conditional_instruction_correction": {
+      "actual_routing_was_DraftSpec": true,
+      "unconditional_null_until_answer_clause_found_in_matching_dispatched_instruction_hash": true,
+      "corrected_to_asked_or_pending_question_only": true,
+      "allows_proposal_without_mandatory_question": true,
+      "mechanical_mixed_host_stripping_and_authority_guards_retained": true,
+      "simulated_routing_four_typed_intents_no_question_pending_question_discuss_and_explicit_answer": "passed",
+      "real_behavior_retest_after_correction": "not run; original per-language caps exhausted; no causal claim about all previous behavior"
+    }
+  },
+  "native": {
+    "class": "M",
+    "status": "blocked",
+    "reason": "CGSSessionScreenIsLocked=1; no GUI launch/automation attempted",
+    "seed_only": "deterministic sessions/runs; no model usage; paths in private native-seed-receipt.json",
+    "measured_at_utc": "2026-11-15T13:49:30.408764+00:00"
+  },
+  "limitations": [
+    "Full real Rust/Python create/symbol/command/reject-alternative/review/Next/full-spec journeys were not completed.",
+    "Simulation, official login/model listing and kernel command checks do not substitute for real guided journeys or native usability.",
+    "Original HTTP400 schema failures, mixed-reply rejection, private-vocabulary false positives, oversized/Partial sources and fixture step-limit rejection are retained.",
+    "No model/provider/billing fallback, quota reset/refund, new probe, managed installation, push or merge.",
+    "Two early failed private dispatches predate schema-hash instrumentation; their exact400 error and original source revision are preserved, not retroactively assigned a new schema hash.",
+    "The final conditional-instruction clarification has deterministic routing coverage and was not retested with a real model after both24-turn caps were exhausted."
+  ],
+  "receipts_root": ".tandem-local/guided-companion/approved-suite",
+  "remaining_verification": [
+    "Real Rust: PrepareWalkthrough and all atomic file/symbol/command actions, actual wrong/missing-evidence rejection and valid alternative acceptance, reviewed Next and full-spec validation; saved/approved docs and Start already preserved",
+    "Real Python: finish DraftSpec, plan approval/Start, local Git/dependency/doc receipts, actual structured answer, actions/reviews/Next/full-spec validation",
+    "Native Rust/Python discussion/questions/docs/model/gates/layout/keyboard/VoiceOver/cancel/restart/offline checklist; current Mac locked"
+  ],
+  "diagnostic_redaction": "Known schema errors retained; unclassified runtime messages, credentials and login URLs withheld with hashes"
+}

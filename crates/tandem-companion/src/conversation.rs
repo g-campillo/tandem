@@ -565,7 +565,24 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
             prompt_session.history.clear();
             prompt_session.answered_questions.clear();
             if let Ok((walk, _)) = session.current_action() {
-                prompt_session.walkthroughs.retain(|w| w.id == walk.id);
+                // Cumulative review inputs keep each check's authenticated
+                // execution origin. Retain those consumed action definitions
+                // too, so validation never relabels a prior check as current or
+                // rejects it merely because its walkthrough was pruned here.
+                let origins = captured
+                    .review
+                    .as_ref()
+                    .map(|review| {
+                        review
+                            .commands
+                            .iter()
+                            .map(|command| &command.scope.walkthrough_id)
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                prompt_session
+                    .walkthroughs
+                    .retain(|w| w.id == walk.id || origins.contains(&w.id));
             } else {
                 prompt_session.walkthroughs.clear();
             }
@@ -681,7 +698,8 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                     .response
                     .take()
                     .context("No structured response was returned")?;
-                let response = match original_request.parse_response(response_value(&response)?) {
+                let mut response = match original_request.parse_response(response_value(&response)?)
+                {
                     Ok(response) => response,
                     Err(error) => {
                         run.finish(
@@ -692,7 +710,7 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                         return Err(error);
                     }
                 };
-                let reply = response_reply(&response);
+                let reply = response_reply(&response).cloned();
                 if let Some(reply) = reply {
                     reply.validate()?;
                     for finding in &reply.findings {
@@ -705,10 +723,6 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                         state.ask_question(question.clone(), Some(run.id.clone()))?;
                     }
                     if !reply.research_requests.is_empty() {
-                        ensure!(
-                            reply.question.is_none(),
-                            "Resolve research before asking a clarification"
-                        );
                         if budget
                             .begin_round(reply.research_requests.len() as u8)
                             .is_err()
@@ -877,15 +891,24 @@ impl<B: ConversationBackend, P: PublicWorker, I: InspectionExecutor> Conversatio
                         }
                         // Only confirmed complete subturns are reusable. No
                         // model/private context is ever reused by the public worker.
-                        if let Some(thread) = thread {
+                        if let Some(thread) = &thread {
                             self.threads.insert(key.clone(), thread.clone());
                             lock_store(&self.store)?.save_companion_thread(
                                 &session.project,
                                 &key,
-                                &thread,
+                                thread,
                             )?;
                         }
-                        continue;
+                        if reply.question.is_some() {
+                            // Research and a clarification can arrive together
+                            // under the wire schema. Finish the bounded broker
+                            // work first, then atomically publish only the
+                            // unanswered question. An artifact in this mixed
+                            // response cannot acquire implementation authority.
+                            response = question_after_research(response)?;
+                        } else {
+                            continue;
+                        }
                     }
                 }
                 if matches!(
@@ -1230,6 +1253,31 @@ fn response_reply(response: &CompanionResponse) -> Option<&ConversationReply> {
         _ => None,
     }
 }
+fn question_after_research(mut response: CompanionResponse) -> Result<CompanionResponse> {
+    let reply = match &mut response {
+        CompanionResponse::Discussion(reply) => reply,
+        CompanionResponse::SpecDraft(draft) => {
+            draft.spec = None;
+            &mut draft.reply
+        }
+        CompanionResponse::PlanDraft(draft) => {
+            draft.plan = None;
+            &mut draft.reply
+        }
+        CompanionResponse::WalkthroughDraft(draft) => {
+            draft.actions = None;
+            &mut draft.reply
+        }
+        CompanionResponse::ActionAssessment(draft) => {
+            draft.assessment = None;
+            &mut draft.reply
+        }
+        _ => bail!("Only a validated conversational response can defer a question"),
+    };
+    ensure!(reply.question.is_some(), "No clarification was requested");
+    reply.research_requests.clear();
+    Ok(response)
+}
 fn final_commands(
     session: &TaskSession,
     run: &str,
@@ -1573,7 +1621,7 @@ fn generic_public_word(word: &str) -> bool {
     // Distinctive names, identifiers, hashes and copied non-generic words remain
     // local. This deliberately prefers a visible omission when uncertain.
     const WORDS: &str = "about after also another before between both could does each from have into more only other same should some than that their them then there these they this those through using when where which while will with would your \
-        rust python javascript typescript iterator iterators documentation official reference standard library public technical programming language function functions type types string strings integer integers array arrays vector vectors hash hashmap list lists \
+        rust python javascript typescript iterator iterators documentation docs official reference standard library public technical programming language lang function functions type types string strings integer integers array arrays vector vectors hash hashmap list lists \
         async await future futures thread threads mutex memory safety ownership borrow lifetime lifetimes sort sorting search algorithm algorithms complexity performance testing tests unit integration cargo dependency dependencies package packages version \
         error errors handling result option trait traits method methods module modules struct enum impl const usize bool true false none null http https html json unicode encoding database migration migrations sqlite postgresql mysql linux macos windows tokio serde pytest";
     WORDS.split_whitespace().any(|generic| generic == word)

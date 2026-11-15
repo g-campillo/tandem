@@ -1,3 +1,7 @@
+//! Historical M3 single-step companion fixture. This bypasses the new guided
+//! session lifecycle and has no Task 10 aggregate turn budget. It establishes
+//! neither conversation/research/document approvals nor atomic review/Next.
+//! Use guarded `research_probe` and `guided_journeys` for that verification.
 use anyhow::{Result, ensure};
 use std::{fs, sync::atomic::AtomicBool};
 use tandem_checks::*;

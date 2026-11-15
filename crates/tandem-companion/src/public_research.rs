@@ -2,7 +2,7 @@
 //! is untrusted data, never a tool grant or implementation-check receipt.
 use anyhow::{Context, Result, bail, ensure};
 use html5ever::{parse_document, tendril::TendrilSink};
-use markup5ever_rcdom::{NodeData, RcDom};
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use std::{
     future::Future,
     io::Read,
@@ -402,6 +402,20 @@ impl<T: PublicHttpTransport> PublicSourceFetcher<T> {
         let mut limitation = "Public source target is unsafe or unsupported";
         let result = (|| -> Result<bool> {
             let mut target = public_url(url)?;
+            let requested = Url::parse(url)?;
+            let fragment = requested
+                .fragment()
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    percent_encoding::percent_decode_str(value)
+                        .decode_utf8()
+                        .map(|value| value.into_owned())
+                })
+                .transpose()?;
+            ensure!(
+                fragment.as_ref().is_none_or(|value| value.len() <= 256),
+                "Requested HTML section exceeds its bound"
+            );
             for redirects in 0..=3 {
                 still_active(cancel, deadline)?;
                 let host = target.host_str().context("Public host unavailable")?;
@@ -482,7 +496,14 @@ impl<T: PublicHttpTransport> PublicSourceFetcher<T> {
                     deadline,
                 )?;
                 limitation = "Public source has an unsupported content type (including PDF), text encoding or malformed document";
-                let (title, mut text) = extract_text(&bytes, response.content_type.as_deref())?;
+                if fragment.is_some() {
+                    limitation = "Requested public HTML section is missing, hidden, ambiguous or unsupported";
+                }
+                let (title, mut text) = extract_text(
+                    &bytes,
+                    response.content_type.as_deref(),
+                    fragment.as_deref(),
+                )?;
                 still_active(cancel, deadline)?;
                 limitation = "Public source has no supported visible text";
                 ensure!(
@@ -493,10 +514,13 @@ impl<T: PublicHttpTransport> PublicSourceFetcher<T> {
                 truncate(&mut text, MAX_RESEARCH_RECEIPT_BYTES);
                 metadata.title = title;
                 metadata.body_hash = Some(content_hash(&bytes));
+                let mut source_url = target.clone();
+                source_url.set_fragment(fragment.as_deref());
+                metadata.final_url = source_url.to_string();
                 sources.push(ResearchSource {
                     id: new_id(),
                     locator: SourceLocator::PublicUrl {
-                        url: target.to_string(),
+                        url: source_url.to_string(),
                     },
                     source_hash: content_hash(&bytes),
                     captured_at_ms: now_ms(),
@@ -592,7 +616,11 @@ fn decode_body(
     }
     Ok(result)
 }
-fn extract_text(bytes: &[u8], mime: Option<&str>) -> Result<(Option<String>, String)> {
+fn extract_text(
+    bytes: &[u8],
+    mime: Option<&str>,
+    fragment: Option<&str>,
+) -> Result<(Option<String>, String)> {
     let mime = mime.context("Missing content type")?.to_ascii_lowercase();
     ensure!(
         !mime.contains("charset=")
@@ -602,6 +630,10 @@ fn extract_text(bytes: &[u8], mime: Option<&str>) -> Result<(Option<String>, Str
         "Unsupported text encoding"
     );
     let kind = mime.split(';').next().unwrap_or_default().trim();
+    ensure!(
+        fragment.is_none() || matches!(kind, "text/html" | "application/xhtml+xml"),
+        "URL sections require HTML"
+    );
     let text = std::str::from_utf8(bytes).context("Public source is not UTF-8 text")?;
     ensure!(!text.contains('\0'), "Public source contains binary text");
     match kind {
@@ -612,38 +644,35 @@ fn extract_text(bytes: &[u8], mime: Option<&str>) -> Result<(Option<String>, Str
         )),
         "text/html" | "application/xhtml+xml" => {
             let dom = parse_document(RcDom::default(), Default::default()).one(text);
-            let mut stack = vec![(dom.document.clone(), false, false)];
+            let roots = if let Some(fragment) = fragment {
+                match html_fragment_roots(&dom.document, fragment) {
+                    Ok(roots) => roots,
+                    Err(error) => {
+                        clear_dom(&dom.document);
+                        return Err(error);
+                    }
+                }
+            } else {
+                vec![dom.document.clone()]
+            };
+            let roots = roots
+                .iter()
+                .map(|node| std::rc::Rc::as_ptr(node) as usize)
+                .collect::<BTreeSet<_>>();
+            let mut stack = vec![(dom.document.clone(), false, false, false)];
             let mut visible = String::new();
             let mut title = String::new();
-            while let Some((node, parent_hidden, in_title)) = stack.pop() {
+            while let Some((node, parent_hidden, in_title, parent_selected)) = stack.pop() {
                 let mut hidden = parent_hidden;
                 let mut title_node = in_title;
+                let selected =
+                    parent_selected || roots.contains(&(std::rc::Rc::as_ptr(&node) as usize));
                 match &node.data {
-                    NodeData::Element { name, attrs, .. } => {
+                    NodeData::Element { name, .. } => {
                         let tag = name.local.as_ref();
                         title_node = tag == "title" || in_title;
-                        hidden |= matches!(
-                            tag,
-                            "head"
-                                | "script"
-                                | "style"
-                                | "form"
-                                | "template"
-                                | "noscript"
-                                | "iframe"
-                                | "object"
-                                | "svg"
-                                | "math"
-                        ) || attrs.borrow().iter().any(|a| {
-                            a.name.local.as_ref() == "hidden"
-                                || (a.name.local.as_ref() == "aria-hidden"
-                                    && a.value.as_ref() == "true")
-                                || (a.name.local.as_ref() == "style" && {
-                                    let s = a.value.to_ascii_lowercase().replace(' ', "");
-                                    s.contains("display:none") || s.contains("visibility:hidden")
-                                })
-                        });
-                        if !hidden {
+                        hidden |= html_hidden(&node);
+                        if !hidden && selected {
                             visible.push(' ');
                         }
                     }
@@ -651,7 +680,7 @@ fn extract_text(bytes: &[u8], mime: Option<&str>) -> Result<(Option<String>, Str
                         let text = contents.borrow();
                         if title_node && title.len() < 1024 {
                             title.push_str(&text);
-                        } else if !hidden {
+                        } else if !hidden && selected {
                             visible.push_str(&text);
                             visible.push(' ');
                         }
@@ -659,15 +688,12 @@ fn extract_text(bytes: &[u8], mime: Option<&str>) -> Result<(Option<String>, Str
                     _ => {}
                 }
                 for child in node.children.borrow().iter().rev() {
-                    stack.push((child.clone(), hidden, title_node));
+                    stack.push((child.clone(), hidden, title_node, selected));
                 }
             }
             // RcDom's recursive destructor can overflow on malicious deep HTML.
             // Iteratively detach children before dropping their last handles.
-            let mut nodes = vec![dom.document.clone()];
-            while let Some(node) = nodes.pop() {
-                nodes.extend(node.children.borrow_mut().drain(..));
-            }
+            clear_dom(&dom.document);
             let mut title = title.split_whitespace().collect::<Vec<_>>().join(" ");
             truncate(&mut title, 512);
             Ok((
@@ -684,6 +710,127 @@ fn truncate(text: &mut String, max: usize) {
         end -= 1;
     }
     text.truncate(end);
+}
+
+fn clear_dom(root: &Handle) {
+    let mut nodes = vec![root.clone()];
+    while let Some(node) = nodes.pop() {
+        nodes.extend(node.children.borrow_mut().drain(..));
+    }
+}
+fn html_hidden(node: &Handle) -> bool {
+    let NodeData::Element { name, attrs, .. } = &node.data else {
+        return false;
+    };
+    matches!(
+        name.local.as_ref(),
+        "head"
+            | "script"
+            | "style"
+            | "form"
+            | "template"
+            | "noscript"
+            | "iframe"
+            | "object"
+            | "svg"
+            | "math"
+    ) || attrs.borrow().iter().any(|attribute| {
+        attribute.name.local.as_ref() == "hidden"
+            || (attribute.name.local.as_ref() == "aria-hidden"
+                && attribute.value.as_ref() == "true")
+            || (attribute.name.local.as_ref() == "style" && {
+                let style = attribute.value.to_ascii_lowercase().replace(' ', "");
+                style.contains("display:none") || style.contains("visibility:hidden")
+            })
+    })
+}
+fn html_tag(node: &Handle) -> Option<&str> {
+    if let NodeData::Element { name, .. } = &node.data {
+        Some(name.local.as_ref())
+    } else {
+        None
+    }
+}
+fn heading_level(node: &Handle) -> Option<u8> {
+    html_tag(node)?
+        .strip_prefix('h')?
+        .parse::<u8>()
+        .ok()
+        .filter(|level| (1..=6).contains(level))
+}
+/// Scope visible text to the requested HTML identity. Definition terms include
+/// their overload signatures and definition body; headings include following
+/// siblings only until the next heading at the same or higher level. An absent
+/// or hidden anchor never silently falls back to unrelated full-page text.
+fn html_fragment_roots(root: &Handle, fragment: &str) -> Result<Vec<Handle>> {
+    let mut stack = vec![(root.clone(), None::<Handle>, None::<Handle>, false)];
+    let mut found = None;
+    while let Some((node, parent, grandparent, parent_hidden)) = stack.pop() {
+        let hidden = parent_hidden || html_hidden(&node);
+        if !hidden && let NodeData::Element { name, attrs, .. } = &node.data {
+            let matches = attrs.borrow().iter().any(|attribute| {
+                (attribute.name.local.as_ref() == "id"
+                    || (name.local.as_ref() == "a" && attribute.name.local.as_ref() == "name"))
+                    && attribute.value.as_ref() == fragment
+            });
+            if matches {
+                ensure!(found.is_none(), "Requested HTML section is ambiguous");
+                found = Some((node.clone(), parent.clone(), grandparent));
+            }
+        }
+        for child in node.children.borrow().iter().rev() {
+            stack.push((child.clone(), Some(node.clone()), parent.clone(), hidden));
+        }
+    }
+    let (mut target, mut parent, grandparent) =
+        found.context("Requested HTML section is missing or hidden")?;
+    if matches!(html_tag(&target), Some("a" | "span"))
+        && parent
+            .as_ref()
+            .is_some_and(|node| heading_level(node).is_some())
+    {
+        target = parent.unwrap();
+        parent = grandparent;
+    }
+    let mut selected = vec![target.clone()];
+    if let Some(parent) = parent {
+        let children = parent.children.borrow();
+        let index = children
+            .iter()
+            .position(|node| std::rc::Rc::ptr_eq(node, &target))
+            .context("HTML section parent changed")?;
+        if html_tag(&target) == Some("dt") {
+            for sibling in &children[index + 1..] {
+                if matches!(&sibling.data,NodeData::Text{contents} if contents.borrow().trim().is_empty())
+                {
+                    continue;
+                }
+                if html_tag(sibling) == Some("dd") {
+                    selected.push(sibling.clone());
+                    break;
+                }
+                if let NodeData::Element { attrs, .. } = &sibling.data
+                    && html_tag(sibling) == Some("dt")
+                    && !attrs
+                        .borrow()
+                        .iter()
+                        .any(|attribute| attribute.name.local.as_ref() == "id")
+                {
+                    selected.push(sibling.clone());
+                    continue;
+                }
+                break;
+            }
+        } else if let Some(level) = heading_level(&target) {
+            for sibling in &children[index + 1..] {
+                if heading_level(sibling).is_some_and(|next| next <= level) {
+                    break;
+                }
+                selected.push(sibling.clone());
+            }
+        }
+    }
+    Ok(selected)
 }
 
 use crate::runtime::{RuntimeMode, verify_optional_model, verify_thread_model};
