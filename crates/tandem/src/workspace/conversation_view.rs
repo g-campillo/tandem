@@ -245,6 +245,15 @@ impl Workspace {
     fn conversation_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.companion.busy || self.agent.busy;
         let mut body = panel_body(cx);
+        if self.companion.session.is_some() {
+            body = body.children(
+                self.companion
+                    .legacy_history
+                    .iter()
+                    .cloned()
+                    .map(|r| self.historical_row(r, cx)),
+            );
+        }
         if self.companion.session.is_none()
             && let Some(task) = self.active_task()
         {

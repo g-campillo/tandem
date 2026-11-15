@@ -544,6 +544,172 @@ fn legacy_adoption_is_idempotent_preserves_history_and_never_invents_approval() 
     );
 }
 
+#[test]
+fn editor_proposals_are_bounded_session_scoped_and_stop_at_each_saved_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let mut session = planned(&mut store);
+    let other = store.create_session("other-project").unwrap();
+    let mut other_spec = spec();
+    other_spec.summary = "Other session proposal".into();
+    apply(
+        &mut store,
+        &other,
+        SessionCommand::ProposeSpec {
+            spec: other_spec,
+            run_id: None,
+        },
+    );
+    for n in 0..3 {
+        let mut proposed_spec = spec();
+        proposed_spec.summary = format!("Spec proposal {n}");
+        session = apply(
+            &mut store,
+            &session,
+            SessionCommand::ProposeSpec {
+                spec: proposed_spec,
+                run_id: None,
+            },
+        );
+        let mut proposed_task = task();
+        proposed_task.goal = format!("Plan proposal {n}");
+        session = apply(
+            &mut store,
+            &session,
+            SessionCommand::ProposePlan {
+                task: proposed_task,
+                run_id: None,
+            },
+        );
+    }
+    for _ in 0..105 {
+        session = apply(
+            &mut store,
+            &session,
+            SessionCommand::HumanMessage {
+                text: "Later discussion".into(),
+            },
+        );
+    }
+    let id = session.id.clone();
+    let other_id = other.id.clone();
+    drop(store);
+    let mut store = Store::open(dir.path()).unwrap();
+    let mut session = store.load_session(&id).unwrap().unwrap();
+    let events = store.document_editor_events(&id).unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|e| e.session_id == id));
+    let ConversationPayload::DocumentProposed {
+        proposal: DocumentProposal::Spec(proposed_spec),
+    } = &events[0].payload
+    else {
+        panic!("Latest spec proposal missing")
+    };
+    let ConversationPayload::DocumentProposed {
+        proposal: DocumentProposal::Plan(proposed_plan),
+    } = &events[1].payload
+    else {
+        panic!("Latest plan proposal missing")
+    };
+    assert_eq!(proposed_spec.summary, "Spec proposal 2");
+    assert_eq!(proposed_plan.task.goal, "Plan proposal 2");
+    assert_eq!(store.document_editor_events(&other_id).unwrap().len(), 1);
+    assert!(store.document_editor_events("unknown-session").is_err());
+    session = apply(
+        &mut store,
+        &session,
+        SessionCommand::SaveSpec {
+            spec: proposed_spec.clone(),
+        },
+    );
+    let remaining = store.document_editor_events(&id).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(matches!(
+        remaining[0].payload,
+        ConversationPayload::DocumentProposed {
+            proposal: DocumentProposal::Plan(_)
+        }
+    ));
+    // Saving a changed spec cannot silently rebind its old plan proposal.
+    let mut plan = proposed_plan.clone();
+    plan.spec_ref = session.spec.as_ref().unwrap().document_ref();
+    apply(&mut store, &session, SessionCommand::SavePlan { plan });
+    assert!(store.document_editor_events(&id).unwrap().is_empty());
+}
+
+#[test]
+fn noop_save_proposal_handling_is_atomic_and_idempotent_without_document_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let session = planned(&mut store);
+    let mut session = approve_and_start(&mut store, session);
+    let mut proposed = spec();
+    proposed.summary = "Pending spec proposal".into();
+    session = apply(
+        &mut store,
+        &session,
+        SessionCommand::ProposeSpec {
+            spec: proposed.clone(),
+            run_id: None,
+        },
+    );
+    let saved_spec = session.spec.clone().unwrap();
+    let mut invalid_ref = saved_spec.document_ref();
+    invalid_ref.hash = "stale".into();
+    let failed = SessionTransition::new(
+        new_id(),
+        vec![
+            SessionCommand::SaveSpec {
+                spec: saved_spec.clone(),
+            },
+            SessionCommand::ApproveSpec {
+                document_ref: invalid_ref,
+                approved_at_ms: 7,
+            },
+        ],
+    );
+    assert!(
+        store
+            .apply_session_transition(&session.id, session.sequence, &failed)
+            .is_err()
+    );
+    assert_eq!(store.document_editor_events(&session.id).unwrap().len(), 1);
+    let transition = SessionTransition::new(
+        new_id(),
+        vec![SessionCommand::SaveSpec { spec: saved_spec }],
+    );
+    let saved = store
+        .apply_session_transition(&session.id, session.sequence, &transition)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap(),
+        serde_json::to_value(&session).unwrap()
+    );
+    assert!(
+        store
+            .document_editor_events(&session.id)
+            .unwrap()
+            .is_empty()
+    );
+    session = apply(
+        &mut store,
+        &saved,
+        SessionCommand::ProposeSpec {
+            spec: proposed,
+            run_id: None,
+        },
+    );
+    // Retrying the original Save must not consume a newer proposal.
+    store
+        .apply_session_transition(&session.id, saved.sequence, &transition)
+        .unwrap();
+    assert_eq!(store.document_editor_events(&session.id).unwrap().len(), 1);
+    let id = session.id.clone();
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.document_editor_events(&id).unwrap().len(), 1);
+}
+
 fn walkthrough(session: &TaskSession) -> Walkthrough {
     let spec = session.spec.as_ref().unwrap();
     let plan = session.plan.as_ref().unwrap();

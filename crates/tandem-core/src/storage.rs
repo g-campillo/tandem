@@ -101,6 +101,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS session_composer(session_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, text TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS conversation_event(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, sequence INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(session_id,sequence));
             CREATE TABLE IF NOT EXISTS document_revision(session_id TEXT NOT NULL, kind TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,kind,revision));
+            CREATE TABLE IF NOT EXISTS document_proposal_handled(session_id TEXT NOT NULL, kind TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(session_id,kind));
             CREATE TABLE IF NOT EXISTS research_receipt(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS session_transition(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS action_transition(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, walkthrough_id TEXT NOT NULL, action_id TEXT NOT NULL, review_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL, UNIQUE(session_id,walkthrough_id,action_id));
@@ -383,6 +384,18 @@ impl Store {
         rows.into_iter()
             .map(|s| serde_json::from_str(&s).context("Companion history is damaged"))
             .collect()
+    }
+    pub fn model_run(&self, root: &str, id: &str) -> Result<Option<ModelRun>> {
+        let data: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT data FROM model_run WHERE root=?1 AND id=?2",
+                params![root, id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        data.map(|data| serde_json::from_str(&data).context("Companion history is damaged"))
+            .transpose()
     }
     pub fn save_model_run(&mut self, run: &ModelRun) -> Result<()> {
         self.connection.execute("INSERT INTO model_run(id,root,sequence,data) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET sequence=excluded.sequence,data=excluded.data WHERE excluded.sequence>=model_run.sequence AND excluded.root=model_run.root",params![run.id,run.project,i64::try_from(run.sequence)?,serde_json::to_string(run)?])?;
@@ -1021,6 +1034,36 @@ impl Store {
             .transpose()
     }
 
+    /// Current editor inputs are independent of transcript pagination. Return at
+    /// most one proposal/save boundary per kind, excluding explicitly saved or
+    /// handled proposals. No-op Save handles a proposal without revising a document.
+    pub fn document_editor_events(&self, session_id: &str) -> Result<Vec<ConversationEvent>> {
+        ensure_session(&self.connection, session_id)?;
+        let mut events = vec![];
+        for (kind, payload_kind) in [
+            (WorkflowDocumentKind::Spec, "Spec"),
+            (WorkflowDocumentKind::Plan, "Plan"),
+        ] {
+            let data: Option<String> = self.connection.query_row(
+                "SELECT data FROM conversation_event WHERE session_id=?1
+                 AND sequence>COALESCE((SELECT sequence FROM document_proposal_handled WHERE session_id=?1 AND kind=?2),0)
+                 AND ((json_extract(data,'$.payload.type')='DocumentProposed' AND json_extract(data,'$.payload.proposal.kind')=?3)
+                   OR (json_extract(data,'$.payload.type')='DocumentSaved' AND json_extract(data,'$.payload.kind')=?3))
+                 ORDER BY sequence DESC LIMIT 1",
+                params![session_id, document_kind(kind), payload_kind],
+                |r| r.get(0),
+            ).optional()?;
+            if let Some(data) = data {
+                events.push(
+                    serde_json::from_str::<ConversationEvent>(&data)
+                        .context("Document proposal history is damaged")?,
+                );
+            }
+        }
+        events.sort_by_key(|e| e.sequence);
+        Ok(events)
+    }
+
     pub fn research_receipt(
         &self,
         session_id: &str,
@@ -1488,6 +1531,23 @@ fn persist_task_projection(connection: &Connection, task: &TaskPlan) -> Result<(
     Ok(())
 }
 
+fn handle_document_proposals(
+    connection: &Connection,
+    session: &TaskSession,
+    kind: WorkflowDocumentKind,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO document_proposal_handled(session_id,kind,sequence) VALUES(?1,?2,?3)
+         ON CONFLICT(session_id,kind) DO UPDATE SET sequence=excluded.sequence",
+        params![
+            session.id,
+            document_kind(kind),
+            i64::try_from(session.sequence)?
+        ],
+    )?;
+    Ok(())
+}
+
 fn apply_session_command(
     connection: &Connection,
     session: &mut TaskSession,
@@ -1619,7 +1679,9 @@ fn apply_session_command(
             session.propose_plan(task.clone(), run_id.clone())?
         }
         SessionCommand::SaveSpec { spec } => {
-            let Some(event) = session.save_spec(spec.clone())? else {
+            let event = session.save_spec(spec.clone())?;
+            handle_document_proposals(connection, session, WorkflowDocumentKind::Spec)?;
+            let Some(event) = event else {
                 return Ok(None);
             };
             persist_document(
@@ -1647,7 +1709,9 @@ fn apply_session_command(
                     && (!exists || owner.as_ref() == Some(&session.id)),
                 "Task belongs to another session or needs explicit legacy adoption"
             );
-            let Some(event) = session.save_plan(plan.clone())? else {
+            let event = session.save_plan(plan.clone())?;
+            handle_document_proposals(connection, session, WorkflowDocumentKind::Plan)?;
+            let Some(event) = event else {
                 return Ok(None);
             };
             persist_document(

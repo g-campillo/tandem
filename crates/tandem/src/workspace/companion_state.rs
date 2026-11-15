@@ -125,4 +125,6 @@ pub use document_drafts::{DocumentEditorDraft, SessionDocumentDrafts};
 
 #[path = "companion_history.rs"]
 mod companion_history;
-pub use companion_history::{HistoricalRow, historical_run, historical_task};
+pub use companion_history::{
+    HistoricalRow, historical_run, historical_task, linked_legacy_history,
+};

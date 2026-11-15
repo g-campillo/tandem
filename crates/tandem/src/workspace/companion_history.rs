@@ -1,10 +1,42 @@
 //! Read-only saved model assessments and definitions. These rows carry no authority.
 use tandem_core::*;
 
+#[derive(Clone)]
 pub struct HistoricalRow {
     pub text: String,
     pub source: Option<(String, u32)>,
     pub check_id: Option<String>,
+}
+
+/// An adopted task's original capture stays readable even when its ID is reused
+/// by the current plan projection. Only linked review IDs enter this section.
+pub fn linked_legacy_history(
+    store: &Store,
+    session: &TaskSession,
+) -> anyhow::Result<Vec<HistoricalRow>> {
+    let Some(link) = &session.legacy_task else {
+        return Ok(vec![]);
+    };
+    let mut rows = vec![row(
+        "Linked legacy history · read-only. Historical completion and model assessments grant no current approval or implementation authority.",
+    )];
+    if let Some(task) = store.legacy_task(&session.id)? {
+        rows.extend(historical_task(&task));
+    } else {
+        rows.push(row("Original legacy task capture unavailable."));
+    }
+    for id in &link.review_ids {
+        if let Some(run) = store.model_run(&session.project, id)? {
+            rows.push(row(format!(
+                "Historical request · {}: {}",
+                run.id, run.request.question
+            )));
+            rows.extend(historical_run(&run));
+        } else {
+            rows.push(row(format!("Historical review · {id} · unavailable")));
+        }
+    }
+    Ok(rows)
 }
 fn row(text: impl Into<String>) -> HistoricalRow {
     HistoricalRow {

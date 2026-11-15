@@ -364,6 +364,228 @@ fn document_refresh_preserves_other_document_and_preexisting_edits() {
     );
 }
 
+fn propose_document(
+    session: &mut TaskSession,
+    kind: WorkflowDocumentKind,
+    title: &str,
+) -> ConversationEvent {
+    match kind {
+        WorkflowDocumentKind::Spec => {
+            let mut spec = session.spec.clone().unwrap();
+            spec.summary = title.into();
+            session.propose_spec(spec, None).unwrap()
+        }
+        WorkflowDocumentKind::Plan => {
+            let mut task = session.plan.as_ref().unwrap().task.clone();
+            task.goal = title.into();
+            session.propose_plan(task, None).unwrap()
+        }
+    }
+}
+
+#[test]
+fn successive_proposals_replace_pristine_drafts_but_preserve_human_raw_edits() {
+    for kind in [WorkflowDocumentKind::Spec, WorkflowDocumentKind::Plan] {
+        let (_dir, _store, mut session) = approved();
+        let mut events = vec![propose_document(&mut session, kind, "First proposal")];
+        let mut draft = DocumentEditorDraft::from_session(&session, &events);
+        events.push(propose_document(&mut session, kind, "Second proposal"));
+        draft.refresh(&session, &events, None);
+        let key = if kind == WorkflowDocumentKind::Spec {
+            "summary"
+        } else {
+            "goal"
+        };
+        assert_eq!(
+            draft.fields.iter().find(|f| f.key == key).unwrap().value,
+            "Second proposal",
+            "{kind:?}"
+        );
+        assert!(draft.dirty(kind, &session));
+        let (displayed, saved) = match kind {
+            WorkflowDocumentKind::Spec => (
+                draft.spec.document_ref(),
+                session.spec.as_ref().unwrap().document_ref(),
+            ),
+            WorkflowDocumentKind::Plan => (
+                draft.plan.as_ref().unwrap().document_ref(),
+                session.plan.as_ref().unwrap().document_ref(),
+            ),
+        };
+        assert!(
+            approval_matches(draft.dirty(kind, &session), Some(&displayed), Some(&saved)).is_err()
+        );
+        draft
+            .fields
+            .iter_mut()
+            .find(|f| f.key == key)
+            .unwrap()
+            .value = "Human-edited proposal".into();
+        events.push(propose_document(&mut session, kind, "Third proposal"));
+        draft.refresh(&session, &events, None);
+        assert_eq!(
+            draft.fields.iter().find(|f| f.key == key).unwrap().value,
+            "Human-edited proposal",
+            "{kind:?}"
+        );
+        let other_kind = if kind == WorkflowDocumentKind::Spec {
+            WorkflowDocumentKind::Plan
+        } else {
+            WorkflowDocumentKind::Spec
+        };
+        draft.refresh(&session, &events, Some(other_kind));
+        assert_eq!(
+            draft.fields.iter().find(|f| f.key == key).unwrap().value,
+            "Human-edited proposal"
+        );
+    }
+}
+
+#[test]
+fn restart_hydrates_unsaved_documents_outside_the_transcript_page() {
+    let (dir, mut store, mut session) = approved();
+    let spec_event = propose_document(
+        &mut session.clone(),
+        WorkflowDocumentKind::Spec,
+        "Older spec proposal",
+    );
+    let plan_event = propose_document(
+        &mut session.clone(),
+        WorkflowDocumentKind::Plan,
+        "Older plan proposal",
+    );
+    let ConversationPayload::DocumentProposed {
+        proposal: DocumentProposal::Spec(spec),
+    } = spec_event.payload
+    else {
+        unreachable!()
+    };
+    let ConversationPayload::DocumentProposed {
+        proposal: DocumentProposal::Plan(plan),
+    } = plan_event.payload
+    else {
+        unreachable!()
+    };
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![
+                    SessionCommand::ProposeSpec { spec, run_id: None },
+                    SessionCommand::ProposePlan {
+                        task: plan.task,
+                        run_id: None,
+                    },
+                ],
+            ),
+        )
+        .unwrap();
+    for n in 0..105 {
+        session = store
+            .append_user_message(
+                &session.id,
+                session.sequence,
+                &new_id(),
+                &format!("Later message {n}"),
+            )
+            .unwrap();
+    }
+    let id = session.id.clone();
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    let session = store.load_session(&id).unwrap().unwrap();
+    let page = store.conversation_events(&id, None, 100).unwrap();
+    assert_eq!(page.len(), 100);
+    assert!(
+        !page
+            .iter()
+            .any(|e| matches!(e.payload, ConversationPayload::DocumentProposed { .. }))
+    );
+    let document_events = store.document_editor_events(&id).unwrap();
+    assert_eq!(document_events.len(), 2);
+    let draft = DocumentEditorDraft::from_session(&session, &document_events);
+    assert_eq!(draft.read_spec().unwrap().summary, "Older spec proposal");
+    assert_eq!(draft.read_plan().unwrap().task.goal, "Older plan proposal");
+}
+
+#[test]
+fn editing_a_proposal_back_to_saved_content_consumes_it_even_on_noop_save() {
+    for kind in [WorkflowDocumentKind::Spec, WorkflowDocumentKind::Plan] {
+        let (dir, mut store, mut session) = approved();
+        let event = propose_document(&mut session.clone(), kind, "Proposal to discard");
+        let ConversationPayload::DocumentProposed { proposal } = event.payload else {
+            unreachable!()
+        };
+        let command = match proposal {
+            DocumentProposal::Spec(spec) => SessionCommand::ProposeSpec { spec, run_id: None },
+            DocumentProposal::Plan(plan) => SessionCommand::ProposePlan {
+                task: plan.task,
+                run_id: None,
+            },
+        };
+        session = store
+            .apply_session_transition(
+                &session.id,
+                session.sequence,
+                &SessionTransition::new(new_id(), vec![command]),
+            )
+            .unwrap();
+        let events = store.conversation_events(&session.id, None, 100).unwrap();
+        let mut draft = DocumentEditorDraft::from_session(&session, &events);
+        let (key, saved_value) = match kind {
+            WorkflowDocumentKind::Spec => {
+                ("summary", session.spec.as_ref().unwrap().summary.clone())
+            }
+            WorkflowDocumentKind::Plan => {
+                ("goal", session.plan.as_ref().unwrap().task.goal.clone())
+            }
+        };
+        draft
+            .fields
+            .iter_mut()
+            .find(|f| f.key == key)
+            .unwrap()
+            .value = saved_value.clone();
+        let command = match kind {
+            WorkflowDocumentKind::Spec => SessionCommand::SaveSpec {
+                spec: draft.read_spec().unwrap(),
+            },
+            WorkflowDocumentKind::Plan => SessionCommand::SavePlan {
+                plan: draft.read_plan().unwrap(),
+            },
+        };
+        let saved = store
+            .apply_session_transition(
+                &session.id,
+                session.sequence,
+                &SessionTransition::new(new_id(), vec![command]),
+            )
+            .unwrap();
+        assert_eq!(saved.sequence, session.sequence);
+        assert_eq!(saved.spec_approval, session.spec_approval);
+        assert_eq!(saved.plan_approval, session.plan_approval);
+        let events = store.document_editor_events(&session.id).unwrap();
+        draft.refresh(&saved, &events, Some(kind));
+        assert_eq!(
+            draft.fields.iter().find(|f| f.key == key).unwrap().value,
+            saved_value
+        );
+        assert!(!draft.dirty(kind, &saved));
+        let id = saved.id.clone();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        let saved = store.load_session(&id).unwrap().unwrap();
+        let events = store.document_editor_events(&id).unwrap();
+        let draft = DocumentEditorDraft::from_session(&saved, &events);
+        assert_eq!(
+            draft.fields.iter().find(|f| f.key == key).unwrap().value,
+            saved_value
+        );
+    }
+}
+
 #[test]
 fn identical_proposal_noop_save_restores_exact_saved_refs_and_can_start() {
     let (_dir, mut store, fixture) = approved();
@@ -554,6 +776,153 @@ fn historical_review_and_task_definition_include_findings_sources_and_criteria()
     ] {
         assert!(text.contains(expected), "Missing {expected}");
     }
+}
+
+#[test]
+fn adopted_legacy_history_keeps_original_definition_reviews_and_evidence_after_restart() {
+    let (dir, mut store, fixture) = approved();
+    let mut original = TaskPlan::new(
+        "/fixture".into(),
+        "Retained original legacy goal".into(),
+        vec!["Original acceptance".into()],
+        vec!["Original completed step".into()],
+    )
+    .unwrap();
+    original.analysis = "Original analysis".into();
+    original.start_step(&original.steps[0].id.clone()).unwrap();
+    original
+        .complete_active_manually(vec!["Original completion evidence".into()])
+        .unwrap();
+    store.save_task(&original).unwrap();
+    let mut review = history_run(CompanionResponse::Review(ReviewResponse {
+        conclusion: ReviewConclusion::NeedsChanges,
+        summary: "Original historical assessment".into(),
+        findings: vec![ReviewFinding {
+            category: FindingCategory::DemonstratedProblem,
+            blocking: true,
+            problem: "Original boundary finding".into(),
+            why: "Original caller contract".into(),
+            next_action: "Inspect the boundary".into(),
+            path: "lib.rs".into(),
+            line: 7,
+            criterion_indices: vec![0],
+            evidence_ids: vec!["check-1".into()],
+        }],
+        evidence_used: vec!["check-1".into()],
+        validation_needed: vec![],
+        requested_context: vec![],
+    }));
+    review.status = ModelStatus::Completed;
+    review.request.task = Some(original.clone());
+    review.binding = review.request.binding();
+    store.save_model_run(&review).unwrap();
+    // These are the same read-only row builders used before adoption.
+    let mut before = historical_task(&original);
+    before.extend(historical_run(&review));
+    let before_text = before
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(before_text.contains("Original boundary finding"));
+    assert!(before_text.contains("Original completion evidence"));
+
+    let mut session = store.adopt_legacy_task(&original.id).unwrap();
+    let adopted = linked_legacy_history(&store, &session).unwrap();
+    let adopted_text = adopted
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "Linked legacy history · read-only",
+        "Retained original legacy goal",
+        "Original completed step",
+        "Original analysis",
+        "Original boundary finding",
+        "Original completion evidence",
+        "Original historical assessment",
+        &review.id,
+    ] {
+        assert!(adopted_text.contains(expected), "Missing {expected}");
+    }
+    assert!(
+        adopted
+            .iter()
+            .any(|r| r.source == Some(("lib.rs".into(), 7)))
+    );
+    assert!(
+        adopted
+            .iter()
+            .any(|r| r.check_id.as_deref() == Some("check-1"))
+    );
+    assert!(session.authorize(WorkflowAction::ReviewAction).is_err());
+
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(
+                new_id(),
+                vec![SessionCommand::SaveSpec {
+                    spec: fixture.spec.unwrap(),
+                }],
+            ),
+        )
+        .unwrap();
+    let mut replacement = original.clone();
+    replacement.goal = "Current replacement plan goal".into();
+    replacement.steps[0].title = "Current replacement step".into();
+    let plan = PlanDocument {
+        revision: 1,
+        spec_ref: session.spec.as_ref().unwrap().document_ref(),
+        task: replacement,
+    };
+    session = store
+        .apply_session_transition(
+            &session.id,
+            session.sequence,
+            &SessionTransition::new(new_id(), vec![SessionCommand::SavePlan { plan }]),
+        )
+        .unwrap();
+    assert_eq!(
+        session.plan.as_ref().unwrap().task.steps[0].status,
+        StepStatus::Pending
+    );
+    for _ in 0..45 {
+        let mut unrelated = review.clone();
+        unrelated.id = new_id();
+        unrelated.request.task = None;
+        unrelated.binding = unrelated.request.binding();
+        store.save_model_run(&unrelated).unwrap();
+    }
+    assert!(
+        !store
+            .model_runs("/fixture")
+            .unwrap()
+            .iter()
+            .any(|r| r.id == review.id)
+    );
+    assert!(
+        store
+            .model_run("/other-project", &review.id)
+            .unwrap()
+            .is_none()
+    );
+    let id = session.id.clone();
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    let session = store.load_session(&id).unwrap().unwrap();
+    let rows = linked_legacy_history(&store, &session).unwrap();
+    let restarted_text = rows
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(restarted_text, adopted_text);
+    assert!(!restarted_text.contains("Current replacement"));
+    assert!(session.spec_approval.is_none() && session.plan_approval.is_none());
+    assert!(session.authorize(WorkflowAction::ReviewAction).is_err());
 }
 #[test]
 fn historical_improvement_keeps_both_decisions_and_never_exposes_solution_body() {

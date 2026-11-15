@@ -66,7 +66,7 @@ impl Workspace {
             .unwrap_or_else(|| {
                 self.companion
                     .document_drafts
-                    .restore(&session, &self.companion.events)
+                    .restore(&session, &self.companion.document_events)
             });
         self.set_document_draft(draft, window, cx);
         self.refresh_document_fields(None, window, cx);
@@ -85,8 +85,10 @@ impl Workspace {
             .documents
             .as_ref()
             .map(|d| d.snapshot(cx))
-            .unwrap_or_else(|| DocumentEditorDraft::from_session(session, &self.companion.events));
-        draft.refresh(session, &self.companion.events, saved);
+            .unwrap_or_else(|| {
+                DocumentEditorDraft::from_session(session, &self.companion.document_events)
+            });
+        draft.refresh(session, &self.companion.document_events, saved);
         self.set_document_draft(draft, window, cx);
     }
     fn set_document_draft(

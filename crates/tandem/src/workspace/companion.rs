@@ -147,6 +147,8 @@ pub struct CompanionUi {
     pub session: Option<TaskSession>,
     pub sessions: Vec<TaskSession>,
     pub events: Vec<ConversationEvent>,
+    pub document_events: Vec<ConversationEvent>,
+    pub legacy_history: Vec<companion_state::HistoricalRow>,
     pub receipts: Vec<ResearchReceipt>,
     pub composer: ComposerDraft,
     pub tab: CompanionTab,
@@ -206,6 +208,8 @@ impl CompanionUi {
             session: None,
             sessions: vec![],
             events: vec![],
+            document_events: vec![],
+            legacy_history: vec![],
             receipts: vec![],
             composer: ComposerDraft::default(),
             tab: CompanionTab::Conversation,
@@ -363,6 +367,8 @@ impl Workspace {
                     .map(|p| p.task.id.clone())
                     .or_else(|| session.legacy_task.as_ref().map(|l| l.task_id.clone()));
                 self.companion.events.clear();
+                self.companion.document_events.clear();
+                self.companion.legacy_history.clear();
                 self.companion.session = Some(session);
                 self.companion.documents = None;
                 self.companion.composer = draft.clone();
@@ -403,6 +409,8 @@ impl Workspace {
                 .load_session(id)?
                 .context("Conversation unavailable")?;
             let events = store.conversation_events(id, None, 100)?;
+            let document_events = store.document_editor_events(id)?;
+            let legacy_history = companion_state::linked_legacy_history(&store, &session)?;
             let mut receipts = vec![];
             for event in &events {
                 if let ConversationPayload::ResearchReceiptRecorded { receipt_id } = &event.payload
@@ -414,18 +422,22 @@ impl Workspace {
             Ok((
                 session,
                 events,
+                document_events,
+                legacy_history,
                 receipts,
                 store.sessions(self.project.as_ref().context("Open a project")?.key())?,
             ))
         })();
         match result {
-            Ok((session, events, receipts, sessions)) => {
+            Ok((session, events, document_events, legacy_history, receipts, sessions)) => {
                 self.dev.selected_task = session
                     .plan
                     .as_ref()
                     .map(|p| p.task.id.clone())
                     .or_else(|| session.legacy_task.as_ref().map(|l| l.task_id.clone()));
                 self.companion.session = Some(session);
+                self.companion.document_events = document_events;
+                self.companion.legacy_history = legacy_history;
                 for event in events {
                     if !self.companion.events.iter().any(|e| e.id == event.id) {
                         self.companion.events.push(event);

@@ -20,6 +20,35 @@ fn draft_field(key: impl Into<String>, label: impl Into<String>, value: String) 
         value,
     }
 }
+fn latest_proposal(
+    events: &[ConversationEvent],
+    kind: WorkflowDocumentKind,
+) -> Option<DocumentProposal> {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match (&e.payload, kind) {
+            (ConversationPayload::DocumentSaved { kind: saved, .. }, requested)
+                if *saved == requested =>
+            {
+                Some(None)
+            }
+            (
+                ConversationPayload::DocumentProposed {
+                    proposal: DocumentProposal::Spec(spec),
+                },
+                WorkflowDocumentKind::Spec,
+            ) => Some(Some(DocumentProposal::Spec(spec.clone()))),
+            (
+                ConversationPayload::DocumentProposed {
+                    proposal: DocumentProposal::Plan(plan),
+                },
+                WorkflowDocumentKind::Plan,
+            ) => Some(Some(DocumentProposal::Plan(plan.clone()))),
+            _ => None,
+        })
+        .flatten()
+}
 impl DocumentEditorDraft {
     pub fn new(spec: SpecDocument, plan: Option<PlanDocument>) -> Self {
         let mut fields = vec![
@@ -89,33 +118,7 @@ impl DocumentEditorDraft {
         Self { spec, plan, fields }
     }
     pub fn from_session(session: &TaskSession, events: &[ConversationEvent]) -> Self {
-        let proposal = |kind| {
-            events
-                .iter()
-                .rev()
-                .find_map(|e| match (&e.payload, kind) {
-                    (ConversationPayload::DocumentSaved { kind: saved, .. }, requested)
-                        if *saved == requested =>
-                    {
-                        Some(None)
-                    }
-                    (
-                        ConversationPayload::DocumentProposed {
-                            proposal: DocumentProposal::Spec(spec),
-                        },
-                        WorkflowDocumentKind::Spec,
-                    ) => Some(Some(DocumentProposal::Spec(spec.clone()))),
-                    (
-                        ConversationPayload::DocumentProposed {
-                            proposal: DocumentProposal::Plan(plan),
-                        },
-                        WorkflowDocumentKind::Plan,
-                    ) => Some(Some(DocumentProposal::Plan(plan.clone()))),
-                    _ => None,
-                })
-                .flatten()
-        };
-        let mut spec = match proposal(WorkflowDocumentKind::Spec) {
+        let mut spec = match latest_proposal(events, WorkflowDocumentKind::Spec) {
             Some(DocumentProposal::Spec(d)) => d,
             _ => session.spec.clone().unwrap_or(SpecDocument {
                 revision: 1,
@@ -133,7 +136,7 @@ impl DocumentEditorDraft {
                 }],
             }),
         };
-        let mut plan = match proposal(WorkflowDocumentKind::Plan) {
+        let mut plan = match latest_proposal(events, WorkflowDocumentKind::Plan) {
             Some(DocumentProposal::Plan(d)) => Some(d),
             _ => session.plan.clone(),
         };
@@ -180,8 +183,12 @@ impl DocumentEditorDraft {
                 }
                 WorkflowDocumentKind::Plan => self.plan.is_some(),
             };
+            // Unsaved proposal content is still pristine until its raw fields
+            // change. A newer explicit proposal can replace that baseline.
             if saved == Some(kind)
-                || (!self.edited(kind) && !(populated && self.dirty(kind, session)))
+                || (!self.edited(kind)
+                    && (latest_proposal(events, kind).is_some()
+                        || !(populated && self.dirty(kind, session))))
             {
                 self.fields.retain(|f| field_kind(&f.key) != kind);
                 self.fields.extend(
