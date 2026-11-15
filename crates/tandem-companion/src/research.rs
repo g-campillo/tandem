@@ -132,7 +132,7 @@ impl ResearchSnapshot {
         snapshot_unchanged(&self.snapshot) && self.git.as_ref().is_none_or(GitSnapshot::unchanged)
     }
     fn allowed_history_path(&self, path: &str) -> bool {
-        if !safe_path_shape(path) {
+        if !safe_path_shape(path) || !self.snapshot.eligible_path(path) {
             return false;
         }
         if self

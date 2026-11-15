@@ -412,6 +412,172 @@ fn inspect_history(
         .unwrap()
 }
 
+fn assert_ambient_policy_withholds_history(source: &str) {
+    let (fixture, project, _, _) = historical_fixture();
+    for name in ["private-current.txt", "private-deleted.txt"] {
+        std::fs::write(
+            project.root.join(name),
+            "ordinary ignored history sentinel\n",
+        )
+        .unwrap();
+    }
+    git(&project.root, &["add", "-f", "."]);
+    git(&project.root, &["commit", "-qm", "private fixture leaves"]);
+    let first = git(&project.root, &["rev-parse", "HEAD"]);
+    std::fs::remove_file(project.root.join("private-deleted.txt")).unwrap();
+    std::fs::write(
+        project.root.join("private-current.txt"),
+        "changed ignored history\n",
+    )
+    .unwrap();
+    git(&project.root, &["add", "-f", "."]);
+    git(
+        &project.root,
+        &["commit", "-qm", "changed private fixture leaves"],
+    );
+    let second = git(&project.root, &["rev-parse", "HEAD"]);
+    let policy = match source {
+        "exclude" => project.root.join(".git/info/exclude"),
+        "parent-gitignore" => fixture.path().join(".gitignore"),
+        "parent-ignore" => fixture.path().join(".ignore"),
+        "global" => std::path::PathBuf::from(std::env::var_os("TANDEM_GLOBAL_IGNORE").unwrap()),
+        _ => unreachable!(),
+    };
+    std::fs::write(&policy, "private-*.txt\n").unwrap();
+    let mut ignored_overlay = project.open_document("private-overlay.txt", true).unwrap();
+    ignored_overlay.snapshot("ordinary ignored overlay sentinel\n".into());
+    let capture = ResearchSnapshot::capture(
+        &project,
+        &[ignored_overlay],
+        &fixture.path().join("cache"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let mut context = ResearchContext::new(&capture, "session", "operation", None, &[]).unwrap();
+    context.begin_round(1).unwrap();
+    let list = ResearchBroker::with_executor(FakeExecutor::default())
+        .execute(
+            request(ResearchRequestKind::ListFiles {
+                prefix: None,
+                limit: 200,
+            }),
+            &mut context,
+            &AtomicBool::new(false),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(
+        !list.content.contains("private-"),
+        "{source}: {}",
+        list.content
+    );
+    // Changing the live source after capture must not reopen history eligibility.
+    std::fs::write(&policy, "").unwrap();
+    let environment = git_environment(fixture.path());
+    for path in ["private-current.txt", "private-deleted.txt"] {
+        for kind in [
+            ResearchRequestKind::GitShow {
+                commit: first.clone(),
+                path: Some(path.into()),
+            },
+            ResearchRequestKind::GitDiff {
+                base: first.clone(),
+                head: second.clone(),
+                paths: vec![path.into()],
+            },
+        ] {
+            let receipt = inspect_history(&capture, &environment, kind);
+            assert_eq!(
+                receipt.status,
+                ResearchReceiptStatus::Unavailable,
+                "{source}: {path}: {}",
+                receipt.content
+            );
+            assert!(receipt.content.is_empty());
+            assert!(receipt.command.is_none());
+        }
+    }
+    assert!(capture.unchanged());
+}
+
+#[test]
+fn historical_exclude_and_parent_policies_are_immutable_for_current_and_deleted_leaves() {
+    for source in ["exclude", "parent-gitignore", "parent-ignore"] {
+        assert_ambient_policy_withholds_history(source);
+    }
+}
+
+#[test]
+fn historical_global_policy_is_immutable_for_current_and_deleted_leaves() {
+    if std::env::var_os("TANDEM_GLOBAL_IGNORE").is_some() {
+        assert_ambient_policy_withholds_history("global");
+        return;
+    }
+    // Only the child test process receives disposable Git configuration. The
+    // host environment and global preferences are never changed.
+    for kind in [
+        "external",
+        "home-config",
+        "xdg-config",
+        "system-config",
+        "xdg-default",
+    ] {
+        let fixture = tempfile::tempdir().unwrap();
+        let xdg = fixture.path().join("xdg");
+        std::fs::create_dir_all(xdg.join("git")).unwrap();
+        let policy = if kind == "xdg-default" {
+            xdg.join("git/ignore")
+        } else {
+            fixture.path().join("global-ignore")
+        };
+        let config = match kind {
+            "home-config" => fixture.path().join(".gitconfig"),
+            "xdg-config" => xdg.join("git/config"),
+            _ => fixture.path().join("gitconfig"),
+        };
+        if kind != "xdg-default" {
+            std::fs::write(
+                &config,
+                format!("[core]\nexcludesFile={}\n", policy.display()),
+            )
+            .unwrap();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "historical_global_policy_is_immutable_for_current_and_deleted_leaves",
+                "--nocapture",
+            ])
+            .env("HOME", fixture.path())
+            .env("XDG_CONFIG_HOME", xdg)
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if kind == "external" {
+                    config.as_os_str()
+                } else {
+                    std::ffi::OsStr::new("/dev/null")
+                },
+            )
+            .env(
+                "GIT_CONFIG_SYSTEM",
+                if kind == "system-config" {
+                    config.as_os_str()
+                } else {
+                    std::ffi::OsStr::new("/dev/null")
+                },
+            )
+            .env("TANDEM_GLOBAL_IGNORE", policy)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{kind}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[test]
 fn historical_object_ids_must_resolve_to_commits_before_returning_output() {
     let (fixture, project, first, second) = historical_fixture();

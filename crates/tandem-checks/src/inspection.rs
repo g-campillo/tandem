@@ -79,7 +79,7 @@ impl InspectionEnvironment {
             .map(|t| -> Result<_> {
                 Ok(InspectionTool {
                     executable: t.interpreter.clone(),
-                    fingerprint: file_hash(&t.interpreter)?,
+                    fingerprint: file_hash(&t.executable)?,
                     read_roots: t.read_roots(),
                 })
             })
@@ -105,6 +105,10 @@ fn rust_identity(tools: &RustTools) -> Result<String> {
     Ok(content_hash(identity.as_bytes()))
 }
 fn python_identity(tools: &PythonTools) -> Result<String> {
+    ensure!(
+        tools.interpreter.canonicalize()? == tools.executable,
+        "Configured Python interpreter target changed"
+    );
     let version = tools
         .label
         .split(" · Pyright ")
@@ -151,49 +155,8 @@ pub fn capture_git(
     destination: &Path,
     cancel: &AtomicBool,
 ) -> Result<Option<GitSnapshot>> {
-    let entry = project.root.join(".git");
-    let Ok(metadata) = fs::symlink_metadata(&entry) else {
+    let Some((local, common)) = git_metadata_directories(project)? else {
         return Ok(None);
-    };
-    ensure!(
-        !metadata.file_type().is_symlink(),
-        "Linked Git directory is unavailable"
-    );
-    let (local, common) = if metadata.is_dir() {
-        (entry.clone(), entry)
-    } else {
-        let (bytes, _) = secure_read(project, ".git")?;
-        let text = std::str::from_utf8(&bytes)?.trim();
-        let gitdir = text
-            .strip_prefix("gitdir: ")
-            .context("Invalid Git worktree metadata")?;
-        ensure!(!gitdir.contains('\n'), "Invalid Git worktree metadata");
-        let local = project.root.join(gitdir).canonicalize()?;
-        let local_project = Project::open(&local)?;
-        let (bytes, _) = secure_read(&local_project, "commondir")?;
-        ensure!(
-            std::str::from_utf8(&bytes)?.trim() == "../..",
-            "Unsupported Git worktree common directory"
-        );
-        let common = local
-            .parent()
-            .and_then(Path::parent)
-            .context("Invalid Git worktree common directory")?
-            .to_path_buf();
-        ensure!(
-            local
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|n| n == "worktrees"),
-            "Invalid Git worktree directory"
-        );
-        let (backlink, _) = secure_read(&local_project, "gitdir")?;
-        ensure!(
-            Path::new(std::str::from_utf8(&backlink)?.trim()).canonicalize()?
-                == entry.canonicalize()?,
-            "Git worktree backlink differs"
-        );
-        (local, common)
     };
     ensure!(
         !destination.starts_with(&project.root),
@@ -240,6 +203,58 @@ pub fn capture_git(
         directory: destination.to_path_buf(),
         hashes,
     }))
+}
+
+/// Resolve the same bounded conventional worktree metadata for Git data and
+/// ignore-policy capture. Never follow a repository-supplied `.git` symlink.
+pub(crate) fn git_metadata_directories(project: &Project) -> Result<Option<(PathBuf, PathBuf)>> {
+    let entry = project.root.join(".git");
+    let metadata = match fs::symlink_metadata(&entry) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "Linked Git directory is unavailable"
+    );
+    let (local, common) = if metadata.is_dir() {
+        (entry.clone(), entry)
+    } else {
+        let (bytes, _) = secure_read(project, ".git")?;
+        let text = std::str::from_utf8(&bytes)?.trim();
+        let gitdir = text
+            .strip_prefix("gitdir: ")
+            .context("Invalid Git worktree metadata")?;
+        ensure!(!gitdir.contains('\n'), "Invalid Git worktree metadata");
+        let local = project.root.join(gitdir).canonicalize()?;
+        let local_project = Project::open(&local)?;
+        let (bytes, _) = secure_read(&local_project, "commondir")?;
+        ensure!(
+            std::str::from_utf8(&bytes)?.trim() == "../..",
+            "Unsupported Git worktree common directory"
+        );
+        let common = local
+            .parent()
+            .and_then(Path::parent)
+            .context("Invalid Git worktree common directory")?
+            .to_path_buf();
+        ensure!(
+            local
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n == "worktrees"),
+            "Invalid Git worktree directory"
+        );
+        let (backlink, _) = secure_read(&local_project, "gitdir")?;
+        ensure!(
+            Path::new(std::str::from_utf8(&backlink)?.trim()).canonicalize()?
+                == entry.canonicalize()?,
+            "Git worktree backlink differs"
+        );
+        (local, common)
+    };
+    Ok(Some((local, common)))
 }
 fn hash_git_tree(
     project: &Project,
@@ -353,9 +368,26 @@ pub struct PreparedInspection {
     denies: Vec<PathBuf>,
     env: BTreeMap<String, String>,
     required_hashes: Vec<(PathBuf, String)>,
+    required_targets: Vec<(PathBuf, PathBuf)>,
     git_leaf_checks: Vec<(Vec<String>, Vec<String>)>,
 }
 impl PreparedInspection {
+    fn verify_tools(&self) -> Result<()> {
+        for (path, target) in &self.required_targets {
+            ensure!(
+                path.canonicalize()? == *target,
+                "Configured inspection interpreter target changed"
+            );
+        }
+        self.tool.verify(&self.project)?;
+        for (path, hash) in &self.required_hashes {
+            ensure!(
+                file_hash(path)? == *hash,
+                "Configured inspection helper executable changed"
+            );
+        }
+        Ok(())
+    }
     pub fn argv(&self) -> &[String] {
         &self.argv
     }
@@ -707,6 +739,7 @@ pub fn prepare_inspection(
         _ => anyhow::bail!("Request is not a fixed local inspection"),
     };
     let mut required_hashes = Vec::new();
+    let mut required_targets = Vec::new();
     if environment
         .cargo
         .as_ref()
@@ -737,6 +770,7 @@ pub fn prepare_inspection(
             python_identity(tools)? == tools.fingerprint,
             "Configured Python executable identities changed"
         );
+        required_targets.push((tools.interpreter.clone(), tools.executable.clone()));
     }
     tool.verify(&project.root)?;
     let mut denies = vec![project.root.clone()];
@@ -756,6 +790,7 @@ pub fn prepare_inspection(
         denies,
         env,
         required_hashes,
+        required_targets,
         git_leaf_checks,
     };
     result.permission_config()?;
@@ -787,13 +822,7 @@ impl InspectionExecutor for RuntimeInspectionExecutor {
         cancel: &AtomicBool,
         started: &mut dyn FnMut(&ResearchCommand) -> Result<()>,
     ) -> Result<InspectionOutput> {
-        command.tool.verify(&command.project)?;
-        for (path, hash) in &command.required_hashes {
-            ensure!(
-                file_hash(path)? == *hash,
-                "Configured inspection helper executable changed"
-            );
-        }
+        command.verify_tools()?;
         tandem_codex::verify_runtime(&command.runtime)?;
         fs::write(
             command.home.join("config.toml"),
@@ -807,6 +836,9 @@ impl InspectionExecutor for RuntimeInspectionExecutor {
         }
         let mut client = Client::start(&command.runtime, &command.home, &command.input)?;
         let process = format!("inspection-{}", new_id());
+        // Runtime startup can take time; recheck the configured interpreter's
+        // target and trusted bytes immediately before command dispatch too.
+        command.verify_tools()?;
         let id = crate::runner::begin_command(
             &mut client,
             &command.argv,
@@ -1006,6 +1038,7 @@ mod tests {
         let (temp, project, mut checks, mut trust) = setup();
         let interpreter = temp.path().join("python");
         fs::write(&interpreter, "python identity").unwrap();
+        let interpreter = interpreter.canonicalize().unwrap();
         let mut python = PythonTools {
             interpreter: interpreter.clone(),
             executable: interpreter,
@@ -1056,5 +1089,69 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn python_inspection_rejects_retargeted_configured_interpreter() {
+        use std::os::unix::fs::symlink;
+        let (temp, project, mut checks, mut trust) = setup();
+        let executable = temp.path().join("trusted/bin/python3");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "trusted python identity").unwrap();
+        let executable = executable.canonicalize().unwrap();
+        let interpreter = temp.path().join("venv/bin/python3");
+        fs::create_dir_all(interpreter.parent().unwrap()).unwrap();
+        symlink(&executable, &interpreter).unwrap();
+        let python = PythonTools::discover(&project.root, Some(&interpreter)).unwrap();
+        assert_eq!(python.executable, executable);
+        trust.python_trusted_fingerprint = Some(python.fingerprint.clone());
+        checks.python = Some(python);
+        let snapshot = crate::materialize(
+            &project,
+            &[],
+            &temp.path().join("snapshot"),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let environment = InspectionEnvironment::configured(checks.clone(), &trust, None).unwrap();
+        let command = prepare_inspection(
+            &environment,
+            &project,
+            &snapshot,
+            None,
+            &req(InspectionRecipe::PythonToolchain),
+        )
+        .unwrap();
+        assert_eq!(command.argv()[0], interpreter.to_str().unwrap());
+        command.verify_tools().unwrap();
+        for bytes in ["replacement python identity", "trusted python identity"] {
+            let replacement = temp.path().join("replacement-python");
+            fs::write(&replacement, bytes).unwrap();
+            fs::remove_file(&interpreter).unwrap();
+            symlink(&replacement, &interpreter).unwrap();
+            assert!(command.verify_tools().is_err());
+            let changed = InspectionEnvironment::configured(checks.clone(), &trust, None).unwrap();
+            assert!(
+                prepare_inspection(
+                    &changed,
+                    &project,
+                    &snapshot,
+                    None,
+                    &req(InspectionRecipe::PythonToolchain),
+                )
+                .is_err(),
+                "A replacement canonical target must not inherit existing trust"
+            );
+            assert!(
+                prepare_inspection(
+                    &environment,
+                    &project,
+                    &snapshot,
+                    None,
+                    &req(InspectionRecipe::PythonToolchain),
+                )
+                .is_err()
+            );
+        }
     }
 }

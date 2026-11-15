@@ -1,9 +1,11 @@
+use crate::ignore_policy::CapturedIgnorePolicy;
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tandem_core::*;
 
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
@@ -14,6 +16,14 @@ pub struct MaterializedSnapshot {
     pub manifest: SnapshotManifest,
     pub input: PathBuf,
     pub artifacts: PathBuf,
+    ignore_policy: CapturedIgnorePolicy,
+}
+impl MaterializedSnapshot {
+    /// Uses only the immutable policy loaded during materialization. Unknown
+    /// directories cannot expand through history, even if they now exist.
+    pub fn eligible_path(&self, path: &str) -> bool {
+        self.ignore_policy.allows_captured_path(path)
+    }
 }
 
 pub fn excluded(path: &str) -> Option<&'static str> {
@@ -166,13 +176,18 @@ pub fn materialize(
     let mut paths = std::collections::BTreeSet::new();
     let mut omitted = Vec::new();
     let mut scanned = 0;
+    let policy = Arc::new(Mutex::new(CapturedIgnorePolicy::capture(project)?));
+    let policy_filter = policy.clone();
+    let policy_error = Arc::new(Mutex::new(None));
+    let filter_error = policy_error.clone();
+    let project_root = project.root.clone();
     let walker = ignore::WalkBuilder::new(&project.root)
-        .hidden(false)
+        .standard_filters(false)
         .follow_links(false)
         .require_git(false)
         .max_depth(Some(64))
-        .filter_entry(|entry| {
-            !matches!(
+        .filter_entry(move |entry| {
+            if matches!(
                 entry.file_name().to_str(),
                 Some(
                     ".git"
@@ -184,7 +199,23 @@ pub fn materialize(
                         | ".venv"
                         | "__pycache__"
                 )
-            )
+            ) {
+                return false;
+            }
+            let Ok(relative) = entry.path().strip_prefix(&project_root) else {
+                return false;
+            };
+            match policy_filter
+                .lock()
+                .unwrap()
+                .allows_entry(relative, entry.file_type().is_some_and(|t| t.is_dir()))
+            {
+                Ok(allowed) => allowed,
+                Err(error) => {
+                    *filter_error.lock().unwrap() = Some(error);
+                    false
+                }
+            }
         })
         .build();
     for entry in walker {
@@ -227,6 +258,10 @@ pub fn materialize(
             paths.insert(relative.to_string());
         }
     }
+    if let Some(error) = policy_error.lock().unwrap().take() {
+        return Err(error);
+    }
+    let mut ignore_policy = Arc::try_unwrap(policy).ok().unwrap().into_inner().unwrap();
     let overlays: BTreeMap<_, _> = overlays
         .iter()
         .map(|doc| (doc.path.as_str(), doc))
@@ -240,7 +275,7 @@ pub fn materialize(
         } else {
             normalized_relative(Path::new(path))?;
             if !paths.contains(*path)
-                && (overlays[path].base_hash.is_some() || ignored_new_buffer(project, path)?)
+                && (overlays[path].base_hash.is_some() || !ignore_policy.allows_buffer(path)?)
             {
                 omitted.push(OmittedInput {
                     path: (*path).into(),
@@ -317,13 +352,14 @@ pub fn materialize(
             original_hash,
         });
     }
+    ignore_policy.verify_sources()?;
     let identity = files
         .iter()
         .map(|file| format!("{}\0{}\0{}", file.path, file.hash, file.executable))
         .collect::<Vec<_>>()
         .join("\n");
     let manifest = SnapshotManifest {
-        id: content_hash(identity.as_bytes()),
+        id: content_hash(format!("{}:{}", identity, ignore_policy.identity()).as_bytes()),
         project: project.key().into(),
         files,
         omitted,
@@ -338,6 +374,7 @@ pub fn materialize(
         manifest,
         input,
         artifacts,
+        ignore_policy,
     })
 }
 
@@ -355,6 +392,139 @@ pub fn snapshot_unchanged(snapshot: &MaterializedSnapshot) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn materialization_and_expansion_share_the_full_hierarchical_ignore_policy() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = fixture.path().join("project");
+        fs::create_dir_all(directory.join("src")).unwrap();
+        fs::create_dir_all(directory.join("blocked")).unwrap();
+        fs::create_dir_all(directory.join(".git/info")).unwrap();
+        fs::write(
+            fixture.path().join(".gitignore"),
+            "project/parent-private.txt\n",
+        )
+        .unwrap();
+        fs::write(fixture.path().join(".ignore"), "!project/parent-kept.rs\n").unwrap();
+        for (name, text) in [
+            (".gitignore", "*.rs\nblocked/\n"),
+            (".ignore", "!public.rs\n"),
+            (".git/info/exclude", "exclude-private.txt\n"),
+            ("src/.gitignore", "!nested.rs\n"),
+            ("blocked/.ignore", "!child.txt\n"),
+            ("blocked/child.txt", "blocked"),
+            ("ordinary.rs", "ignored"),
+            ("public.rs", "public"),
+            ("parent-private.txt", "ignored by parent"),
+            ("parent-kept.rs", "kept by parent ignore precedence"),
+            ("exclude-private.txt", "ignored by Git exclude"),
+            ("src/nested.rs", "kept by nested policy"),
+            ("visible.txt", "visible"),
+        ] {
+            fs::write(directory.join(name), text).unwrap();
+        }
+        let project = Project::open(&directory).unwrap();
+        let expected = ignore::WalkBuilder::new(&project.root)
+            .hidden(false)
+            .follow_links(false)
+            .require_git(false)
+            .max_depth(Some(64))
+            .build()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
+            .filter_map(|entry| {
+                let path = entry
+                    .path()
+                    .strip_prefix(&project.root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                excluded(&path).is_none().then_some(path)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let snapshot = materialize(
+            &project,
+            &[],
+            &fixture.path().join("snapshot"),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let actual = snapshot
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        for path in [
+            "public.rs",
+            "parent-kept.rs",
+            "src/nested.rs",
+            "visible.txt",
+            "deleted.txt",
+        ] {
+            assert!(snapshot.eligible_path(path), "{path}");
+        }
+        for path in [
+            "ordinary.rs",
+            "parent-private.txt",
+            "exclude-private.txt",
+            "blocked/child.txt",
+            "unknown/child.txt",
+        ] {
+            assert!(!snapshot.eligible_path(path), "{path}");
+        }
+        // Policies, directories and source leaves can change after capture;
+        // historical eligibility still uses only the sealed compiled policy.
+        fs::write(directory.join(".ignore"), "*\n").unwrap();
+        fs::write(directory.join(".gitignore"), "").unwrap();
+        fs::write(directory.join(".git/info/exclude"), "").unwrap();
+        fs::write(fixture.path().join(".gitignore"), "").unwrap();
+        fs::remove_dir_all(directory.join("src")).unwrap();
+        assert!(snapshot.eligible_path("src/nested.rs"));
+        assert!(snapshot.eligible_path("deleted.txt"));
+        assert!(!snapshot.eligible_path("ordinary.rs"));
+        assert!(!snapshot.eligible_path("parent-private.txt"));
+        assert!(!snapshot.eligible_path("exclude-private.txt"));
+    }
+
+    #[test]
+    fn incomplete_or_unsafe_ignore_policies_refuse_snapshot_capture() {
+        let fixture = tempfile::tempdir().unwrap();
+        for kind in ["symlink", "hardlink", "exclude-parent-symlink", "malformed"] {
+            let directory = fixture.path().join(kind);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("visible.txt"), "visible").unwrap();
+            let policy = fixture.path().join(format!("{kind}-policy"));
+            fs::write(&policy, "private.txt\n").unwrap();
+            match kind {
+                "symlink" => {
+                    std::os::unix::fs::symlink(&policy, directory.join(".ignore")).unwrap()
+                }
+                "hardlink" => fs::hard_link(&policy, directory.join(".ignore")).unwrap(),
+                "exclude-parent-symlink" => {
+                    let info = fixture.path().join("external-info");
+                    fs::create_dir(&info).unwrap();
+                    fs::write(info.join("exclude"), "private.txt\n").unwrap();
+                    fs::create_dir(directory.join(".git")).unwrap();
+                    std::os::unix::fs::symlink(&info, directory.join(".git/info")).unwrap();
+                }
+                "malformed" => fs::write(directory.join(".ignore"), "[z-a]\n").unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(
+                materialize(
+                    &Project::open(&directory).unwrap(),
+                    &[],
+                    &fixture.path().join(format!("{kind}-snapshot")),
+                    &AtomicBool::new(false),
+                )
+                .is_err(),
+                "{kind}"
+            );
+        }
+    }
+
     #[test]
     fn ignored_buffers_stay_excluded_and_new_source_buffers_are_captured() {
         let root = tempfile::tempdir().unwrap();
