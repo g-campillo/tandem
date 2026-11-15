@@ -7,3 +7,6 @@ pub use runtime::*;
 
 mod research;
 pub use research::*;
+
+mod public_research;
+pub use public_research::*;

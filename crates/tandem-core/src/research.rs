@@ -209,6 +209,14 @@ pub struct PublicResearchBrief {
 
 impl PublicResearchBrief {
     pub fn validate(&self) -> Result<()> {
+        self.validate_bounds()?;
+        for url in &self.urls {
+            validate_public_url_shape(url)?;
+        }
+        Ok(())
+    }
+    /// Structural bounds before privacy filtering can withhold unsafe entries.
+    pub fn validate_bounds(&self) -> Result<()> {
         stable_id(&self.id)?;
         ensure!(
             !self.topics.is_empty() || !self.queries.is_empty() || !self.urls.is_empty(),
@@ -222,9 +230,6 @@ impl PublicResearchBrief {
             for entry in entries {
                 bounded_text(entry, 4096, "Public research entry")?;
             }
-        }
-        for url in &self.urls {
-            validate_public_url_shape(url)?;
         }
         ensure!(
             serde_json::to_vec(self)?.len() <= 16 * 1024,
@@ -321,6 +326,18 @@ pub struct ResearchReceiptLimits {
     pub returned_bytes: usize,
 }
 
+/// Anonymous host retrieval provenance. A hosted-search candidate is not a
+/// retrieval receipt; only a successful bounded GET can populate a body hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicWebReceipt {
+    pub final_url: String,
+    pub title: Option<String>,
+    pub http_status: Option<u16>,
+    pub body_hash: Option<String>,
+    pub downloaded_bytes: usize,
+}
+
 /// Observed host execution only. This is never implementation-check evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -344,6 +361,8 @@ pub struct ResearchReceipt {
     #[serde(default)]
     pub command: Option<ResearchCommand>,
     pub sources: Vec<ResearchSource>,
+    #[serde(default)]
+    pub public_web: Option<PublicWebReceipt>,
     pub status: ResearchReceiptStatus,
     pub content: String,
     pub content_hash: String,
@@ -366,6 +385,7 @@ impl ResearchReceipt {
             snapshot_id: None,
             command: None,
             sources,
+            public_web: None,
             status,
             content_hash: content_hash(content.as_bytes()),
             limits: ResearchReceiptLimits {
@@ -415,11 +435,53 @@ impl ResearchReceipt {
             "Research receipt metadata exceeds its entry limit"
         );
         ensure!(
-            serde_json::to_vec(&(&self.sources, &self.omissions))?.len() <= 16 * 1024,
+            serde_json::to_vec(&(&self.sources, &self.omissions))?.len()
+                + self
+                    .public_web
+                    .as_ref()
+                    .map(serde_json::to_vec)
+                    .transpose()?
+                    .map_or(0, |bytes| bytes.len())
+                <= 16 * 1024,
             "Research source metadata exceeds 16 KiB"
         );
         let mut ids = BTreeSet::new();
+        if let Some(web) = &self.public_web {
+            validate_public_url_shape(&web.final_url)?;
+            ensure!(
+                web.final_url.starts_with("https://")
+                    && web.downloaded_bytes <= 1024 * 1024
+                    && web.title.as_ref().is_none_or(|t| t.len() <= 512)
+                    && web.http_status.is_none_or(|s| (100..=599).contains(&s))
+                    && web.body_hash.as_ref().is_none_or(|h| valid_hash(h)),
+                "Invalid public retrieval provenance"
+            );
+        }
         for source in &self.sources {
+            ensure!(
+                matches!(source.locator, SourceLocator::PublicUrl { .. })
+                    == (source.provenance == ResearchProvenance::PublicWeb),
+                "Public locators require public retrieval provenance"
+            );
+            if source.provenance == ResearchProvenance::PublicWeb {
+                let web = self.public_web.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Public citations require host retrieval provenance")
+                })?;
+                ensure!(
+                    web.http_status.is_some_and(|s| (200..=299).contains(&s))
+                        && web.body_hash.as_deref() == Some(&source.source_hash)
+                        && source.locator
+                            == (SourceLocator::PublicUrl {
+                                url: web.final_url.clone()
+                            })
+                        && matches!(self.request.kind, ResearchRequestKind::PublicPage { .. })
+                        && matches!(
+                            self.status,
+                            ResearchReceiptStatus::Complete | ResearchReceiptStatus::Partial
+                        ),
+                    "Public citations require a successful source retrieval"
+                );
+            }
             stable_id(&source.id)?;
             ensure!(ids.insert(&source.id), "Research source IDs must be unique");
             ensure!(
@@ -491,9 +553,48 @@ impl ResearchFinding {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PublicSearchAction {
+    Other,
+    Search {
+        query: Option<String>,
+        queries: Option<Vec<String>>,
+    },
+    OpenPage {
+        url: Option<String>,
+    },
+    FindInPage {
+        url: Option<String>,
+        pattern: Option<String>,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublicSearchPhase {
+    Started,
+    Completed,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicSearchObservation {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub phase: PublicSearchPhase,
+    pub query: String,
+    pub action: Option<PublicSearchAction>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum ResearchActivity {
+    PublicBriefPrepared {
+        brief: PublicResearchBrief,
+        model: crate::ResolvedModel,
+    },
+    PublicSearchObserved {
+        observation: PublicSearchObservation,
+    },
     Requested {
         request: ResearchRequest,
     },

@@ -44,9 +44,16 @@ pub struct ConnectionState {
     pub limits: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeMode {
+    Private,
+    Public,
+}
+
 pub struct CompanionSession<E: ProtocolExchange = Client> {
-    client: E,
-    scratch: PathBuf,
+    pub(crate) client: E,
+    pub(crate) scratch: PathBuf,
+    pub(crate) mode: RuntimeMode,
     resumed: BTreeSet<String>,
     pub connection: ConnectionState,
 }
@@ -62,6 +69,14 @@ impl CompanionSession {
         )
     }
     pub fn connect_at(binary: &Path, credential_home: &Path, scratch: &Path) -> Result<Self> {
+        Self::connect_mode(binary, credential_home, scratch, RuntimeMode::Private)
+    }
+    pub(crate) fn connect_mode(
+        binary: &Path,
+        credential_home: &Path,
+        scratch: &Path,
+        mode: RuntimeMode,
+    ) -> Result<Self> {
         ensure!(
             file_hash(binary)? == RUNTIME_HASH,
             "Companion requires the tested Codex 0.169.0 executable; no billing fallback is available"
@@ -76,52 +91,14 @@ impl CompanionSession {
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
             }
         }
-        let mut settings = vec![
-            "model_provider=\"openai\"".into(),
-            "forced_login_method=\"chatgpt\"".into(),
-            "cli_auth_credentials_store=\"keyring\"".into(),
-            "approval_policy=\"never\"".into(),
-            "default_permissions=\"tandem_companion\"".into(),
-            "project_doc_max_bytes=0".into(),
-            "web_search=\"disabled\"".into(),
-            "memories.generate_memories=false".into(),
-            "memories.use_memories=false".into(),
-            "analytics.enabled=false".into(),
-            "features.secret_auth_storage=false".into(),
-            "features.skip_host_skill_discovery=true".into(),
-            "permissions.tandem_companion.network.enabled=false".into(),
-            format!(
-                "permissions.tandem_companion.filesystem={{\":minimal\"=\"read\",{}=\"read\"}}",
-                serde_json::to_string(&scratch.display().to_string())?
-            ),
-        ];
-        for feature in [
-            "shell_tool",
-            "unified_exec",
-            "apply_patch_freeform",
-            "apps",
-            "plugins",
-            "browser_use",
-            "computer_use",
-            "remote_control",
-            "memories",
-            "memory_tool",
-            "multi_agent",
-            "multi_agent_v2",
-            "collab",
-            "hooks",
-            "codex_hooks",
-            "plugin_hooks",
-            "request_permissions_tool",
-            "search_tool",
-            "skill_search",
-            "shell_snapshot",
-            "shell_snapshot_v2",
-        ] {
-            settings.push(format!("features.{feature}=false"));
-        }
+        ensure!(
+            mode != RuntimeMode::Public || std::fs::read_dir(scratch)?.next().is_none(),
+            "Public research needs an empty scratch directory"
+        );
+        let settings = runtime_settings(scratch, mode)?;
         let client = Client::start_with_overrides(binary, credential_home, scratch, &settings)?;
         let mut session = Self::with_exchange(client, scratch.into());
+        session.mode = mode;
         session.refresh()?;
         Ok(session)
     }
@@ -133,6 +110,7 @@ impl<E: ProtocolExchange> CompanionSession<E> {
         Self {
             client,
             scratch,
+            mode: RuntimeMode::Private,
             resumed: BTreeSet::new(),
             connection: ConnectionState {
                 kind: ConnectionKind::Unavailable,
@@ -331,6 +309,10 @@ impl<E: ProtocolExchange> CompanionSession<E> {
         let mut thread_requested = false;
         let validation = (|| -> Result<()> {
             ensure!(
+                self.mode == RuntimeMode::Private,
+                "Private requests cannot run in a public research session"
+            );
+            ensure!(
                 !crate::credential_like_data(&serde_json::to_value(&run.request)?),
                 "Request not sent: credential-like content was detected in task/context metadata. Remove sensitive values and retry."
             );
@@ -405,7 +387,8 @@ impl<E: ProtocolExchange> CompanionSession<E> {
             observe(&run)?; // Persist the immutable selection before creating a thread.
             let binding = binding
                 .filter(|binding| binding.reusable_for(&identity, &resolved, &instructions_hash));
-            let mut config = json!({});
+            let mut config =
+                json!({"web_search":"disabled","features.standalone_web_search":false});
             if let Some(effort) = &resolved.effort {
                 config["model_reasoning_effort"] = json!(effort);
             }
@@ -629,6 +612,62 @@ impl<E: ProtocolExchange> CompanionSession<E> {
     }
 }
 
+pub(crate) fn runtime_settings(scratch: &Path, mode: RuntimeMode) -> Result<Vec<String>> {
+    let mut settings = vec![
+        "model_provider=\"openai\"".into(),
+        "forced_login_method=\"chatgpt\"".into(),
+        "cli_auth_credentials_store=\"keyring\"".into(),
+        "approval_policy=\"never\"".into(),
+        "default_permissions=\"tandem_companion\"".into(),
+        "project_doc_max_bytes=0".into(),
+        format!(
+            "web_search=\"{}\"",
+            if mode == RuntimeMode::Public {
+                "live"
+            } else {
+                "disabled"
+            }
+        ),
+        "memories.generate_memories=false".into(),
+        "memories.use_memories=false".into(),
+        "analytics.enabled=false".into(),
+        "features.secret_auth_storage=false".into(),
+        "features.skip_host_skill_discovery=true".into(),
+        "permissions.tandem_companion.network.enabled=false".into(),
+        format!(
+            "permissions.tandem_companion.filesystem={{\":minimal\"=\"read\",{}=\"read\"}}",
+            serde_json::to_string(&scratch.display().to_string())?
+        ),
+    ];
+    for feature in [
+        "standalone_web_search",
+        "shell_tool",
+        "unified_exec",
+        "apply_patch_freeform",
+        "apps",
+        "plugins",
+        "browser_use",
+        "computer_use",
+        "remote_control",
+        "memories",
+        "memory_tool",
+        "multi_agent",
+        "multi_agent_v2",
+        "collab",
+        "hooks",
+        "codex_hooks",
+        "plugin_hooks",
+        "request_permissions_tool",
+        "search_tool",
+        "skill_search",
+        "shell_snapshot",
+        "shell_snapshot_v2",
+    ] {
+        settings.push(format!("features.{feature}=false"));
+    }
+    Ok(settings)
+}
+
 #[derive(Debug)]
 struct UnexpectedModel;
 impl std::fmt::Display for UnexpectedModel {
@@ -637,7 +676,7 @@ impl std::fmt::Display for UnexpectedModel {
     }
 }
 impl std::error::Error for UnexpectedModel {}
-fn verify_thread_model(result: &Value, selected: &ResolvedModel) -> Result<()> {
+pub(crate) fn verify_thread_model(result: &Value, selected: &ResolvedModel) -> Result<()> {
     if result["model"].as_str() != Some(&selected.model)
         || result["modelProvider"].as_str() != Some("openai")
         || result["reasoningEffort"].as_str() != selected.effort.as_deref()
@@ -652,7 +691,7 @@ fn verify_thread_model(result: &Value, selected: &ResolvedModel) -> Result<()> {
     }
     Ok(())
 }
-fn verify_optional_model(result: &Value, selected: &ResolvedModel) -> Result<()> {
+pub(crate) fn verify_optional_model(result: &Value, selected: &ResolvedModel) -> Result<()> {
     for path in ["/model", "/turn/model"] {
         if let Some(model) = result.pointer(path)
             && model.as_str() != Some(&selected.model)
@@ -731,6 +770,50 @@ mod tests {
                 classify_failure(&json!({"codexErrorInfo":code,"message":"private-token-content"}));
             assert_eq!(state, kind);
             assert!(!detail.contains("private-token-content"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod public_policy_tests {
+    use super::*;
+    #[test]
+    fn public_mode_only_enables_hosted_search_and_keeps_tool_network_denied() {
+        for mode in [RuntimeMode::Private, RuntimeMode::Public] {
+            let settings = runtime_settings(Path::new("/empty-public-scratch"), mode).unwrap();
+            let parsed = settings
+                .iter()
+                .map(|setting| {
+                    let (name, value) = setting.split_once('=').unwrap();
+                    (name.to_string(), value.to_string())
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(
+                parsed["web_search"],
+                if mode == RuntimeMode::Public {
+                    "\"live\""
+                } else {
+                    "\"disabled\""
+                }
+            );
+            assert_eq!(
+                parsed["permissions.tandem_companion.network.enabled"],
+                "false"
+            );
+            assert_eq!(parsed["project_doc_max_bytes"], "0");
+            assert!(
+                parsed["permissions.tandem_companion.filesystem"].contains("/empty-public-scratch")
+            );
+            assert_eq!(parsed["features.standalone_web_search"], "false");
+            assert!(
+                parsed
+                    .iter()
+                    .filter(|(name, _)| name.starts_with("features.")
+                        && !name.ends_with("skip_host_skill_discovery"))
+                    .all(|(_, value)| value == "false")
+            );
+            assert_eq!(parsed["memories.generate_memories"], "false");
+            assert_eq!(parsed["memories.use_memories"], "false");
         }
     }
 }
