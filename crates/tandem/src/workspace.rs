@@ -607,6 +607,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_jump(cx);
         if self.loading {
             self.message(
                 "Wait for the selected project to finish opening.",
@@ -676,6 +677,7 @@ impl Workspace {
         }
     }
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.record_jump(cx);
         self.active = Some(index);
         self.settings.open = false;
         self.invalidate_language(cx);

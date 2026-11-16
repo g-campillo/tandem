@@ -1,5 +1,6 @@
 //! Editor and workbench commands in the style of VS Code: their actions, shortcuts, menu entries and handlers.
 mod editing;
+mod history;
 mod layout;
 mod navigation;
 mod palette;
@@ -60,7 +61,10 @@ actions!(
         SelectTab6,
         SelectTab7,
         SelectTab8,
-        SelectTab9
+        SelectTab9,
+        GoBack,
+        GoForward,
+        GoToLine
     ]
 );
 
@@ -146,6 +150,14 @@ pub struct CommandsUi {
     occurrences: Option<selection::OccurrenceSession>,
     /// The selections Expand Selection has passed through.
     expansion: Option<selection::ExpansionSession>,
+    /// Where Back and Forward go (⌃-, ⌃⇧-).
+    history: history::NavHistory,
+    /// The project `epoch` the history belongs to.
+    history_epoch: u64,
+    /// Set while Back or Forward moves, so that move is not recorded as a jump.
+    history_paused: bool,
+    /// The Go to Line dialog's input, created the first time the dialog opens.
+    line_input: Option<Entity<InputState>>,
 }
 
 impl Default for CommandsUi {
@@ -158,6 +170,10 @@ impl Default for CommandsUi {
             last_bottom: BottomTab::Terminal,
             occurrences: None,
             expansion: None,
+            history: history::NavHistory::default(),
+            history_epoch: 0,
+            history_paused: false,
+            line_input: None,
         }
     }
 }
@@ -392,11 +408,14 @@ fn view() -> Vec<CommandSpec> {
 }
 
 fn go() -> Vec<CommandSpec> {
-    use KeyScope::{Editor, Global};
+    use KeyScope::{Editor, Global, NotTerminal};
     use MenuId::Go;
     use gpui_kit::component::input::GoToDefinition;
     const SWITCH_TAB: &str = "Switch Tab";
     vec![
+        spec::<GoBack>("Back", Go, "⌃-", &["ctrl--"], NotTerminal),
+        spec::<GoForward>("Forward", Go, "⌃⇧-", &["ctrl-_"], NotTerminal),
+        spec::<GoToLine>("Go to Line…", Go, "⌃G", &["ctrl-g"], NotTerminal).separated(),
         spec::<GoToDefinition>("Go to Definition", Go, "F12", &["f12"], Editor),
         spec::<GoToBracket>("Go to Bracket", Go, "⇧⌘\\", &["cmd-|"], Editor),
         spec::<NextProblem>("Next Problem", Go, "F8", &["f8"], Global).separated(),
@@ -605,6 +624,9 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace
     route::<SelectTab9>(cx, window, &view, |v, w, c| v.select_tab_number(9, w, c));
     route::<NextProblem>(cx, window, &view, |v, w, c| v.go_to_problem(true, w, c));
     route::<PreviousProblem>(cx, window, &view, |v, w, c| v.go_to_problem(false, w, c));
+    route::<GoBack>(cx, window, &view, |v, w, c| v.go_history(false, w, c));
+    route::<GoForward>(cx, window, &view, |v, w, c| v.go_history(true, w, c));
+    route::<GoToLine>(cx, window, &view, |v, w, c| v.open_go_to_line(w, c));
 }
 
 /// The pattern of `install_actions`: dispatch runs while GPUI has borrowed the window, so
@@ -960,6 +982,37 @@ mod tests {
             assert!(
                 names.iter().any(|name| name == title),
                 "{title} is not in Go"
+            );
+        }
+    }
+
+    #[test]
+    fn go_menu_starts_with_back_forward_and_go_to_line() {
+        let menus = extend_menus(Vec::new());
+        let go = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Go")
+            .unwrap();
+        assert_eq!(
+            action_names(&go.items)[..3],
+            ["Back", "Forward", "Go to Line…"]
+        );
+        assert!(matches!(go.items[2], MenuItem::Separator));
+    }
+
+    #[test]
+    fn keys_the_shell_needs_are_disabled_in_the_terminal() {
+        let bindings = key_bindings();
+        for key in ["ctrl-g", "ctrl--", "ctrl-_", "ctrl-r"] {
+            let keystroke = Keystroke::parse(key).unwrap();
+            assert!(
+                bindings.iter().any(|binding| {
+                    gpui_kit::is_no_action(binding.action())
+                        && binding.match_keystrokes(std::slice::from_ref(&keystroke)) == Some(false)
+                        && binding.predicate().map(|predicate| predicate.to_string())
+                            == Some("Terminal".into())
+                }),
+                "{key} is not disabled in the terminal"
             );
         }
     }
