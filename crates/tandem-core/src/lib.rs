@@ -3,6 +3,7 @@ mod storage;
 pub use storage::*;
 pub mod chat;
 mod chat_store;
+pub mod edit;
 pub mod takeover;
 mod tools;
 pub use tools::*;
