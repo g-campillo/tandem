@@ -1,10 +1,18 @@
 // Tool-permission policy for the four turn kinds: discuss, guided, check and takeover.
-// Claude may change files only during a takeover turn and only inside the project folder.
+// Claude may change files only during a takeover turn, or in any turn when the permission
+// mode is bypass, and never outside the project folder.
 
 import fs from 'node:fs';
 import path from 'node:path';
 
 export const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
+
+export const PERMISSION_MODES = new Set(['ask', 'auto', 'bypass']);
+
+/** True when Claude's edit tools may run: during a takeover, and in every turn in bypass. */
+export function mayEdit(policy, mode) {
+  return policy === 'takeover' || mode === 'bypass';
+}
 
 export const GUIDED_EDIT_MESSAGE =
   'Tandem is in guided mode: the user writes the code. Explain the change instead of editing files.';
@@ -388,16 +396,17 @@ export function classifyBash(command) {
 }
 
 /**
- * Decides a tool call for the given policy: `allow`, `deny` (with a reason Claude sees),
- * `ask` (the user decides in Tandem) or `pass` (Claude Code's own permission rules decide).
+ * Decides a tool call for the given policy and permission mode (`ask`, `auto` or `bypass`;
+ * missing or unknown counts as `ask`): `allow`, `deny` (with a reason Claude sees), `ask` (the
+ * user decides in Tandem) or `pass` (Claude Code's own permission mode and rules decide).
  */
-export function decide({ policy, tool, input, cwd }) {
+export function decide({ policy, mode = 'ask', tool, input, cwd }) {
   const args = input ?? {};
   if (tool.startsWith(TANDEM_TOOL_PREFIX)) {
     return { decision: 'allow' };
   }
   if (EDIT_TOOLS.has(tool)) {
-    if (policy !== 'takeover') {
+    if (!mayEdit(policy, mode)) {
       return { decision: 'deny', reason: GUIDED_EDIT_MESSAGE };
     }
     const target = args.file_path ?? args.notebook_path;
@@ -411,10 +420,12 @@ export function decide({ policy, tool, input, cwd }) {
     if (kind === 'read') {
       return { decision: 'allow' };
     }
-    if (kind === 'build' && (policy === 'check' || policy === 'takeover')) {
+    // Only ask adds prompts of Tandem's own; any value but auto and bypass counts as ask.
+    const relaxed = mode === 'auto' || mode === 'bypass';
+    if (kind === 'build' && (relaxed || policy === 'check' || policy === 'takeover')) {
       return { decision: 'allow' };
     }
-    if (policy === 'takeover') {
+    if (relaxed || policy === 'takeover') {
       return { decision: 'pass' };
     }
     return { decision: 'ask' };

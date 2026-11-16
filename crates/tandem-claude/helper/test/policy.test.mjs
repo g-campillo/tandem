@@ -7,13 +7,16 @@ import {
   EDIT_TOOLS,
   GUIDED_EDIT_MESSAGE,
   OUTSIDE_PROJECT_MESSAGE,
+  PERMISSION_MODES,
   classifyBash,
   decide,
   hookOutput,
   insideProject,
+  mayEdit,
 } from '../src/policy.mjs';
 
 const POLICIES = ['discuss', 'guided', 'check', 'takeover'];
+const MODES = ['ask', 'auto', 'bypass'];
 
 const CLASSIFY_CASES = [
   // From the plan.
@@ -462,6 +465,164 @@ test('Tandem tools are allowed and other tools pass', () => {
     assert.deepEqual(
       decide({ policy, tool: 'mcp__brain__search', input: { query: 'x' }, cwd: project }),
       { decision: 'pass' },
+    );
+  }
+});
+
+test('PERMISSION_MODES', () => {
+  assert.deepEqual([...PERMISSION_MODES].sort(), ['ask', 'auto', 'bypass']);
+});
+
+test('mayEdit allows edits during a takeover and in every bypass turn', () => {
+  for (const mode of MODES) {
+    assert.equal(mayEdit('takeover', mode), true, `takeover in ${mode}`);
+  }
+  for (const policy of POLICIES) {
+    assert.equal(mayEdit(policy, 'bypass'), true, `${policy} in bypass`);
+  }
+  for (const policy of ['discuss', 'guided', 'check']) {
+    for (const mode of ['ask', 'auto', 'yolo']) {
+      assert.equal(mayEdit(policy, mode), false, `${policy} in ${mode}`);
+    }
+  }
+});
+
+const ALLOW = { decision: 'allow' };
+const ASK = { decision: 'ask' };
+const PASS = { decision: 'pass' };
+const DENY_GUIDED = { decision: 'deny', reason: GUIDED_EDIT_MESSAGE };
+const DENY_OUTSIDE = { decision: 'deny', reason: OUTSIDE_PROJECT_MESSAGE };
+
+/** The same result in discuss, guided, check and takeover. */
+function everyPolicy(result) {
+  return POLICIES.map(() => result);
+}
+
+/** The input of an edit tool that targets `target`, or no path at all for undefined. */
+function editInput(tool, target) {
+  if (target === undefined) {
+    return {};
+  }
+  return tool === 'NotebookEdit' ? { notebook_path: target } : { file_path: target };
+}
+
+/**
+ * The hook table of the plan: each tool call with its expected result per mode, listed in
+ * POLICIES order. Built inside a test because the paths depend on the `before` hook.
+ */
+function hookTable() {
+  const rows = [
+    {
+      label: 'Bash git status',
+      tool: 'Bash',
+      input: { command: 'git status' },
+      expected: { ask: everyPolicy(ALLOW), auto: everyPolicy(ALLOW), bypass: everyPolicy(ALLOW) },
+    },
+    {
+      label: 'Bash cargo test',
+      tool: 'Bash',
+      input: { command: 'cargo test' },
+      expected: {
+        ask: [ASK, ASK, ALLOW, ALLOW],
+        auto: everyPolicy(ALLOW),
+        bypass: everyPolicy(ALLOW),
+      },
+    },
+    {
+      label: 'Bash npm install left-pad',
+      tool: 'Bash',
+      input: { command: 'npm install left-pad' },
+      expected: { ask: [ASK, ASK, ASK, PASS], auto: everyPolicy(PASS), bypass: everyPolicy(PASS) },
+    },
+    {
+      label: 'mcp__tandem__show_step',
+      tool: 'mcp__tandem__show_step',
+      input: { step: 1 },
+      expected: { ask: everyPolicy(ALLOW), auto: everyPolicy(ALLOW), bypass: everyPolicy(ALLOW) },
+    },
+    {
+      label: 'Read',
+      tool: 'Read',
+      input: { file_path: '/etc/hosts' },
+      expected: { ask: everyPolicy(PASS), auto: everyPolicy(PASS), bypass: everyPolicy(PASS) },
+    },
+    {
+      label: 'mcp__brain__search',
+      tool: 'mcp__brain__search',
+      input: { query: 'x' },
+      expected: { ask: everyPolicy(PASS), auto: everyPolicy(PASS), bypass: everyPolicy(PASS) },
+    },
+  ];
+  const outsideOrMissing = [
+    '../outside.txt',
+    path.join(outside, 'new.txt'),
+    'escape/secret.txt',
+    'secret-link.txt',
+    'dangling-link.txt',
+    undefined,
+  ];
+  for (const tool of EDIT_TOOLS) {
+    const inside = tool === 'NotebookEdit' ? 'notebooks/a.ipynb' : 'src/main.rs';
+    const refusedOutsideTakeover = [DENY_GUIDED, DENY_GUIDED, DENY_GUIDED, PASS];
+    rows.push({
+      label: `${tool} ${inside}`,
+      tool,
+      input: editInput(tool, inside),
+      expected: {
+        ask: refusedOutsideTakeover,
+        auto: refusedOutsideTakeover,
+        bypass: everyPolicy(PASS),
+      },
+    });
+    for (const target of outsideOrMissing) {
+      const refused = [DENY_GUIDED, DENY_GUIDED, DENY_GUIDED, DENY_OUTSIDE];
+      rows.push({
+        label: `${tool} ${target ?? 'without a path'}`,
+        tool,
+        input: editInput(tool, target),
+        expected: { ask: refused, auto: refused, bypass: everyPolicy(DENY_OUTSIDE) },
+      });
+    }
+  }
+  return rows;
+}
+
+test('decide follows the mode and policy matrix', () => {
+  for (const { label, tool, input, expected } of hookTable()) {
+    for (const mode of MODES) {
+      POLICIES.forEach((policy, column) => {
+        assert.deepEqual(
+          decide({ policy, mode, tool, input, cwd: project }),
+          expected[mode][column],
+          `${label} in ${policy}, ${mode}`,
+        );
+      });
+    }
+  }
+});
+
+test('decide in ask, or in an unknown mode, decides as without a mode', () => {
+  for (const { label, tool, input } of hookTable()) {
+    for (const policy of POLICIES) {
+      const withoutMode = decide({ policy, tool, input, cwd: project });
+      for (const mode of ['ask', 'yolo']) {
+        assert.deepEqual(
+          decide({ policy, mode, tool, input, cwd: project }),
+          withoutMode,
+          `${label} in ${policy}, ${mode}`,
+        );
+      }
+    }
+  }
+});
+
+test('Bash without a command is asked only in ask', () => {
+  const expected = { ask: ASK, auto: PASS, bypass: PASS };
+  for (const mode of MODES) {
+    assert.deepEqual(
+      decide({ policy: 'guided', mode, tool: 'Bash', input: {}, cwd: project }),
+      expected[mode],
+      mode,
     );
   }
 });
