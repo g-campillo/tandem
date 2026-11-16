@@ -209,7 +209,11 @@ impl Workspace {
     }
 
     /// Opens the Go to Line dialog for the active file, or closes it when it is open (⌃G).
-    pub(super) fn open_go_to_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::workspace) fn open_go_to_line(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let editor = (self.diff.is_none() && !self.settings.open)
             .then(|| self.active.and_then(|i| self.tabs.get(i)))
             .flatten()

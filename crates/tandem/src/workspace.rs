@@ -3,9 +3,6 @@ mod chat;
 mod chat_logic;
 mod chat_view;
 mod chrome;
-// Task 7 uses `tooltip`; the rest is used from Tasks 8, 10 and 11 on. Task 11 removes
-// this attribute.
-#[allow(dead_code)]
 mod chrome_logic;
 mod code_view;
 pub mod commands;
@@ -183,6 +180,8 @@ struct LoadedProject {
 pub struct Workspace {
     store: Arc<Mutex<Store>>,
     project: Option<Project>,
+    /// The git branch the project is on, as `reconcile` last read it.
+    branch: Option<String>,
     index: FileIndex,
     tabs: Vec<Tab>,
     active: Option<usize>,
@@ -269,6 +268,7 @@ impl Workspace {
             dev: Development::new(window, cx),
             store,
             project: None,
+            branch: None,
             index: FileIndex::default(),
             tabs: Vec::new(),
             active: None,
@@ -560,7 +560,7 @@ impl Workspace {
                             return;
                         }
                         view.stop_language(cx);
-                        view.tabs.clear(); view.active = None; view.diff = None; view.close_pending = false;
+                        view.tabs.clear(); view.active = None; view.diff = None; view.close_pending = false; view.branch = None;
                         view.terminal = None; view.bottom = None; view._watcher = None;
                         view.project = Some(loaded.project.clone()); view.index = loaded.index; view.show_recent = false;
                         view.dev.reset(loaded.tools, window, cx);
@@ -1015,18 +1015,23 @@ impl Workspace {
                     (id, document, change)
                 })
                 .collect();
-            (rescan.then(|| project.index()), changes)
+            let branch = tandem_core::git::head_branch(&project.root);
+            (rescan.then(|| project.index()), changes, branch)
         });
         let weak = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let (index, changes) = operation.await;
+                let (index, changes, branch) = operation.await;
                 let _ = weak.update_in(cx, |view, window, cx| {
                     view.reconcile_inflight = false;
                     if view.epoch != epoch {
                         return;
                     }
                     let mut changed = false;
+                    if view.branch != branch {
+                        view.branch = branch;
+                        changed = true;
+                    }
                     if let Some(index) = index {
                         changed |= view.index.files != index.files
                             || view.index.truncated != index.truncated;

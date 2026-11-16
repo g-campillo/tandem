@@ -1254,8 +1254,19 @@ pub(super) fn permission_menu(
     state: &ChatState,
     weak: &WeakEntity<Workspace>,
 ) -> AnyElement {
+    permission_menu_with(|label| compact_button(Button::new(id), label), state, weak)
+}
+
+/// The permissions picker on a button the caller styles: `button` gets the picker's
+/// label and returns the button; the tooltip, the warning colour for Bypass and the
+/// menu are added here.
+pub(super) fn permission_menu_with(
+    button: impl FnOnce(String) -> Button,
+    state: &ChatState,
+    weak: &WeakEntity<Workspace>,
+) -> AnyElement {
     let picker = view::permission_picker(state);
-    let button = compact_button(Button::new(id), picker.label.clone()).tooltip(picker.tooltip);
+    let button = button(picker.label.clone()).tooltip(picker.tooltip);
     let button = if picker.warn {
         button.warning()
     } else {

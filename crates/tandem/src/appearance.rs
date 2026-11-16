@@ -53,6 +53,19 @@ pub fn compact_button(button: Button, label: impl Into<SharedString>) -> Button 
         .child(div().text_size(px(13.)).child(label))
 }
 
+/// A clickable item of the status bar: 20 px high with 12 px text.
+pub fn status_item(button: Button, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    button
+        .ghost()
+        .xsmall()
+        .h(px(20.))
+        .px_1()
+        .rounded(px(4.))
+        .accessibility_label(label.clone())
+        .child(div().text_size(px(12.)).child(label))
+}
+
 /// Long paths stay visible and retain their complete accessible name.
 pub fn path_button(button: Button, label: impl Into<SharedString>) -> Button {
     let label = label.into();

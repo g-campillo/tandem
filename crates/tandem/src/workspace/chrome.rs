@@ -1,12 +1,16 @@
 //! The window's chrome around the panes: the title bar with its command center, the
-//! activity bar on the window's edge beside the file tree, and the breadcrumbs above the
-//! editor.
+//! activity bar on the window's edge beside the file tree, the breadcrumbs above the
+//! editor and the status bar.
 use super::breadcrumbs::{path_segments, symbol_path};
-use super::chrome_logic::{Activity, FileIcon, Shown, activity_selected, file_icon, tooltip};
+use super::chat_view::permission_menu_with;
+use super::chrome_logic::{
+    Activity, FileIcon, Shown, activity_selected, cursor_label, file_icon, language_label,
+    problems_label, tooltip,
+};
 use super::commands::shortcut;
 use super::pane_logic::ACTIVITY_BAR;
 use super::*;
-use crate::appearance::palette;
+use crate::appearance::{palette, status_item};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tooltip::Tooltip;
@@ -290,6 +294,129 @@ impl Workspace {
                 .children(row)
                 .into_any_element(),
         )
+    }
+
+    /// The status bar: the git branch, the open file's errors and warnings, the status
+    /// message, the cursor, the line count, the language, the permission mode and whether
+    /// the drafts are backed up.
+    pub(super) fn status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx.theme().mode);
+        let weak = cx.entity().downgrade();
+        let backup = if self.project.is_none() {
+            "Ready"
+        } else if self.checkpointed >= self.generation {
+            "Drafts backed up"
+        } else {
+            "Backing up drafts…"
+        };
+        let tab = self.active.and_then(|i| self.tabs.get(i));
+        // GitHub-style line count of the open file, or None when no file is open.
+        let lines = tab.map(|tab| line_count_label(&tab.document.text));
+        let branch = self.branch.as_ref().map(|name| {
+            div()
+                .id("status-branch")
+                .role(Role::Label)
+                .aria_label(format!("Git branch {name}"))
+                .h_flex()
+                .items_center()
+                .gap_1()
+                .flex_none()
+                .child(Icon::new(Lucide::GitBranch).xsmall())
+                .child(name.clone())
+        });
+        let counts = self.dev.problem_counts;
+        let problems = self.project.is_some().then(|| {
+            Button::new("status-problems")
+                .ghost()
+                .xsmall()
+                .h(px(20.))
+                .px_1()
+                .rounded(px(4.))
+                .accessibility_label(problems_label(counts))
+                .tooltip(tooltip("Problems", shortcut("Show Problems")))
+                .child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_1()
+                        .text_size(px(12.))
+                        .child(Icon::new(IconName::CircleX).xsmall())
+                        .child(counts.errors.to_string())
+                        .child(Icon::new(IconName::TriangleAlert).xsmall())
+                        .child(counts.warnings.to_string()),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.bottom = Some(BottomTab::Problems);
+                    cx.notify();
+                }))
+        });
+        let status = SharedString::from(self.status.clone());
+        let message = div()
+            .id("status")
+            .role(Role::Label)
+            .aria_label(match &lines {
+                Some(count) => format!("{}. {count}. {backup}", self.status.trim_end_matches('.')),
+                None => format!("{}. {backup}", self.status.trim_end_matches('.')),
+            })
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .when(self.error, |d| d.text_color(p.error))
+            .when(!status.is_empty(), |d| {
+                let text = status.clone();
+                d.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+            })
+            .child(status);
+        let editor_shown = self.diff.is_none() && !self.settings.open;
+        let cursor = tab.filter(|_| editor_shown).map(|tab| {
+            let position = tab.editor.read(cx).cursor_position();
+            status_item(
+                Button::new("status-cursor"),
+                cursor_label(position.line, position.character),
+            )
+            .tooltip(tooltip("Go to Line", shortcut("Go to Line…")))
+            .on_click(cx.listener(|this, _, window, cx| this.open_go_to_line(window, cx)))
+        });
+        let language = tab.map(|tab| {
+            div()
+                .flex_none()
+                .child(language_label(tab.document.language()))
+        });
+        let permissions = self.chat_state().map(|state| {
+            permission_menu_with(
+                |label| {
+                    status_item(
+                        Button::new("status-permissions").icon(Lucide::Shield),
+                        label,
+                    )
+                },
+                &state,
+                &weak,
+            )
+        });
+        div()
+            .id("status-bar")
+            .h_flex()
+            .items_center()
+            .h(px(24.))
+            .flex_shrink_0()
+            .min_w_0()
+            .px_2()
+            .gap_2()
+            .border_t_1()
+            .border_color(p.border)
+            .bg(p.content)
+            .text_size(px(12.))
+            .text_color(p.secondary_foreground)
+            .children(branch)
+            .children(problems)
+            .child(message)
+            .children(cursor)
+            .children(lines.map(|lines| div().flex_none().child(lines)))
+            .children(language)
+            .children(permissions)
+            .child(div().flex_none().child(backup))
+            .into_any_element()
     }
 }
 

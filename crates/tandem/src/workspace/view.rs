@@ -671,20 +671,6 @@ impl Render for Workspace {
             &self.panes.layout,
             shown,
         );
-        let backup = if self.project.is_none() {
-            "Ready"
-        } else if self.checkpointed >= self.generation {
-            "Drafts backed up"
-        } else {
-            "Backing up drafts…"
-        };
-
-        // GitHub-style line count of the open file, or None when no file is open.
-        let lines = self
-            .active
-            .and_then(|i| self.tabs.get(i))
-            .map(|tab| line_count_label(&tab.document.text));
-
         if self.bottom == Some(BottomTab::Terminal)
             && let Some(terminal) = &self.terminal
         {
@@ -774,36 +760,6 @@ impl Render for Workspace {
                     )
                     .children(bar_right),
             )
-            .child(
-                div()
-                    .id("status")
-                    .role(Role::Label)
-                    .aria_label(match &lines {
-                        Some(count) => {
-                            format!("{}. {count}. {backup}", self.status.trim_end_matches('.'))
-                        }
-                        None => format!("{}. {backup}", self.status.trim_end_matches('.')),
-                    })
-                    .h_flex()
-                    .flex_wrap()
-                    .min_w_0()
-                    .flex_shrink_0()
-                    .p_2()
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(p.border)
-                    .bg(p.content)
-                    .text_size(px(12.))
-                    .text_color(p.secondary_foreground)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when(self.error, |d| d.text_color(p.error))
-                            .child(self.status.clone()),
-                    )
-                    .children(lines)
-                    .child(backup),
-            )
+            .child(self.status_bar(cx))
     }
 }

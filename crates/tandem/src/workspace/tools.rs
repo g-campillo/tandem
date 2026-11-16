@@ -1,4 +1,5 @@
 use super::breadcrumbs::OutlineSymbol;
+use super::chrome_logic::{ProblemCounts, problem_counts};
 use super::*;
 
 use serde_json::{Value, json};
@@ -28,6 +29,8 @@ pub struct Development {
     pub diagnostic_key: String,
     pub diagnostic_stamp: Option<LanguageStamp>,
     pub problems: Vec<Navigation>,
+    /// The errors and warnings in the open file, for the status bar.
+    pub problem_counts: ProblemCounts,
     pub navigation: Vec<Navigation>,
     pub navigation_stamp: Option<LanguageStamp>,
     /// The symbols of the open file, for the breadcrumbs.
@@ -58,6 +61,7 @@ impl Development {
             diagnostic_key: String::new(),
             diagnostic_stamp: None,
             problems: vec![],
+            problem_counts: ProblemCounts::default(),
             navigation: vec![],
             navigation_stamp: None,
             outline: vec![],
@@ -276,6 +280,7 @@ impl Workspace {
         self.dev.python_health = "Python tools off".into();
         self.dev.health = "Language tools off".into();
         self.dev.problems.clear();
+        self.dev.problem_counts = ProblemCounts::default();
         self.dev.navigation.clear();
         self.dev.diagnostic_stamp = None;
         self.dev.navigation_stamp = None;
@@ -404,6 +409,7 @@ impl Workspace {
         self.dev.diagnostic_stamp = None;
         self.dev.navigation_stamp = None;
         self.dev.problems.clear();
+        self.dev.problem_counts = ProblemCounts::default();
         self.dev.navigation.clear();
         if let Some(manager) = &self.dev.language {
             manager.invalidate();
@@ -619,6 +625,7 @@ impl Workspace {
                 "textDocument/diagnostic"=>{
                     let items=tandem_lsp::diagnostic_items(reply.value)?;
                     view.dev.problems=items.iter().take(200).map(|d|Navigation{path:relative.clone(),line:d.range.start.line as usize+1,label:format!("{}:{}  {}",relative,d.range.start.line+1,d.message)}).collect();
+                    view.dev.problem_counts=problem_counts(items.iter().map(|d|d.severity));
                     view.dev.diagnostic_stamp=Some(reply.stamp);
                     if let Some(tab)=view.tabs.iter().find(|t|t.document.path==relative){tab.editor.update(cx,|editor,cx|{if let Some(set)=editor.diagnostics_mut(){set.clear();set.extend(items.into_iter().map(gpui_kit::component::highlighter::Diagnostic::from));}cx.notify();});}
                 },
