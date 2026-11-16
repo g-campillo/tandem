@@ -1,6 +1,7 @@
 mod chat;
 mod chat_logic;
 mod chat_view;
+pub mod commands;
 mod panels;
 mod provider;
 mod settings;
@@ -201,6 +202,7 @@ pub struct Workspace {
     dev: Development,
     chat: ChatUi,
     settings: SettingsUi,
+    commands: commands::CommandsUi,
 }
 
 impl Workspace {
@@ -239,6 +241,7 @@ impl Workspace {
         let mut view = Self {
             chat: ChatUi::new(window, cx),
             settings: SettingsUi::default(),
+            commands: commands::CommandsUi::default(),
             dev: Development::new(window, cx),
             store,
             project: None,
