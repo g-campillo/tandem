@@ -147,6 +147,11 @@ pub enum Event {
     SessionClosed {
         reason: String,
     },
+    /// Claude Code refused the turn's permission mode; the helper runs the turn in Ask.
+    PermissionModeFallback {
+        wanted: PermissionMode,
+        reason: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -356,6 +361,25 @@ mod tests {
                 let line: Value = serde_json::from_slice(&encode(&frame).unwrap()).unwrap();
                 assert_eq!(line["permission_mode"], wire, "{line}");
             }
+        }
+    }
+
+    #[test]
+    fn the_permission_mode_fallback_event_decodes() {
+        for (wire, wanted) in [
+            ("auto", PermissionMode::Auto),
+            ("bypass", PermissionMode::Bypass),
+        ] {
+            let line = format!(
+                r#"{{"v":1,"type":"event","event":"permission_mode_fallback","wanted":"{wire}","reason":"x"}}"#
+            );
+            assert_eq!(
+                decode(line.as_bytes()).unwrap(),
+                Incoming::Event(Event::PermissionModeFallback {
+                    wanted,
+                    reason: "x".into(),
+                })
+            );
         }
     }
 }

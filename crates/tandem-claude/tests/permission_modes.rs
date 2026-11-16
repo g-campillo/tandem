@@ -5,14 +5,113 @@ mod support;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use support::{
-    Harness, event, expect, hello, open_ok, preamble, reply_ok, turn_finished, turn_ok,
-    turn_ok_with,
+    Harness, event, expect, hello, open_ok, permission_request, preamble, reply_ok, turn_finished,
+    turn_ok, turn_ok_with,
 };
-use tandem_claude::{ChatState, Command};
-use tandem_core::chat::{ItemKind, PermissionMode};
+use tandem_claude::{ChatState, Command, TakeoverRequest};
+use tandem_core::chat::{ChatTask, ItemKind, PermissionMode, Phase, Plan, PlanStep, StepKind};
 
 const BYPASS_WHILE_WORKING: &str =
     "Wait for Claude to finish, or press Stop, before switching to or from Bypass.";
+const AUTO_REFUSED: &str =
+    "Cannot set permission mode to auto: auto mode unavailable for this model";
+const BYPASS_REFUSED: &str = "Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration";
+const POLICIES: [&str; 4] = ["discuss", "guided", "check", "takeover"];
+
+fn step(kind: StepKind, target: &str, summary: &str) -> PlanStep {
+    PlanStep {
+        kind,
+        target: target.into(),
+        summary: summary.into(),
+        language: "rust".into(),
+    }
+}
+
+/// Edit `src/cli.rs`, run `cargo add serde`, create `tests/cli.rs`; all Rust.
+fn plan() -> Plan {
+    Plan {
+        goal: "Print results as JSON when --json is set".into(),
+        done_when: vec![
+            "`--json` prints valid JSON".into(),
+            "The old output is unchanged".into(),
+        ],
+        steps: vec![
+            step(
+                StepKind::EditFile,
+                "src/cli.rs",
+                "Add a `json` flag to Args",
+            ),
+            step(StepKind::RunCommand, "cargo add serde", "Add serde"),
+            step(StepKind::CreateFile, "tests/cli.rs", "Test the flag"),
+        ],
+    }
+}
+
+/// Stores a task with the three-step plan in `phase` at step index `current_step`.
+fn store_task(harness: &Harness, phase: Phase, current_step: usize) -> ChatTask {
+    let key = harness.key();
+    harness.with_store(|store| {
+        let mut task = store.create_chat_task(&key).unwrap();
+        task.title = "Print results as JSON".into();
+        task.phase = phase;
+        task.current_step = current_step;
+        task.plan = Some(plan());
+        store.save_chat_task(&task).unwrap();
+        task
+    })
+}
+
+/// Before `start`: discuss runs on the fresh task Tandem creates, the other policies on a
+/// stored task in Build at step 0.
+fn prepare_for(harness: &Harness, policy: &str) {
+    if policy != "discuss" {
+        store_task(harness, Phase::Build, 0);
+    }
+}
+
+/// Starts a turn in `policy` the way the user does.
+fn start_turn_in(harness: &Harness, policy: &str) {
+    harness.send(match policy {
+        "discuss" | "guided" => Command::Send("hi".into()),
+        "check" => Command::CheckMyWork,
+        "takeover" => Command::Takeover {
+            request: TakeoverRequest::Step,
+            saved: Vec::new(),
+        },
+        _ => panic!("no such policy: {policy}"),
+    });
+}
+
+/// A permission request for Claude's `Edit` tool on `path`.
+fn edit_request(id: &str, path: &str) -> Value {
+    json!({"send": {"type": "request", "id": id, "request": "permission", "tool": "Edit",
+        "title": "Claude wants to use Edit", "detail": "", "command": null, "path": path}})
+}
+
+/// Expects a `turn` in `wanted`, accepts it, and reports that Claude Code refused that mode
+/// before the turn started.
+fn refused_turn(wanted: &str, reason: &str) -> Vec<Value> {
+    vec![
+        expect(json!({"type": "turn", "permission_mode": wanted})),
+        reply_ok(json!({})),
+        event(json!({"event": "permission_mode_fallback", "wanted": wanted, "reason": reason})),
+        event(json!({"event": "turn_started", "turn": "$id"})),
+    ]
+}
+
+fn has_permission_item(state: &ChatState) -> bool {
+    state
+        .items
+        .iter()
+        .any(|item| matches!(item.kind, ItemKind::Permission { .. }))
+}
+
+fn has_notice(state: &ChatState, text: &str) -> bool {
+    state
+        .items
+        .iter()
+        .any(|item| item.kind == ItemKind::Notice { text: text.into() })
+}
 
 fn assistant(text: &str) -> Value {
     event(json!({"event": "assistant_text", "text": text}))
@@ -227,5 +326,167 @@ fn bypass_is_not_switched_while_claude_works() {
 
     harness.send(Command::Stop);
     harness.wait_for("the stopped turn", |state| state.turn.is_none());
+    harness.finish();
+}
+
+#[test]
+fn bypass_never_shows_a_card_in_any_policy() {
+    for policy in POLICIES {
+        let mut harness = Harness::new();
+        save_mode(&harness, PermissionMode::Bypass);
+        prepare_for(&harness, policy);
+        let inside = harness.project.join("src/main.rs");
+        harness.start(
+            &[
+                hello(),
+                open_ok(json!({"permission_mode": "bypass"})),
+                turn_ok_with(json!({"policy": policy, "permission_mode": "bypass"})),
+                vec![
+                    permission_request("r1", "npm install left-pad"),
+                    expect(json!({"type": "response", "id": "r1", "allow": true})),
+                    edit_request("r2", inside.to_str().unwrap()),
+                    expect(json!({"type": "response", "id": "r2", "allow": true})),
+                    assistant("done"),
+                    turn_finished(3, "completed"),
+                ],
+            ]
+            .concat(),
+        );
+        harness.wait_ready();
+        start_turn_in(&harness, policy);
+
+        let state = finished_with(&harness, "done");
+        assert!(!has_permission_item(&state), "{policy}: {:#?}", state.items);
+        assert_eq!(state.pending_permission, None, "{policy}");
+        harness.finish();
+    }
+}
+
+#[test]
+fn ask_and_auto_still_show_the_card() {
+    for (mode, wire) in [(PermissionMode::Ask, "ask"), (PermissionMode::Auto, "auto")] {
+        let mut harness = Harness::new();
+        save_mode(&harness, mode);
+        harness.start(
+            &[
+                hello(),
+                open_ok(json!({"permission_mode": wire})),
+                turn_ok_with(json!({"policy": "discuss", "permission_mode": wire})),
+                vec![
+                    permission_request("r1", "npm install left-pad"),
+                    expect(json!({"type": "response", "id": "r1", "allow": false})),
+                    assistant("done"),
+                    turn_finished(3, "completed"),
+                ],
+            ]
+            .concat(),
+        );
+        harness.wait_ready();
+        harness.send(Command::Send("hi".into()));
+
+        let state = harness.wait_for("the card", |state| state.pending_permission.is_some());
+        let card = state.items.last().unwrap();
+        assert_eq!(state.pending_permission, Some(card.id), "{wire}");
+        assert!(
+            matches!(card.kind, ItemKind::Permission { allowed: None, .. }),
+            "{wire}: {card:#?}"
+        );
+        harness.send(Command::Permission { allow: false });
+        let state = finished_with(&harness, "done");
+        assert_eq!(state.pending_permission, None, "{wire}");
+        harness.finish();
+    }
+}
+
+#[test]
+fn a_refused_mode_falls_back_to_ask_and_says_so() {
+    let mut harness = Harness::new();
+    save_mode(&harness, PermissionMode::Auto);
+    harness.start(
+        &[
+            hello(),
+            open_ok(json!({"permission_mode": "auto"})),
+            refused_turn("auto", AUTO_REFUSED),
+            vec![
+                permission_request("r1", "npm install left-pad"),
+                expect(json!({"type": "response", "id": "r1", "allow": true})),
+                assistant("first"),
+                turn_finished(3, "completed"),
+            ],
+            turn_ok_with(json!({"permission_mode": "ask"})),
+            vec![assistant("second"), turn_finished(4, "completed")],
+        ]
+        .concat(),
+    );
+    harness.wait_ready();
+    harness.send(Command::Send("hi".into()));
+
+    // The turn runs in Ask, so the card is shown.
+    harness.wait_for("the card", |state| state.pending_permission.is_some());
+    harness.send(Command::Permission { allow: true });
+    let state = finished_with(&harness, "first");
+    assert!(
+        has_notice(
+            &state,
+            &format!(
+                "Auto is not available, so Tandem is using Ask. Claude Code said: {AUTO_REFUSED}"
+            )
+        ),
+        "{:#?}",
+        state.items
+    );
+    assert_eq!(state.prefs.permission_mode, PermissionMode::Ask);
+    assert_eq!(saved_mode(&harness), PermissionMode::Ask);
+
+    // The next turn asks for Ask, in the same session.
+    harness.send(Command::Send("again".into()));
+    finished_with(&harness, "second");
+    assert_eq!(harness.sent_of("turn")[1]["permission_mode"], "ask");
+    assert_eq!(harness.sent_of("open_session").len(), 1);
+    harness.finish();
+}
+
+#[test]
+fn a_refused_bypass_shows_cards_again() {
+    let mut harness = Harness::new();
+    save_mode(&harness, PermissionMode::Bypass);
+    harness.start(
+        &[
+            hello(),
+            open_ok(json!({"permission_mode": "bypass"})),
+            refused_turn("bypass", BYPASS_REFUSED),
+            vec![
+                permission_request("r1", "npm install left-pad"),
+                expect(json!({"type": "response", "id": "r1", "allow": false})),
+                assistant("done"),
+                turn_finished(3, "completed"),
+            ],
+        ]
+        .concat(),
+    );
+    harness.wait_ready();
+    harness.send(Command::Send("hi".into()));
+
+    let state = harness.wait_for("the card", |state| state.pending_permission.is_some());
+    let card = state.items.last().unwrap();
+    assert!(
+        matches!(card.kind, ItemKind::Permission { allowed: None, .. }),
+        "{card:#?}"
+    );
+    harness.send(Command::Permission { allow: false });
+    let state = finished_with(&harness, "done");
+    assert!(
+        has_notice(
+            &state,
+            &format!(
+                "Bypass is not available, so Tandem is using Ask. Claude Code said: {BYPASS_REFUSED}"
+            )
+        ),
+        "{:#?}",
+        state.items
+    );
+    assert_eq!(state.prefs.permission_mode, PermissionMode::Ask);
+    assert_eq!(saved_mode(&harness), PermissionMode::Ask);
+    assert_eq!(harness.sent_of("open_session").len(), 1);
     harness.finish();
 }

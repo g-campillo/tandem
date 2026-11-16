@@ -192,6 +192,7 @@ fn run(
                 recap: false,
                 permission: None,
                 waiting_permissions: VecDeque::new(),
+                turn_mode: PermissionMode::Ask,
                 closing: false,
                 progress: TurnProgress::default(),
             };
@@ -320,6 +321,8 @@ pub(crate) struct Controller {
     recap: bool,
     permission: Option<PendingPermission>,
     waiting_permissions: VecDeque<PermissionAsk>,
+    /// The permission mode the running turn was started with; Ask after a fallback.
+    turn_mode: PermissionMode,
     /// Set by Shutdown: new helper requests are refused instead of reaching the UI.
     pub(crate) closing: bool,
     /// What the running turn achieved so far.
@@ -750,6 +753,9 @@ impl Controller {
     fn event(&mut self, event: Event) {
         match event {
             Event::TurnStarted { .. } | Event::Unknown => {}
+            Event::PermissionModeFallback { wanted, reason } => {
+                self.permission_mode_fallback(wanted, &reason);
+            }
             Event::TextDelta { text } => self.update(|state| {
                 state
                     .streaming
@@ -915,6 +921,11 @@ impl Controller {
     // ----- Permissions -----
 
     fn permission_requested(&mut self, ask: PermissionAsk) {
+        if self.turn_mode == PermissionMode::Bypass {
+            // Bypass shows no card. The helper already allows these itself; this is the last
+            // gate before the UI.
+            return self.respond(&ask.request, ResponseBody::Permission { allow: true });
+        }
         if self.permission.is_some() {
             self.waiting_permissions.push_back(ask);
         } else {
@@ -1075,6 +1086,7 @@ impl Controller {
     /// Starts a turn; `false` when the helper refused it (the banner says why).
     pub(crate) fn start_turn(&mut self, kind: TurnKind, text: String, policy: Policy) -> bool {
         let prefs = self.snapshot().prefs.clone();
+        self.turn_mode = prefs.permission_mode;
         let turn = Turn {
             text,
             policy,
@@ -1241,6 +1253,24 @@ impl Controller {
         if reopens {
             self.reopen_session();
         }
+    }
+
+    /// Claude Code refused `wanted`: the turn runs in Ask, and so do the next ones until the
+    /// user chooses again.
+    fn permission_mode_fallback(&mut self, wanted: PermissionMode, reason: &str) {
+        self.turn_mode = PermissionMode::Ask;
+        let mut prefs = self.snapshot().prefs.clone();
+        if prefs.permission_mode == wanted {
+            prefs.permission_mode = PermissionMode::Ask;
+            self.save_prefs(&prefs);
+            self.update(|state| state.prefs = prefs);
+        }
+        self.append_item(ItemKind::Notice {
+            text: format!(
+                "{} is not available, so Tandem is using Ask. Claude Code said: {reason}",
+                wanted.label()
+            ),
+        });
     }
 
     /// Interrupts a running turn (waiting up to 2 s for it to finish), then closes the
