@@ -34,14 +34,14 @@ Claude
 │ [Build the rest for me]                       │
 └───────────────────────────────────────────────┘
 [ Message Claude…                              ]
-  Model ▾   Effort ▾                       Send
+  Model ▾  Effort ▾  Permissions: Ask ▾     Send
 ```
 
 Each project has its own list of tasks. The task button in the chat header lists them as `<title> · <phase>` and offers `New task` (also in the **Chat** menu). A task is titled after your first message, and after the plan's goal once there is a plan. `New task` does nothing while the current task is still empty, and you cannot switch tasks while Claude is working.
 
 ### Discuss
 
-Describe what you want in the composer (Enter sends, Shift+Enter adds a line). Claude researches before it answers: it reads the project's code, searches the web when facts may have changed, and asks clarifying questions in the chat. What it does shows in the transcript as short activity lines such as `↳ read src/cli.rs`, `↳ searched "clap bool flag"` or ``↳ ran `cargo test` ``. Claude does not change files in this phase.
+Describe what you want in the composer (Enter sends, Shift+Enter adds a line). Claude researches before it answers: it reads the project's code, searches the web when facts may have changed, and asks clarifying questions in the chat. What it does shows in the transcript as short activity lines such as `↳ read src/cli.rs`, `↳ searched "clap bool flag"` or ``↳ ran `cargo test` ``. Claude does not change files in this phase, unless Permissions is set to Bypass and you ask it to.
 
 A message that starts with `/` goes to Claude Code exactly as typed, so Claude Code's slash commands and your skills keep working.
 
@@ -72,7 +72,7 @@ The card's buttons:
 - **Do it for me** and **Build the rest for me** hand the work to Claude (see takeover below).
 - **Guide me through this step** appears when the card has no guidance (for example after a Stop) and asks Claude again.
 
-You can keep chatting during the build. Claude answers your questions about the active step but does not edit files.
+You can keep chatting during the build. Claude answers your questions about the active step but does not edit files; in Bypass it may, when you ask for a change.
 
 After the last step, Claude checks the whole task against the "done when" criteria, again without being asked. A pass shows `The task meets its "done when" criteria` and the task is done. Otherwise the card says `Not done yet` with what is missing, and a card `All steps are finished` offers **Check again** and **Fix it for me**.
 
@@ -107,7 +107,7 @@ Snapshots live in the Tandem state folder under `takeover/<id>/` and are removed
 
 ### Done
 
-A finished task shows `Task complete.` and all three phases as finished. You can still chat with Claude about it; Claude no longer edits files in it. Start a new task for the next feature.
+A finished task shows `Task complete.` and all three phases as finished. You can still chat with Claude about it; Claude no longer edits files in it, except in Bypass when you ask for a change. Start a new task for the next feature.
 
 ## Help levels
 
@@ -125,24 +125,68 @@ A step's language comes from its file's extension (`.rs` Rust, `.go` Go, `.ts`/`
 
 ## What Claude may do
 
+Two things decide what Claude may do in a turn: the turn's **policy** and the **Permissions** mode you chose.
+
 Tandem runs every Claude turn under one of four policies. Discussing and planning use **discuss**; questions and guidance during the build use **guided**; **Check my work** and the final check use **check**; a takeover uses **takeover**.
+
+### Permissions
+
+The **Permissions** button next to Model and Effort, and the same control in Settings (⌘,) → **Claude**, chooses how often Claude asks before it acts:
+
+- **Ask** (the default). Tandem asks you, with an Allow/Deny card, before a command it does not allow by itself.
+- **Auto.** Claude Code's auto mode: its safety check lets routine actions run and asks only about risky ones, with the same card. Tandem's own rules add no cards.
+- **Bypass.** No card ever appears: every command runs, and Claude may edit files inside the project in any turn, not only during a takeover. The button is shown in the warning colour while Bypass is on.
+
+The choice is saved for all projects and applies from the next message. Switching between Ask and Auto restarts nothing. Switching to or from Bypass reopens the task's Claude session (the conversation is kept), because Claude Code accepts its `bypassPermissions` mode only in a session started for it; this is not offered while Claude is working. If Claude Code refuses a mode, because auto mode is not available for your plan or the selected model or because your settings switch a mode off, Tandem switches back to Ask and says so in the chat.
+
+In the tables, **Runs** means without a card, **Asks you** means an Allow/Deny card, and **Refused** means Claude is told no.
+
+**Ask**
 
 | | discuss, guided | check | takeover |
 | --- | --- | --- | --- |
-| Read code, search the project and the web | Yes | Yes | Yes |
-| Read-only shell commands | Yes | Yes | Yes |
-| Build, test and lint commands | Asks you | Yes | Yes |
-| Edit files | No | No | Inside the project only |
+| Read code, search the project and the web | Runs | Runs | Runs |
+| Read-only shell commands | Runs | Runs | Runs |
+| Build, test and lint commands | Asks you | Runs | Runs |
 | Other shell commands | Asks you | Asks you | Claude Code's rules decide |
+| Edit files inside the project | Refused | Refused | Runs |
+| Edit files outside the project | Refused | Refused | Refused |
 | Other tools (for example your MCP servers) | Claude Code's rules decide | Claude Code's rules decide | Claude Code's rules decide |
 
-- **Reading and research are always allowed.** Read-only shell commands are commands such as `ls`, `cat`, `head`, `grep`, `rg`, `find` (without actions such as `-delete` or `-exec`), `git status`, `git diff`, `git log`, `git show`, and `cd` into a subfolder, also chained with `&&` or piped into `head`, `tail`, `grep`, `rg`, `wc`, `sort` or `uniq`. Tandem's rule does not check the paths these commands read, so they can also read files outside the project.
-- **Build, test and lint commands** run without asking during Check my work and a takeover. They include `cargo build`, `cargo check`, `cargo test`, `cargo clippy` and `cargo fmt --check`; `go build`, `go test` and `go vet`; `npm test` and `npm run test|lint|build|typecheck|check`; `tsc --noEmit`; `pytest` and `python -m pytest|unittest`; `ruff check`; `mypy`; `mvn test`; `gradle test`; and `make test|check|lint|build`. A command that would rewrite files (`--fix`, `--write`, `-w`, `cargo fmt` without `--check`) or uses redirection (other than `2>&1`), `;`, `$(…)` or backticks is never treated as read-only or as a build command. The exact rules are in `crates/tandem-claude/helper/src/policy.mjs`.
-- **Edits happen only during a takeover, and only inside the project folder.** Outside a takeover, Claude Code's `Edit`, `Write` and `NotebookEdit` tools are refused with a message that tells Claude to explain the change instead. During a takeover, a path that resolves outside the project (also through a symlink) is refused. Edits inside the project are accepted without a card, and the changes card lets you undo them.
-- **Other shell commands ask you** with an Allow/Deny card in the chat that shows what Claude wants to do and the exact command. Stop also denies a pending card. There is no "always allow" button.
-- **Claude Code's own rules decide the rest:** shell commands during a takeover that are neither read-only nor build commands, and tools Tandem has no rule for, such as those of your MCP servers. These rules include the allow and deny rules in your Claude Code settings when **Use my Claude Code setup** is on. Whatever they would ask you about shows the same Allow/Deny card.
+**Auto**
 
-Tandem never uses Claude Code's `bypassPermissions` mode. Claude Code's `AskUserQuestion`, plan mode and worktree tools are switched off, because Tandem's chat and plan card replace them.
+| | discuss, guided | check | takeover |
+| --- | --- | --- | --- |
+| Read code, search the project and the web | Runs | Runs | Runs |
+| Read-only shell commands | Runs | Runs | Runs |
+| Build, test and lint commands | Runs | Runs | Runs |
+| Other shell commands | Auto mode decides | Auto mode decides | Auto mode decides |
+| Edit files inside the project | Refused | Refused | Runs |
+| Edit files outside the project | Refused | Refused | Refused |
+| Other tools (for example your MCP servers) | Auto mode decides | Auto mode decides | Auto mode decides |
+
+**Bypass**
+
+| | discuss, guided, check, takeover |
+| --- | --- |
+| Read code, search the project and the web | Runs |
+| Read-only shell commands | Runs |
+| Build, test and lint commands | Runs |
+| Other shell commands | Runs |
+| Edit files inside the project | Runs |
+| Edit files outside the project | Refused |
+| Other tools (for example your MCP servers) | Runs |
+
+- **Reading and research are always allowed.** Read-only shell commands are commands such as `ls`, `cat`, `head`, `grep`, `rg`, `find` (without actions such as `-delete` or `-exec`), `git status`, `git diff`, `git log`, `git show`, and `cd` into a subfolder, also chained with `&&` or piped into `head`, `tail`, `grep`, `rg`, `wc`, `sort` or `uniq`. Tandem's rule does not check the paths these commands read, so they can also read files outside the project.
+- **Build, test and lint commands** run without asking during Check my work and a takeover, and in every turn in Auto and Bypass. They include `cargo build`, `cargo check`, `cargo test`, `cargo clippy` and `cargo fmt --check`; `go build`, `go test` and `go vet`; `npm test` and `npm run test|lint|build|typecheck|check`; `tsc --noEmit`; `pytest` and `python -m pytest|unittest`; `ruff check`; `mypy`; `mvn test`; `gradle test`; and `make test|check|lint|build`. A command that would rewrite files (`--fix`, `--write`, `-w`, `cargo fmt` without `--check`) or uses redirection (other than `2>&1`), `;`, `$(…)` or backticks is never treated as read-only or as a build command. The exact rules are in `crates/tandem-claude/helper/src/policy.mjs`.
+- **In Ask and Auto, edits happen only during a takeover.** Outside a takeover, Claude Code's `Edit`, `Write` and `NotebookEdit` tools are refused with a message that tells Claude to explain the change instead. Edits inside the project during a takeover are accepted without a card, and the changes card lets you undo them.
+- **In Bypass, Claude may edit project files in any turn.** Tandem tells Claude to do so only when you ask for a change in the chat; guidance and checks still explain instead of writing your code. The editor stays editable: an open file without unsaved changes reloads when Claude changes it, and a buffer with unsaved changes is kept and marked `Disk changed`.
+- **Edits outside the project folder are refused in every mode**, also when the path gets there through a symlink. This rule covers Claude Code's edit tools; a shell command is not checked this way.
+- **Other shell commands ask you in Ask** with an Allow/Deny card that shows what Claude wants to do and the exact command. Stop also denies a pending card. There is no "always allow" button. In Auto, Claude Code's auto mode decides, and what it asks about shows the same card. In Bypass they run.
+- **Claude Code's own rules decide the rest in Ask:** shell commands during a takeover that are neither read-only nor build commands, and tools Tandem has no rule for, such as those of your MCP servers. These rules include the allow and deny rules in your Claude Code settings when **Use my Claude Code setup** is on. Whatever they would ask you about shows the same Allow/Deny card. In Auto, auto mode decides these. In Bypass they run, and Tandem also allows what Claude Code would still ask about in its own bypass mode, such as an ask rule in your settings or its check for a dangerous `rm`. Deny rules in your Claude Code settings apply in every mode.
+- **Keep and Undo cover takeovers only.** Tandem takes a snapshot only before a takeover. A command that Claude runs in any other turn, after you allow it in Ask or without a card in Auto and Bypass, can change or delete files, and in Bypass so can an edit outside a takeover. None of these has a snapshot, so Tandem cannot undo them; use version control for that.
+
+Claude Code's `AskUserQuestion`, plan mode and worktree tools are switched off in every mode, because Tandem's chat and plan card replace them. Tandem uses Claude Code's `bypassPermissions` mode only while Permissions is set to Bypass.
 
 ## Subscription and privacy
 
@@ -165,11 +209,11 @@ Turn it off for projects you do not trust. A project's `.claude` folder and `.mc
 
 ## Model and effort
 
-The composer has a **Model** button and, when the selected model supports effort levels, an **Effort** button. The model list is the one Claude Code reports for your account when the session opens. `Default` means Claude Code's default model, and `Effort: Default` means no effort override. Choices are saved for all projects and apply from the next message; nothing restarts. Choosing a model that does not support the saved effort clears the effort. If a saved model is no longer offered, Tandem switches back to Default and says so.
+The composer has a **Model** button and, when the selected model supports effort levels, an **Effort** button. The model list is the one Claude Code reports for your account when the session opens. `Default` means Claude Code's default model, and `Effort: Default` means no effort override. Choices are saved for all projects and apply from the next message; nothing restarts. Choosing a model that does not support the saved effort clears the effort. If a saved model is no longer offered, Tandem switches back to Default and says so. The **Permissions** button beside them is described under [What Claude may do](#what-claude-may-do).
 
 ## Sessions and resume
 
-Each task has its own Claude Code session. Only the active task's session is open; switching tasks closes it and resumes the selected one. Restarting Tandem, **Reconnect**, and switching **Use my Claude Code setup** resume the session too, so Claude remembers the conversation.
+Each task has its own Claude Code session. Only the active task's session is open; switching tasks closes it and resumes the selected one. Restarting Tandem, **Reconnect**, switching **Use my Claude Code setup**, and switching Permissions to or from Bypass resume the session too, so Claude remembers the conversation.
 
 If Claude Code can no longer find the session, Tandem starts a new one and opens your next message with a short recap: the goal, the plan's steps marked done or active, and the last six messages. Tandem's own transcript is not affected.
 
@@ -191,7 +235,7 @@ crates/tandem-claude/helper   Node helper (plain JavaScript ES modules, no build
 Claude Code 2.1.325 (bundled with the SDK) → your Claude subscription
 ```
 
-**The helper** (`crates/tandem-claude/helper`) wraps the Claude Agent SDK. It keeps one long-lived SDK session per task in streaming-input mode, so the same session serves discuss, guided, check and takeover turns. A `PreToolUse` hook applies the policy table above on every tool call (an edit is refused outside a takeover even though tools are fixed when the session starts), and the SDK's `canUseTool` callback forwards everything that needs approval to Tandem as a permission request. Tandem's own tools are an in-process MCP server named `tandem`:
+**The helper** (`crates/tandem-claude/helper`) wraps the Claude Agent SDK. It keeps one long-lived SDK session per task in streaming-input mode, so the same session serves discuss, guided, check and takeover turns. A `PreToolUse` hook applies the tables above on every tool call, for the turn's policy and permission mode. Claude Code obeys a hook's refusal in every permission mode, so an edit outside the project is refused in Bypass too. Before each turn the helper sets Claude Code's permission mode: `default` (`acceptEdits` for a takeover) in Ask, `auto` in Auto and `bypassPermissions` in Bypass; a session is started with `allowDangerouslySkipPermissions` only when it is opened in Bypass. The SDK's `canUseTool` callback forwards what still needs approval to Tandem as a permission request, and in Bypass allows it instead. Tandem's own tools are an in-process MCP server named `tandem`:
 
 | Tool | What it does |
 | --- | --- |
@@ -207,8 +251,8 @@ Each tool call is forwarded to Rust and answered there, so validation lives in o
 
 | Direction | Frames |
 | --- | --- |
-| Tandem → helper | `hello`, `open_session` (folder, session id or the id to resume, setup switch, model, effort, system prompt addition), `turn` (text, policy, model, effort), `interrupt`, `close_session`, `shutdown`, and `response` (the answer to a tool or permission request) |
-| helper → Tandem | `reply` to each command (`ok` with data, or an error code: `bad_request`, `no_session`, `busy`, `auth_refused`, `resume_failed`, `spawn_failed`, `internal`); `event`: `turn_started`, `text_delta`, `assistant_text`, `activity`, `notice`, `auth_refused`, `permission_cancelled`, `turn_finished` (`completed`, `interrupted` or `error`), `session_closed`; `request`: a `tool` call or a `permission` question |
+| Tandem → helper | `hello`, `open_session` (folder, session id or the id to resume, setup switch, model, effort, permission mode, system prompt addition), `turn` (text, policy, model, effort, permission mode), `interrupt`, `close_session`, `shutdown`, and `response` (the answer to a tool or permission request) |
+| helper → Tandem | `reply` to each command (`ok` with data, or an error code: `bad_request`, `no_session`, `busy`, `auth_refused`, `resume_failed`, `spawn_failed`, `internal`); `event`: `turn_started`, `text_delta`, `assistant_text`, `activity`, `notice`, `permission_mode_fallback`, `auth_refused`, `permission_cancelled`, `turn_finished` (`completed`, `interrupted` or `error`), `session_closed`; `request`: a `tool` call or a `permission` question |
 
 The reference conversation in `crates/tandem-claude/helper/test/fixtures/contract.jsonl` is replayed against the helper by the Node tests and decoded by the Rust tests, so both ends agree.
 
@@ -233,6 +277,9 @@ The reference conversation in `crates/tandem-claude/helper/test/fixtures/contrac
 - The editor is read-only and saving is paused while Claude edits files.
 - Read-only shell commands are allowed without a card even when they read outside the project.
 - Permission cards have no "always allow"; Claude Code's sandbox option is not used.
+- Keep and Undo cover takeovers only. Commands that Claude runs in other turns, and in Bypass its edits outside a takeover, have no snapshot and cannot be undone in Tandem.
+- The project-folder rule covers Claude Code's edit tools. Shell commands are not checked this way and can write outside the project.
+- Switching Permissions to or from Bypass reopens the Claude session and waits until Claude is idle.
 - Commands that Claude runs see saved files only; unsaved buffers reach Claude only through `read_editor_buffer`.
 - The text you have typed but not sent is not saved.
 - Tasks from the earlier Codex-based design are not shown.
