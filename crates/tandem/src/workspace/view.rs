@@ -642,7 +642,13 @@ impl Render for Workspace {
         if self.bottom == Some(BottomTab::Terminal)
             && let Some(terminal) = &self.terminal
         {
-            let columns = (geometry.terminal_available_width() / 7.3).max(40.0) as u16;
+            let hidden_sidebar = if self.commands.explorer_visible {
+                0.0
+            } else {
+                geometry.sidebar
+            };
+            let columns =
+                ((geometry.terminal_available_width() + hidden_sidebar) / 7.3).max(40.0) as u16;
             terminal.update(cx, |terminal, _| terminal.resize_columns(columns));
         }
         div()
@@ -696,7 +702,9 @@ impl Render for Workspace {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .child(self.sidebar_view(geometry.sidebar, cx))
+                    .when(self.commands.explorer_visible, |d| {
+                        d.child(self.sidebar_view(geometry.sidebar, cx))
+                    })
                     .child(self.content_view(cx))
                     .when(self.chat.visible, |d| {
                         d.child(

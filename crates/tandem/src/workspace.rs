@@ -561,10 +561,12 @@ impl Workspace {
             self.select_tab(index, window, cx);
             return;
         }
+        let word_wrap = self.commands.word_wrap;
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(document.language())
                 .default_value(document.text.clone())
+                .soft_wrap(word_wrap)
         });
         let changes = cx.subscribe(&editor, |view, entity, event: &InputEditsEvent, cx| {
             if let Some((_, text)) = event.edits().last()
@@ -1076,6 +1078,7 @@ impl Workspace {
     }
 
     fn set_sidebar(&mut self, sidebar: Sidebar, window: &mut Window, cx: &mut Context<Self>) {
+        self.commands.explorer_visible = true;
         self.sidebar = sidebar;
         self.query.update(cx, |query, cx| {
             query.set_value("", window, cx);

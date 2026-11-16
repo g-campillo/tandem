@@ -76,7 +76,7 @@ fn main() -> Result<()> {
                 KeyBinding::new("cmd--", ZoomOut, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-shift-l", ToggleChat, None),
+                KeyBinding::new("cmd-alt-b", ToggleChat, None),
                 KeyBinding::new("cmd-l", FocusChat, None),
                 KeyBinding::new("cmd-shift-m", ShowProblems, None),
                 KeyBinding::new("alt-shift-f", FormatFile, None),

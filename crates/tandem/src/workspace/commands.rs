@@ -1,5 +1,6 @@
 //! Editor and workbench commands in the style of VS Code: their actions, shortcuts, menu entries and handlers.
 mod editing;
+mod layout;
 mod palette;
 
 use super::*;
@@ -28,7 +29,14 @@ actions!(
         CopyLineUp,
         CopyLineDown,
         MoveLineUp,
-        MoveLineDown
+        MoveLineDown,
+        ToggleExplorer,
+        ShowExplorer,
+        ToggleBottomPanel,
+        ToggleWordWrap,
+        ToggleFullScreen,
+        Unfold,
+        UnfoldAll
     ]
 );
 
@@ -99,10 +107,27 @@ pub struct CommandSpec {
     bind: fn(&'static str, Option<&'static str>) -> KeyBinding,
 }
 
-#[derive(Default)]
 pub struct CommandsUi {
     /// The palette's state, created the first time the palette opens.
     palette: Option<Entity<CommandState>>,
+    /// Whether the file explorer is shown (⌘B).
+    pub(super) explorer_visible: bool,
+    /// Whether code editors wrap long lines (⌥Z).
+    pub(super) word_wrap: bool,
+    /// The bottom panel's tab when ⌘J last hid it, so ⌘J reopens that tab.
+    last_bottom: BottomTab,
+}
+
+impl Default for CommandsUi {
+    fn default() -> Self {
+        Self {
+            palette: None,
+            explorer_visible: true,
+            // The toolkit's default.
+            word_wrap: true,
+            last_bottom: BottomTab::Terminal,
+        }
+    }
 }
 
 fn spec<A: Action + Default>(
@@ -260,7 +285,7 @@ fn selection() -> Vec<CommandSpec> {
 }
 
 fn view() -> Vec<CommandSpec> {
-    use KeyScope::Global;
+    use KeyScope::{Editor, Global};
     use MenuId::View;
     vec![
         spec::<ShowCommandPalette>(
@@ -278,7 +303,7 @@ fn view() -> Vec<CommandSpec> {
             &["cmd-k cmd-s"],
             Global,
         ),
-        spec::<ToggleChat>("Toggle Chat", View, "⇧⌘L", &[], Global).existing(),
+        spec::<ToggleChat>("Toggle Chat", View, "⌥⌘B", &[], Global).existing(),
         spec::<QuickOpen>("Quick Open", View, "⌘P", &[], Global).existing(),
         spec::<ProjectSearch>("Search Project", View, "⇧⌘F", &[], Global).existing(),
         spec::<Changes>("Compare with Disk", View, "⇧⌘D", &[], Global).existing(),
@@ -286,6 +311,13 @@ fn view() -> Vec<CommandSpec> {
         spec::<ShowProblems>("Show Problems", View, "⇧⌘M", &[], Global).existing(),
         spec::<ZoomIn>("Increase Text Size", View, "⌘=", &[], Global).existing(),
         spec::<ZoomOut>("Decrease Text Size", View, "⌘-", &[], Global).existing(),
+        spec::<ToggleExplorer>("Toggle File Explorer", View, "⌘B", &["cmd-b"], Global).separated(),
+        spec::<ShowExplorer>("Show Explorer", View, "⇧⌘E", &["cmd-shift-e"], Global),
+        spec::<ToggleBottomPanel>("Toggle Panel", View, "⌘J", &["cmd-j"], Global),
+        spec::<ToggleWordWrap>("Toggle Word Wrap", View, "⌥Z", &["alt-z"], Editor),
+        spec::<ToggleFullScreen>("Toggle Full Screen", View, "⌃⌘F", &["ctrl-cmd-f"], Global),
+        spec::<Unfold>("Unfold", View, "⌥⌘]", &["cmd-alt-]"], Editor).separated(),
+        spec::<UnfoldAll>("Unfold All", View, "⌘K ⌘J", &["cmd-k cmd-j"], Editor),
     ]
 }
 
@@ -428,6 +460,13 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace
     route::<SortLinesDescending>(cx, window, &view, |v, w, c| v.sort_lines(true, w, c));
     route::<TransformToUppercase>(cx, window, &view, |v, w, c| v.transform_case(true, w, c));
     route::<TransformToLowercase>(cx, window, &view, |v, w, c| v.transform_case(false, w, c));
+    route::<ToggleExplorer>(cx, window, &view, |v, w, c| v.toggle_explorer(w, c));
+    route::<ShowExplorer>(cx, window, &view, |v, w, c| v.show_explorer(w, c));
+    route::<ToggleBottomPanel>(cx, window, &view, |v, _, c| v.toggle_bottom_panel(c));
+    route::<ToggleWordWrap>(cx, window, &view, |v, w, c| v.toggle_word_wrap(w, c));
+    route::<ToggleFullScreen>(cx, window, &view, |_, w, _| w.toggle_fullscreen());
+    route::<Unfold>(cx, window, &view, |v, w, c| v.unfold(w, c));
+    route::<UnfoldAll>(cx, window, &view, |v, w, c| v.unfold_all(w, c));
 }
 
 /// The pattern of `install_actions`: dispatch runs while GPUI has borrowed the window, so
@@ -475,7 +514,7 @@ mod tests {
         "cmd--",
         "ctrl-`",
         "cmd-q",
-        "cmd-shift-l",
+        "cmd-alt-b",
         "cmd-l",
         "cmd-shift-m",
         "alt-shift-f",
@@ -698,6 +737,22 @@ mod tests {
             assert!(
                 edit.iter().any(|name| name == title),
                 "{title} is not in Edit"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_commands_are_in_view() {
+        let menus = extend_menus(Vec::new());
+        let view = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "View")
+            .unwrap();
+        let names = action_names(&view.items);
+        for title in ["Toggle File Explorer", "Toggle Panel", "Unfold All"] {
+            assert!(
+                names.iter().any(|name| name == title),
+                "{title} is not in View"
             );
         }
     }
