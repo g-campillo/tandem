@@ -159,74 +159,59 @@ pub fn plan_actions_visible(state: &ChatState, item_id: i64) -> bool {
 }
 
 /// Model text ready for the Markdown renderer, with every image turned into text so that
-/// nothing remote is ever loaded: `![alt](url)` becomes `alt (url)`, and any other `![`
-/// (reference images) loses its image meaning. Code blocks and code spans are unchanged.
+/// nothing remote is ever loaded. `![alt](url)` becomes `alt (url)`, any other `![` becomes
+/// `!\[`, and the `<` of an `<img` or `<image` tag becomes `&lt;`. This applies everywhere,
+/// code included: no `![` and no HTML image tag is left for the renderer to find.
 pub fn display_markdown(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
-    let mut fence: Option<&str> = None;
-    for line in text.split_inclusive('\n') {
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        let rest = &line[indent..];
-        let marker = ["```", "~~~"]
-            .into_iter()
-            .find(|marker| indent <= 3 && rest.starts_with(marker));
-        match (fence, marker) {
-            (None, Some(marker)) => {
-                fence = Some(marker);
-                shown.push_str(line);
-            }
-            (Some(open), Some(marker)) if open == marker => {
-                fence = None;
-                shown.push_str(line);
-            }
-            (Some(_), _) => shown.push_str(line),
-            (None, None) => rewrite_images(line, &mut shown),
-        }
-    }
-    shown
+    rewrite_inline_images(text, &mut shown);
+    // The rewrite can join a "!" to a "[" that follows it, so escaping comes after it.
+    disarm_image_tags(&shown.replace("![", "!\\["))
 }
 
-fn rewrite_images(line: &str, shown: &mut String) {
-    let mut rest = line;
-    while let Some(position) = rest.find(['`', '!']) {
+fn rewrite_inline_images(text: &str, shown: &mut String) {
+    let mut rest = text;
+    while let Some(position) = rest.find("![") {
         shown.push_str(&rest[..position]);
         rest = &rest[position..];
-        if rest.starts_with('`') {
-            // A code span runs to the next run of the same number of backticks.
-            let ticks = rest.len() - rest.trim_start_matches('`').len();
-            let fence = &rest[..ticks];
-            let end = rest[ticks..]
-                .match_indices(fence)
-                .find(|(index, _)| !rest[ticks + index + ticks..].starts_with('`'))
-                .map(|(index, _)| ticks + index + ticks);
-            let taken = end.unwrap_or(ticks);
-            shown.push_str(&rest[..taken]);
-            rest = &rest[taken..];
-        } else if rest.starts_with("![") {
-            match inline_image(&rest[2..]) {
-                Some((alt, url, used)) => {
-                    if alt.is_empty() {
-                        shown.push_str(url);
-                    } else {
-                        // The alt text may hold another image.
-                        rewrite_images(alt, shown);
-                        shown.push_str(" (");
-                        shown.push_str(url);
-                        shown.push(')');
-                    }
-                    rest = &rest[2 + used..];
+        match inline_image(&rest[2..]) {
+            Some((alt, url, used)) => {
+                if alt.is_empty() {
+                    shown.push_str(url);
+                } else {
+                    // The alt text may hold another image.
+                    rewrite_inline_images(alt, shown);
+                    shown.push_str(" (");
+                    shown.push_str(url);
+                    shown.push(')');
                 }
-                None => {
-                    shown.push_str("\\![");
-                    rest = &rest[2..];
-                }
+                rest = &rest[2 + used..];
             }
-        } else {
-            shown.push('!');
-            rest = &rest[1..];
+            None => {
+                shown.push('!');
+                rest = &rest[1..];
+            }
         }
     }
     shown.push_str(rest);
+}
+
+/// Turns the `<` of every `<img` and `<image` (any case) into `&lt;`, so the renderer shows
+/// the tag as text. HTML parsers treat `<image` as `<img`.
+fn disarm_image_tags(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(position) = rest.find('<') {
+        shown.push_str(&rest[..position]);
+        rest = &rest[position + 1..];
+        let names_an_image = ["img", "image"].into_iter().any(|name| {
+            rest.get(..name.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(name))
+        });
+        shown.push_str(if names_an_image { "&lt;" } else { "<" });
+    }
+    shown.push_str(rest);
+    shown
 }
 
 /// Parses `alt](url)` (the part after `![`), allowing balanced brackets in the alt text.
@@ -494,16 +479,53 @@ mod tests {
             display_markdown("[![![a](b)](c)](http://d)"),
             "[a (b) (c)](http://d)"
         );
-        // A reference image becomes the literal "!" and a link.
+        // A reference image loses its image meaning: "!" and an escaped "[".
         assert_eq!(
             display_markdown("![logo][1]\n\n[1]: http://a/b.png"),
-            "\\![logo][1]\n\n[1]: http://a/b.png"
+            "!\\[logo][1]\n\n[1]: http://a/b.png"
         );
-        // Code is shown as written.
-        let code = "Use `![x](y)` here.\n```md\n![x](http://a/b.png)\n```\n";
-        assert_eq!(display_markdown(code), code);
-        // Links and ordinary text are untouched.
-        let plain = "Wow! [docs](http://a) and `a!` [x]";
+        // Images inside code are rewritten too.
+        assert_eq!(
+            display_markdown("Use `![x](y)` here.\n```md\n![x](http://a/b.png)\n```\n"),
+            "Use `x (y)` here.\n```md\nx (http://a/b.png)\n```\n"
+        );
+        // An HTML image tag is shown as text.
+        assert_eq!(
+            display_markdown("<img src=\"http://a/b.png\"> and <IMAGE src=x>"),
+            "&lt;img src=\"http://a/b.png\"> and &lt;IMAGE src=x>"
+        );
+        // Links, other HTML and ordinary text are untouched.
+        let plain = "Wow! [docs](http://a) and `a!` [x] <b>Vec<String></b> <http://a>";
         assert_eq!(display_markdown(plain), plain);
+    }
+
+    #[test]
+    fn display_markdown_leaves_no_image_syntax_anywhere() {
+        let hostile = [
+            // An escaped backtick opens no code span.
+            "\\`![x](http://evil.test/p.png)\\`",
+            // A line with an info string does not close a fence.
+            "```js\ncode\n```js\n```\n![x](http://evil.test/p.png)\n",
+            // A backtick fence info string cannot hold a backtick, so this is no fence.
+            "```a`b\n![x](http://evil.test/p.png)\n",
+            "```a`b\n![x][1]\n\n[1]: http://evil.test/p.png\n",
+            // A backslash before the rewrite must not escape the rewrite's own escape.
+            "\\![x][1]\n\n[1]: http://evil.test/p.png",
+            // Rewriting must not join a "!" or "<" to what follows into a new image.
+            "!![]([x](http://evil.test/p.png))",
+            "!![[x]](y)\n\n[x]: http://evil.test/p.png",
+            "<![](img) src=\"http://evil.test/p.png\">",
+            "<div>\n<img src=\"http://evil.test/p.png\">\n</div>\n",
+        ];
+        for text in hostile {
+            let shown = display_markdown(text);
+            let lowercase = shown.to_ascii_lowercase();
+            assert!(
+                !shown.contains("![")
+                    && !lowercase.contains("<img")
+                    && !lowercase.contains("<image"),
+                "{text:?} became {shown:?}"
+            );
+        }
     }
 }
