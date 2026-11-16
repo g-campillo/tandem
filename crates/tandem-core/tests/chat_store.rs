@@ -397,7 +397,7 @@ fn schema_five_migration_backs_up_and_keeps_old_rows() {
         connection
             .execute(
                 "INSERT INTO task VALUES('old-task','/p',3,1700000000000,?1)",
-                ["{\"title\":\"Codex-era task \u{e9}\"}"],
+                ["{\"title\":\"Old-workflow task \u{e9}\"}"],
             )
             .unwrap();
         connection
@@ -460,4 +460,48 @@ fn a_new_store_is_created_at_schema_six_without_a_backup() {
             .to_string_lossy()
             .contains("backup")
     }));
+}
+
+#[test]
+fn a_new_store_has_only_the_tables_still_in_use() {
+    let directory = tempfile::tempdir().unwrap();
+    drop(Store::open(directory.path()).unwrap());
+    let connection = Connection::open(directory.path().join("workspace.sqlite")).unwrap();
+    let tables = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for old in [
+        "task",
+        "task_session",
+        "model_run",
+        "check_run",
+        "agent_run",
+        "import_group",
+        "conversation_event",
+    ] {
+        assert!(
+            !tables.iter().any(|table| table == old),
+            "{old} is in {tables:?}"
+        );
+    }
+    for kept in [
+        "workspace",
+        "draft",
+        "settings",
+        "project_tools",
+        "chat_task",
+        "chat_selection",
+        "chat_item",
+        "chat_guidance",
+        "chat_change_set",
+    ] {
+        assert!(
+            tables.iter().any(|table| table == kept),
+            "{kept} is missing from {tables:?}"
+        );
+    }
 }

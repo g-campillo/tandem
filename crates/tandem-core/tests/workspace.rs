@@ -469,3 +469,70 @@ fn nested_new_paths_refuse_escaping_links_and_non_directory_parents() {
         assert!(!outside.path().join("nested").exists());
     }
 }
+
+#[test]
+fn schema_one_migration_preserves_drafts_and_makes_a_backup() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("workspace.sqlite");
+    let project_dir = tempfile::tempdir().unwrap();
+    let project = Project::open(project_dir.path()).unwrap();
+    let mut draft = project.open_document("draft.rs", true).unwrap();
+    draft.snapshot("unsaved before migration 🦀".into());
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE workspace(root TEXT PRIMARY KEY,data TEXT NOT NULL,opened INTEGER NOT NULL);CREATE TABLE draft(root TEXT NOT NULL,path TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(root,path));CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);PRAGMA user_version=1;").unwrap();
+        connection
+            .execute(
+                "INSERT INTO settings VALUES('checkpoint_sequence','37')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO draft(root,path,data) VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    project.key(),
+                    draft.path,
+                    serde_json::to_string(&draft).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.sequence().unwrap(), 37);
+    assert_eq!(store.drafts(project.key()).unwrap()[0].text, draft.text);
+    assert!(std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("workspace-schema1-backup-")
+    }));
+}
+
+#[test]
+fn captured_working_version_keeps_closed_drafts_and_prefers_live_buffers() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let project = Project::open(&root).unwrap();
+    let mut closed = project.open_document("closed.rs", true).unwrap();
+    closed.snapshot("retained draft".into());
+    let mut live = project.open_document("live.rs", true).unwrap();
+    live.snapshot("checkpoint".into());
+    let mut store = Store::open(&temp.path().join("state")).unwrap();
+    store
+        .checkpoint(&WorkspaceState::new(&project), &[closed, live.clone()])
+        .unwrap();
+    live.snapshot("latest live version".into());
+    let docs = store.working_documents(project.key(), &[live]).unwrap();
+    assert_eq!(docs.len(), 2);
+    assert_eq!(
+        docs.iter().find(|d| d.path == "closed.rs").unwrap().text,
+        "retained draft"
+    );
+    assert_eq!(
+        docs.iter().find(|d| d.path == "live.rs").unwrap().text,
+        "latest live version"
+    );
+}

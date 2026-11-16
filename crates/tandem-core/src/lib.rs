@@ -1,34 +1,11 @@
 //! Local workspace IO and immutable recovery snapshots. No model or shell access.
 mod storage;
 pub use storage::*;
-// Not glob-exported: its names overlap the older workflow types.
 pub mod chat;
 mod chat_store;
 pub mod takeover;
-mod task;
 mod tools;
-pub use task::*;
 pub use tools::*;
-mod companion;
-mod guidance;
-mod models;
-pub use companion::*;
-pub use guidance::*;
-pub use models::*;
-mod delegation;
-mod import;
-mod improvement;
-pub use delegation::*;
-pub use import::*;
-pub use improvement::*;
-mod conversation;
-mod research;
-mod walkthrough;
-mod workflow;
-pub use conversation::*;
-pub use research::*;
-pub use walkthrough::*;
-pub use workflow::*;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -41,6 +18,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_INDEX_FILES: usize = 20_000;
 pub const MAX_SEARCH_RESULTS: usize = 200;
+
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
 
 pub fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -543,6 +530,29 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
         "File grew beyond the editing limit while reading"
     );
     Ok(bytes)
+}
+
+pub fn validate_import_path(project: &Project, path: &str) -> Result<()> {
+    normalized_relative(std::path::Path::new(path))?;
+    let mut current = project.root.clone();
+    for part in std::path::Path::new(path).components() {
+        current.push(part);
+        if let Ok(meta) = current.symlink_metadata() {
+            ensure!(
+                !meta.file_type().is_symlink(),
+                "Import paths cannot contain symlinks"
+            );
+            #[cfg(unix)]
+            if meta.is_file() {
+                use std::os::unix::fs::MetadataExt;
+                ensure!(
+                    meta.nlink() == 1,
+                    "Import paths cannot contain hard-linked files"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_new_name(name: &str) -> Result<()> {

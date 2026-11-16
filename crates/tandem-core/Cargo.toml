@@ -18,5 +18,3 @@ libc.workspace = true
 uuid = { version = "1", features = ["v4", "serde"] }
 toml = "0.8"
 semver = "1"
-schemars = "1.2.3"
-unicode-normalization = "0.1"
