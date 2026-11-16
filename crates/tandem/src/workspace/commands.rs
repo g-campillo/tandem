@@ -1,6 +1,7 @@
 //! Editor and workbench commands in the style of VS Code: their actions, shortcuts, menu entries and handlers.
 mod editing;
 mod layout;
+mod navigation;
 mod palette;
 mod selection;
 
@@ -44,7 +45,22 @@ actions!(
         AddCursorsToLineEnds,
         AddNextOccurrence,
         SelectAllOccurrences,
-        GoToBracket
+        GoToBracket,
+        FindNext,
+        FindPrevious,
+        NextTab,
+        PreviousTab,
+        NextProblem,
+        PreviousProblem,
+        SelectTab1,
+        SelectTab2,
+        SelectTab3,
+        SelectTab4,
+        SelectTab5,
+        SelectTab6,
+        SelectTab7,
+        SelectTab8,
+        SelectTab9
     ]
 );
 
@@ -111,6 +127,8 @@ pub struct CommandSpec {
     pub in_menu: bool,
     /// Whether `extend_menus` puts a separator before it.
     pub separated: bool,
+    /// The submenu `extend_menus` puts it in; consecutive commands with the same name share one.
+    pub submenu: Option<&'static str>,
     action: fn() -> Box<dyn Action>,
     bind: fn(&'static str, Option<&'static str>) -> KeyBinding,
 }
@@ -159,6 +177,7 @@ fn spec<A: Action + Default>(
         scope,
         in_menu: true,
         separated: false,
+        submenu: None,
         action: || Box::new(A::default()),
         bind: |keys, context| KeyBinding::new(keys, A::default(), context),
     }
@@ -173,6 +192,11 @@ impl CommandSpec {
 
     fn separated(mut self) -> Self {
         self.separated = true;
+        self
+    }
+
+    fn submenu(mut self, name: &'static str) -> Self {
+        self.submenu = Some(name);
         self
     }
 
@@ -233,6 +257,8 @@ fn edit() -> Vec<CommandSpec> {
         spec::<Paste>("Paste", Edit, "⌘V", &[], Editor).existing(),
         spec::<FindInFile>("Find in File", Edit, "⌘F", &[], Global).existing(),
         spec::<ReplaceInFile>("Replace in File", Edit, "⌥⌘F", &[], Global).existing(),
+        spec::<FindNext>("Find Next", Edit, "⌘G", &["cmd-g"], Global),
+        spec::<FindPrevious>("Find Previous", Edit, "⇧⌘G", &["cmd-shift-g"], Global),
         spec::<Indent>("Indent Line", Edit, "⌘]", &[], Editor).separated(),
         spec::<Outdent>("Outdent Line", Edit, "⌘[", &[], Editor),
         spec::<ToggleLineComment>("Toggle Line Comment", Edit, "⌘/", &["cmd-/"], Editor)
@@ -366,12 +392,39 @@ fn view() -> Vec<CommandSpec> {
 }
 
 fn go() -> Vec<CommandSpec> {
-    use KeyScope::Editor;
+    use KeyScope::{Editor, Global};
     use MenuId::Go;
     use gpui_kit::component::input::GoToDefinition;
+    const SWITCH_TAB: &str = "Switch Tab";
     vec![
         spec::<GoToDefinition>("Go to Definition", Go, "F12", &["f12"], Editor),
         spec::<GoToBracket>("Go to Bracket", Go, "⇧⌘\\", &["cmd-|"], Editor),
+        spec::<NextProblem>("Next Problem", Go, "F8", &["f8"], Global).separated(),
+        spec::<PreviousProblem>("Previous Problem", Go, "⇧F8", &["shift-f8"], Global),
+        spec::<NextTab>(
+            "Next Tab",
+            Go,
+            "⌃Tab",
+            &["ctrl-tab", "cmd-alt-right", "cmd-}"],
+            Global,
+        )
+        .separated(),
+        spec::<PreviousTab>(
+            "Previous Tab",
+            Go,
+            "⌃⇧Tab",
+            &["ctrl-shift-tab", "cmd-alt-left", "cmd-{"],
+            Global,
+        ),
+        spec::<SelectTab1>("Go to Tab 1", Go, "⌘1", &["cmd-1"], Global).submenu(SWITCH_TAB),
+        spec::<SelectTab2>("Go to Tab 2", Go, "⌘2", &["cmd-2"], Global).submenu(SWITCH_TAB),
+        spec::<SelectTab3>("Go to Tab 3", Go, "⌘3", &["cmd-3"], Global).submenu(SWITCH_TAB),
+        spec::<SelectTab4>("Go to Tab 4", Go, "⌘4", &["cmd-4"], Global).submenu(SWITCH_TAB),
+        spec::<SelectTab5>("Go to Tab 5", Go, "⌘5", &["cmd-5"], Global).submenu(SWITCH_TAB),
+        spec::<SelectTab6>("Go to Tab 6", Go, "⌘6", &["cmd-6"], Global).submenu(SWITCH_TAB),
+        spec::<SelectTab7>("Go to Tab 7", Go, "⌘7", &["cmd-7"], Global).submenu(SWITCH_TAB),
+        spec::<SelectTab8>("Go to Tab 8", Go, "⌘8", &["cmd-8"], Global).submenu(SWITCH_TAB),
+        spec::<SelectTab9>("Go to Tab 9", Go, "⌘9", &["cmd-9"], Global).submenu(SWITCH_TAB),
     ]
 }
 
@@ -434,17 +487,35 @@ pub fn extend_menus(mut menus: Vec<Menu>) -> Vec<Menu> {
         MenuId::App,
     ] {
         let mut items = Vec::new();
+        // The submenu of the previous command, which the next command joins when it names
+        // the same one.
+        let mut open_submenu = None;
         for spec in specs.iter().filter(|spec| spec.in_menu && spec.menu == id) {
-            if spec.separated {
-                items.push(MenuItem::separator());
-            }
-            items.push(MenuItem::Action {
+            let item = MenuItem::Action {
                 name: spec.title.into(),
                 action: spec.action(),
                 os_action: None,
                 checked: false,
                 disabled: false,
+            };
+            if spec.submenu.is_some()
+                && spec.submenu == open_submenu
+                && let Some(MenuItem::Submenu(submenu)) = items.last_mut()
+            {
+                if spec.separated {
+                    submenu.items.push(MenuItem::separator());
+                }
+                submenu.items.push(item);
+                continue;
+            }
+            if spec.separated {
+                items.push(MenuItem::separator());
+            }
+            items.push(match spec.submenu {
+                Some(name) => MenuItem::submenu(Menu::new(name).items([item])),
+                None => item,
             });
+            open_submenu = spec.submenu;
         }
         if items.is_empty() {
             continue;
@@ -519,6 +590,21 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace
     route::<AddNextOccurrence>(cx, window, &view, |v, w, c| v.add_next_occurrence(w, c));
     route::<SelectAllOccurrences>(cx, window, &view, |v, w, c| v.select_all_occurrences(w, c));
     route::<GoToBracket>(cx, window, &view, |v, w, c| v.go_to_bracket(w, c));
+    route::<FindNext>(cx, window, &view, |v, _, c| v.find_match(true, c));
+    route::<FindPrevious>(cx, window, &view, |v, _, c| v.find_match(false, c));
+    route::<NextTab>(cx, window, &view, |v, w, c| v.cycle_tab(true, w, c));
+    route::<PreviousTab>(cx, window, &view, |v, w, c| v.cycle_tab(false, w, c));
+    route::<SelectTab1>(cx, window, &view, |v, w, c| v.select_tab_number(1, w, c));
+    route::<SelectTab2>(cx, window, &view, |v, w, c| v.select_tab_number(2, w, c));
+    route::<SelectTab3>(cx, window, &view, |v, w, c| v.select_tab_number(3, w, c));
+    route::<SelectTab4>(cx, window, &view, |v, w, c| v.select_tab_number(4, w, c));
+    route::<SelectTab5>(cx, window, &view, |v, w, c| v.select_tab_number(5, w, c));
+    route::<SelectTab6>(cx, window, &view, |v, w, c| v.select_tab_number(6, w, c));
+    route::<SelectTab7>(cx, window, &view, |v, w, c| v.select_tab_number(7, w, c));
+    route::<SelectTab8>(cx, window, &view, |v, w, c| v.select_tab_number(8, w, c));
+    route::<SelectTab9>(cx, window, &view, |v, w, c| v.select_tab_number(9, w, c));
+    route::<NextProblem>(cx, window, &view, |v, w, c| v.go_to_problem(true, w, c));
+    route::<PreviousProblem>(cx, window, &view, |v, w, c| v.go_to_problem(false, w, c));
 }
 
 /// The pattern of `install_actions`: dispatch runs while GPUI has borrowed the window, so
@@ -835,6 +921,63 @@ mod tests {
                 .any(|name| name == "Select All Occurrences"),
             "Select All Occurrences is not in Selection"
         );
+    }
+
+    #[test]
+    fn go_menu_has_tab_commands_and_a_switch_tab_submenu() {
+        let menus = extend_menus(Vec::new());
+        let go = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Go")
+            .unwrap();
+        let submenus: Vec<&Menu> = go
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Submenu(menu) => Some(menu),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(submenus.len(), 1);
+        assert_eq!(submenus[0].name.as_ref(), "Switch Tab");
+        let expected: Vec<String> = (1..=9).map(|n| format!("Go to Tab {n}")).collect();
+        assert_eq!(action_names(&submenus[0].items), expected);
+        let next_tab = go
+            .items
+            .iter()
+            .position(
+                |item| matches!(item, MenuItem::Action { name, .. } if name.as_ref() == "Next Tab"),
+            )
+            .expect("Next Tab is not in Go");
+        let switch_tab = go
+            .items
+            .iter()
+            .position(|item| matches!(item, MenuItem::Submenu(_)))
+            .unwrap();
+        assert!(next_tab < switch_tab);
+        let names = action_names(&go.items);
+        for title in ["Next Problem", "Previous Problem", "Previous Tab"] {
+            assert!(
+                names.iter().any(|name| name == title),
+                "{title} is not in Go"
+            );
+        }
+    }
+
+    #[test]
+    fn find_next_and_previous_follow_replace_in_edit() {
+        let menus = extend_menus(vec![
+            Menu::new("Edit").items([MenuItem::action("Replace in File", super::ReplaceInFile)]),
+        ]);
+        let edit = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Edit")
+            .unwrap();
+        assert_eq!(
+            action_names(&edit.items)[..3],
+            ["Replace in File", "Find Next", "Find Previous"]
+        );
+        assert!(matches!(edit.items[1], MenuItem::Action { .. }));
     }
 
     #[test]
