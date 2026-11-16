@@ -134,6 +134,21 @@ impl Workspace {
                     cx.notify();
                 })),
             )
+            .when(self.takeover_running(), |d| {
+                d.child(
+                    div()
+                        .id("mode")
+                        .role(Role::Label)
+                        .aria_label(
+                            "Claude is editing files. The editor is read-only; Command-period stops Claude.",
+                        )
+                        .self_center()
+                        .text_size(px(12.))
+                        .text_color(p.warning)
+                        .px_2()
+                        .child("Claude is editing files · ⌘. stops"),
+                )
+            })
             .into_any_element()
     }
 
@@ -370,6 +385,8 @@ impl Workspace {
         let conflict = active.is_some_and(|t| t.document.conflict);
         let recovered = active.is_some_and(|t| t.document.recovered);
         let read_only = active.is_some_and(|t| t.document.read_only);
+        // Claude edits the files on disk during a takeover, so no buffer may change meanwhile.
+        let takeover_running = self.takeover_running();
         let notice = if conflict {
             "Disk changed · Your draft is preserved. Use Changes to compare or Save Copy (⇧⌘S)."
         } else if read_only {
@@ -521,7 +538,7 @@ impl Workspace {
                         d.when_some(editor, |d, editor| {
                             d.child(
                                 Editor::new(&editor)
-                                    .readonly(self.loading)
+                                    .readonly(self.loading || takeover_running)
                                     .aria_label(format!("Editor: {path}"))
                                     .h(relative(1.0))
                                     .size_full()

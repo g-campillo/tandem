@@ -1,11 +1,23 @@
 //! The chat panel's state in the workspace and its link to the companion controller.
-use super::chat_logic::anchor_line;
+use super::chat_logic::{SavePlan, TabFacts, anchor_line, takeover_save_plan};
 use super::*;
 use gpui_kit::component::input::TextareaState;
 use tandem_claude::view::{self, ComposerMode};
 use tandem_claude::{
     BufferText, ChatState, Companion, CompanionConfig, HostAnswer, HostAsk, HostQuestion, Signal,
+    TakeoverRequest,
 };
+use tandem_core::chat::{ChangeSet, Decision, Mode, Phase};
+
+/// What waits for the open buffers to be saved before Claude edits the files on disk.
+pub(super) enum PendingAfterSave {
+    Takeover {
+        request: TakeoverRequest,
+        saved: Vec<String>,
+    },
+    /// A message to Claude while it builds the remaining steps.
+    Send { text: String, saved: Vec<String> },
+}
 
 pub(super) struct ChatUi {
     pub visible: bool,
@@ -16,6 +28,10 @@ pub(super) struct ChatUi {
     pub seen_items: usize,
     /// Whether a turn ran at the last state change, so its end can be noticed.
     pub was_running: bool,
+    /// The decided files of each change set at the last state change, so a Keep or Undo
+    /// (which can restore or remove files) reloads the editor and the file tree.
+    pub decided: Vec<(String, usize)>,
+    pub pending: Option<PendingAfterSave>,
     _composer_events: Subscription,
 }
 
@@ -45,9 +61,25 @@ impl ChatUi {
             scroll: ScrollHandle::default(),
             seen_items: 0,
             was_running: false,
+            decided: Vec::new(),
+            pending: None,
             _composer_events: events,
         }
     }
+}
+
+/// The number of decided (kept or undone) files of each change set.
+fn decided_files(sets: &[ChangeSet]) -> Vec<(String, usize)> {
+    sets.iter()
+        .map(|set| {
+            let decided = set
+                .files
+                .iter()
+                .filter(|file| file.decision != Decision::Undecided)
+                .count();
+            (set.id.clone(), decided)
+        })
+        .collect()
 }
 
 impl Workspace {
@@ -57,6 +89,12 @@ impl Workspace {
 
     pub(super) fn chat_turn_running(&self) -> bool {
         self.chat_state().is_some_and(|state| state.turn.is_some())
+    }
+
+    /// Whether Claude is editing the project's files, so the editor must not write them.
+    pub(super) fn takeover_running(&self) -> bool {
+        self.chat_state()
+            .is_some_and(|state| view::takeover_running(&state))
     }
 
     pub(super) fn chat_command(&self, command: Command) {
@@ -72,6 +110,8 @@ impl Workspace {
         self.chat.companion = None;
         self.chat.seen_items = 0;
         self.chat.was_running = false;
+        self.chat.decided.clear();
+        self.chat.pending = None;
         let Some(project) = &self.project else {
             return;
         };
@@ -116,11 +156,14 @@ impl Workspace {
                 }
                 self.chat.seen_items = state.items.len();
                 let running = state.turn.is_some();
-                if self.chat.was_running && !running {
-                    // Claude may have changed files: reload open buffers and rescan the tree.
+                let decided = decided_files(&state.change_sets);
+                if (self.chat.was_running && !running) || decided != self.chat.decided {
+                    // Claude, or a Keep or Undo, may have changed files: reload open buffers
+                    // and rescan the tree.
                     self.disk_events.store(true, Ordering::Relaxed);
                 }
                 self.chat.was_running = running;
+                self.chat.decided = decided;
                 cx.notify();
             }
             Signal::Host(ask) => self.answer_host(ask, cx),
@@ -158,10 +201,222 @@ impl Workspace {
         if view::composer_mode(&state, text.trim().is_empty()) != ComposerMode::Send {
             return;
         }
-        self.chat_command(Command::Send(text));
+        let building_the_rest = state
+            .task
+            .as_ref()
+            .is_some_and(|task| task.phase == Phase::Build && task.mode == Mode::Takeover);
+        if building_the_rest {
+            // The answer lets Claude go on editing files on disk, and the controller refuses
+            // while buffers are unsaved: save them first.
+            if self.chat.pending.is_some() {
+                return;
+            }
+            let Some(saved) = self.save_for_takeover(window, cx) else {
+                // Blocked: the message stays in the composer.
+                return;
+            };
+            if saved.is_empty() {
+                self.chat_command(Command::Send(text));
+            } else {
+                self.chat.pending = Some(PendingAfterSave::Send { text, saved });
+            }
+        } else {
+            self.chat_command(Command::Send(text));
+        }
         self.chat
             .composer
             .update(cx, |composer, cx| composer.set_value("", window, cx));
+        cx.notify();
+    }
+
+    /// "Do it for me", "Build the rest for me", "Fix it for me" and the plan card's "You
+    /// do it": saves the open buffers, because Claude edits the files on disk, then asks
+    /// the controller to take over (at the next tick when a save had to run first).
+    pub(super) fn begin_takeover(
+        &mut self,
+        request: TakeoverRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chat.pending.is_some() {
+            return;
+        }
+        let Some(saved) = self.save_for_takeover(window, cx) else {
+            return;
+        };
+        if saved.is_empty() {
+            self.chat_command(Command::Takeover { request, saved });
+        } else {
+            self.chat.pending = Some(PendingAfterSave::Takeover { request, saved });
+        }
+        cx.notify();
+    }
+
+    /// Carries out the takeover save plan for the open tabs: closes the new empty ones and
+    /// starts saving the other unsaved ones. Returns the paths being saved, or `None` (with
+    /// the reason in the status bar) when Claude cannot start.
+    fn save_for_takeover(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<String>> {
+        self.snapshot_live(cx);
+        let tabs: Vec<TabFacts> = self
+            .tabs
+            .iter()
+            .map(|tab| TabFacts {
+                path: tab.document.path.clone(),
+                dirty: tab.document.dirty(),
+                never_saved: tab.document.base_hash.is_none(),
+                empty: tab.document.text.is_empty(),
+                conflict: tab.document.conflict,
+                read_only: tab.document.read_only,
+                saving: tab.saving,
+            })
+            .collect();
+        match takeover_save_plan(&tabs) {
+            SavePlan::Ready => Some(Vec::new()),
+            SavePlan::Blocked(message) => {
+                self.message(message, true, cx);
+                None
+            }
+            SavePlan::Save { save, close } => {
+                if let Err(error) = self.close_empty_new_tabs(&close, window, cx) {
+                    self.message(
+                        format!(
+                            "Could not forget the drafts of the empty new files, so Claude did not start: {error:#}"
+                        ),
+                        true,
+                        cx,
+                    );
+                    return None;
+                }
+                for path in &save {
+                    if let Some(index) = self.tabs.iter().position(|tab| tab.document.path == *path)
+                    {
+                        self.save_index(index, cx);
+                    }
+                }
+                if !save.is_empty() {
+                    self.message(
+                        format!(
+                            "Saving {} file(s) before Claude takes over: {}",
+                            save.len(),
+                            save.join(", ")
+                        ),
+                        false,
+                        cx,
+                    );
+                }
+                Some(save)
+            }
+        }
+    }
+
+    /// Closes the never-saved, empty tabs in `paths` and forgets their drafts. Saving them
+    /// would create empty files, and a kept draft would reopen empty over the file Claude
+    /// may create at that path.
+    fn close_empty_new_tabs(
+        &mut self,
+        paths: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let active = self
+            .active
+            .and_then(|index| self.tabs.get(index))
+            .map(|tab| tab.document.path.clone());
+        let old_active = self.active.unwrap_or(0);
+        let mut closed = Vec::new();
+        self.tabs.retain(|tab| {
+            let close = paths.contains(&tab.document.path);
+            if close {
+                closed.push(tab.document.clone());
+            }
+            !close
+        });
+        self.active = active
+            .and_then(|path| self.tabs.iter().position(|tab| tab.document.path == path))
+            .or_else(|| {
+                (!self.tabs.is_empty()).then(|| old_active.min(self.tabs.len().saturating_sub(1)))
+            });
+        self.invalidate_language(cx);
+        self.close_pending = false;
+        self.diff = None;
+        if self.active.is_some() {
+            self.go_to_line(None, window, cx);
+        } else {
+            self.query.update(cx, |query, cx| query.focus(window, cx));
+        }
+        self.changed(cx);
+        // A checkpoint removes the draft of every document it is given that is not dirty,
+        // so the closed buffers are passed as clean copies.
+        let forgotten = closed.into_iter().map(|mut document| {
+            document.base_hash = Some(content_hash(document.text.as_bytes()));
+            document.base_text = document.text.clone();
+            document
+        });
+        let documents: Vec<Document> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.document.clone())
+            .chain(forgotten)
+            .collect();
+        if let Some(state) = self.state() {
+            self.store
+                .lock()
+                .map_err(|_| anyhow!("Recovery store unavailable"))?
+                .checkpoint(&state, &documents)?;
+            self.checkpointed = self.generation;
+        }
+        Ok(())
+    }
+
+    /// Runs from the workspace's 500 ms loop: once the saves started for a takeover have
+    /// finished, starts the takeover or sends the parked message, or reports that a file
+    /// could not be saved.
+    pub(super) fn chat_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat.pending.is_none() || self.tabs.iter().any(|tab| tab.saving) {
+            return;
+        }
+        let Some(pending) = self.chat.pending.take() else {
+            return;
+        };
+        self.snapshot_live(cx);
+        let saved = match &pending {
+            PendingAfterSave::Takeover { saved, .. } | PendingAfterSave::Send { saved, .. } => {
+                saved
+            }
+        };
+        let unsaved = self
+            .tabs
+            .iter()
+            .any(|tab| tab.document.dirty() && saved.contains(&tab.document.path));
+        if unsaved {
+            if let PendingAfterSave::Send { text, .. } = pending
+                && self.chat.composer.read(cx).value().is_empty()
+            {
+                // Give the unsent message back.
+                self.chat
+                    .composer
+                    .update(cx, |composer, cx| composer.set_value(text, window, cx));
+            }
+            self.message(
+                "Could not save every file, so Claude did not start. Your drafts are kept.",
+                true,
+                cx,
+            );
+            return;
+        }
+        match pending {
+            PendingAfterSave::Takeover { request, saved } => {
+                self.chat_command(Command::Takeover { request, saved })
+            }
+            PendingAfterSave::Send { text, .. } => self.chat_command(Command::Send(text)),
+        }
         cx.notify();
     }
 

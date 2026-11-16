@@ -73,6 +73,69 @@ pub fn anchor_line(text: &str, anchor: &str) -> Option<usize> {
         .map(|index| index + 1)
 }
 
+/// What a takeover needs to know about one open editor tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabFacts {
+    pub path: String,
+    pub dirty: bool,
+    /// The buffer was never written to disk (`document.base_hash` is `None`).
+    pub never_saved: bool,
+    pub empty: bool,
+    /// The file changed on disk under the buffer.
+    pub conflict: bool,
+    pub read_only: bool,
+    /// A save of this tab is still running.
+    pub saving: bool,
+}
+
+/// How the open buffers get onto disk before Claude takes over, since Claude edits the
+/// files there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SavePlan {
+    /// Nothing is unsaved: Claude can start.
+    Ready,
+    /// Claude cannot start yet; the message says why.
+    Blocked(String),
+    /// Save the tabs in `save` and close the ones in `close`, then start Claude.
+    Save {
+        save: Vec<String>,
+        close: Vec<String>,
+    },
+}
+
+/// The save plan for the open tabs. A running save, or an unsaved buffer that cannot be
+/// written (its file changed on disk, or is read-only), blocks the takeover. A new buffer
+/// that is still empty is closed instead of saved, because saving it would create an empty
+/// file; every other unsaved buffer is saved.
+pub fn takeover_save_plan(tabs: &[TabFacts]) -> SavePlan {
+    if tabs.iter().any(|tab| tab.saving) {
+        return SavePlan::Blocked("Wait for the current save to finish.".into());
+    }
+    let dirty = || tabs.iter().filter(|tab| tab.dirty);
+    if let Some(tab) = dirty().find(|tab| tab.conflict) {
+        return SavePlan::Blocked(format!(
+            "{} changed on disk. Resolve that before Claude takes over.",
+            tab.path
+        ));
+    }
+    if let Some(tab) = dirty().find(|tab| tab.read_only) {
+        return SavePlan::Blocked(format!(
+            "{} is read-only, so your changes cannot be saved before the takeover.",
+            tab.path
+        ));
+    }
+    if dirty().next().is_none() {
+        return SavePlan::Ready;
+    }
+    let (close, save): (Vec<&TabFacts>, Vec<&TabFacts>) =
+        dirty().partition(|tab| tab.never_saved && tab.empty);
+    let paths = |tabs: Vec<&TabFacts>| tabs.into_iter().map(|tab| tab.path.clone()).collect();
+    SavePlan::Save {
+        save: paths(save),
+        close: paths(close),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +252,140 @@ mod tests {
     #[test]
     fn anchor_line_is_none_without_a_match() {
         assert_eq!(anchor_line(CLI, "pub struct Options {"), None);
+    }
+
+    /// A clean tab of a file that exists on disk.
+    fn tab(path: &str) -> TabFacts {
+        TabFacts {
+            path: path.into(),
+            dirty: false,
+            never_saved: false,
+            empty: false,
+            conflict: false,
+            read_only: false,
+            saving: false,
+        }
+    }
+
+    fn dirty(path: &str) -> TabFacts {
+        TabFacts {
+            dirty: true,
+            ..tab(path)
+        }
+    }
+
+    #[test]
+    fn takeover_save_plan_is_ready_without_dirty_tabs() {
+        assert_eq!(takeover_save_plan(&[]), SavePlan::Ready);
+        assert_eq!(
+            takeover_save_plan(&[tab("src/cli.rs"), tab("src/main.rs")]),
+            SavePlan::Ready
+        );
+    }
+
+    #[test]
+    fn takeover_save_plan_saves_a_dirty_saved_file() {
+        assert_eq!(
+            takeover_save_plan(&[tab("src/main.rs"), dirty("src/cli.rs")]),
+            SavePlan::Save {
+                save: vec!["src/cli.rs".into()],
+                close: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn takeover_save_plan_closes_a_never_saved_empty_tab() {
+        let new_empty = TabFacts {
+            never_saved: true,
+            empty: true,
+            ..dirty("tests/cli.rs")
+        };
+        assert_eq!(
+            takeover_save_plan(&[dirty("src/cli.rs"), new_empty]),
+            SavePlan::Save {
+                save: vec!["src/cli.rs".into()],
+                close: vec!["tests/cli.rs".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn takeover_save_plan_saves_a_never_saved_tab_with_text() {
+        let new_with_text = TabFacts {
+            never_saved: true,
+            ..dirty("tests/cli.rs")
+        };
+        assert_eq!(
+            takeover_save_plan(&[new_with_text]),
+            SavePlan::Save {
+                save: vec!["tests/cli.rs".into()],
+                close: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn takeover_save_plan_blocks_on_a_dirty_tab_with_a_conflict() {
+        let conflict = TabFacts {
+            conflict: true,
+            ..dirty("src/cli.rs")
+        };
+        assert_eq!(
+            takeover_save_plan(&[dirty("src/main.rs"), conflict]),
+            SavePlan::Blocked(
+                "src/cli.rs changed on disk. Resolve that before Claude takes over.".into()
+            )
+        );
+    }
+
+    #[test]
+    fn takeover_save_plan_blocks_on_a_dirty_read_only_tab() {
+        let read_only = TabFacts {
+            read_only: true,
+            ..dirty("src/cli.rs")
+        };
+        assert_eq!(
+            takeover_save_plan(&[read_only]),
+            SavePlan::Blocked(
+                "src/cli.rs is read-only, so your changes cannot be saved before the takeover."
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn takeover_save_plan_blocks_while_a_tab_is_saving() {
+        let saving = TabFacts {
+            saving: true,
+            ..tab("src/cli.rs")
+        };
+        assert_eq!(
+            takeover_save_plan(&[dirty("src/main.rs"), saving]),
+            SavePlan::Blocked("Wait for the current save to finish.".into())
+        );
+    }
+
+    #[test]
+    fn takeover_save_plan_ignores_conflicts_and_read_only_on_clean_tabs() {
+        let conflict = TabFacts {
+            conflict: true,
+            ..tab("src/cli.rs")
+        };
+        let read_only = TabFacts {
+            read_only: true,
+            ..tab("src/main.rs")
+        };
+        assert_eq!(
+            takeover_save_plan(&[conflict.clone(), read_only.clone()]),
+            SavePlan::Ready
+        );
+        assert_eq!(
+            takeover_save_plan(&[conflict, read_only, dirty("Cargo.toml")]),
+            SavePlan::Save {
+                save: vec!["Cargo.toml".into()],
+                close: vec![],
+            }
+        );
     }
 }

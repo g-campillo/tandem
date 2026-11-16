@@ -14,14 +14,17 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 use tandem_claude::prompts::kind_label;
-use tandem_claude::view::{self, ComposerMode, ConnectionNotice, StepCard, TrailState};
-use tandem_claude::{ChatState, Connection};
+use tandem_claude::view::{
+    self, ChangeRow, ChangesCard, ComposerMode, ConnectionNotice, StepCard, TrailState,
+};
+use tandem_claude::{ChatState, Connection, TakeoverRequest};
 use tandem_core::chat::{
-    ChatItem, CheckResult, DEFAULT_MODEL, Finding, Guidance, HelpLevel, ItemKind, Phase, Plan,
-    StepKind,
+    ChangeKind, ChatItem, CheckResult, DEFAULT_MODEL, Decision, Finding, Guidance, HelpLevel,
+    ItemKind, Phase, Plan, StepKind,
 };
 
 const NO_PROJECT: &str = "Open a folder to start a task with Claude.";
+const IGNORED_NOT_TRACKED: &str = "Files in ignored folders (like target/ or node_modules/) aren't tracked, so Undo can't restore them.";
 
 fn phase_name(phase: Phase) -> &'static str {
     match phase {
@@ -40,6 +43,17 @@ fn on_command(
     let weak = weak.clone();
     move |_, _, cx| {
         let _ = weak.update(cx, |view, _| view.chat_command(command.clone()));
+    }
+}
+
+/// Keep (`keep`) or Undo of `path` in `change_set`, or of every undecided file there when
+/// `path` is `None`.
+fn decide(keep: bool, change_set: &str, path: Option<String>) -> Command {
+    let change_set = change_set.to_owned();
+    if keep {
+        Command::Keep { change_set, path }
+    } else {
+        Command::Undo { change_set, path }
     }
 }
 
@@ -270,7 +284,13 @@ impl Workspace {
             .iter()
             .map(|item| self.chat_item(state, item, cx))
             .collect();
-        let working = state.turn.is_some() && state.streaming.is_none();
+        let working = if state.preparing_takeover {
+            Some("Preparing takeover…")
+        } else if state.turn.is_some() && state.streaming.is_none() {
+            Some("Claude is working…")
+        } else {
+            None
+        };
         div()
             .v_flex()
             .flex_1()
@@ -307,12 +327,8 @@ impl Workspace {
                                 ),
                         )
                     })
-                    .when(working, |d| {
-                        d.child(
-                            div()
-                                .text_color(p.secondary_foreground)
-                                .child("Claude is working…"),
-                        )
+                    .when_some(working, |d, working| {
+                        d.child(div().text_color(p.secondary_foreground).child(working))
                     }),
             )
             .into_any_element()
@@ -433,7 +449,10 @@ impl Workspace {
                 row.child(card)
             }
             ItemKind::Check { result } => row.child(self.check_card(id, result, cx)),
-            ItemKind::Changes { .. } => muted(row, "Changed files".into()),
+            ItemKind::Changes { change_set } => match view::changes_card(state, change_set) {
+                Some(card) => row.child(self.changes_card(id, card, cx)),
+                None => muted(row, "Changed files".into()),
+            },
         }
         .into_any_element()
     }
@@ -470,18 +489,201 @@ impl Workspace {
             }))
             .when(actions, |d| {
                 d.child(
-                    div().h_flex().flex_wrap().gap_2().child(
-                        compact_button(
-                            Button::new(("chat-write-it", item_id as usize)),
-                            "I'll write it",
+                    div()
+                        .h_flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            compact_button(
+                                Button::new(("chat-write-it", item_id as usize)),
+                                "I'll write it",
+                            )
+                            .primary()
+                            .on_click(
+                                cx.listener(|this, _, _, _| {
+                                    this.chat_command(Command::ChooseGuided)
+                                }),
+                            ),
                         )
-                        .primary()
-                        .on_click(
-                            cx.listener(|this, _, _, _| this.chat_command(Command::ChooseGuided)),
+                        .child(
+                            compact_button(
+                                Button::new(("chat-you-do-it", item_id as usize)),
+                                "You do it",
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.begin_takeover(TakeoverRequest::Rest, window, cx)
+                                },
+                            )),
                         ),
-                    ),
                 )
             })
+            .into_any_element()
+    }
+
+    /// What one takeover changed: a row per file with Keep and Undo, until each is decided.
+    fn changes_card(
+        &self,
+        item_id: usize,
+        card: ChangesCard,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx.theme().mode);
+        let can_act = card.can_act;
+        let rows: Vec<AnyElement> = card
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| self.change_row(item_id, index, &card.id, row, can_act, cx))
+            .collect();
+        let decide_all = |label: &'static str, keep: bool| {
+            let command = decide(keep, &card.id, None);
+            compact_button(
+                Button::new(SharedString::from(format!(
+                    "chat-changes-{item_id}-{}",
+                    if keep { "keep-all" } else { "undo-all" }
+                ))),
+                label,
+            )
+            .disabled(!can_act)
+            .on_click(cx.listener(move |this, _, _, _| this.chat_command(command.clone())))
+        };
+        let footer = (card.undecided > 0).then(|| {
+            div()
+                .h_flex()
+                .flex_wrap()
+                .gap_2()
+                .child(decide_all("Keep all", true))
+                .child(decide_all("Undo all", false))
+        });
+        solid_section(div(), cx)
+            .v_flex()
+            .min_w_0()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .when(card.undecided > 0, |d| d.border_color(p.warning))
+            .child(
+                div()
+                    .font_semibold()
+                    .child(format!("Claude changed {} file(s)", card.rows.len())),
+            )
+            .children(rows)
+            .children(footer)
+            .child(
+                div()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .text_color(p.secondary_foreground)
+                    .child(IGNORED_NOT_TRACKED),
+            )
+            .into_any_element()
+    }
+
+    /// One changed file: its kind, its path (a button that opens it while the file exists)
+    /// and Keep and Undo, or what the user decided.
+    fn change_row(
+        &self,
+        item_id: usize,
+        index: usize,
+        change_set: &str,
+        row: &ChangeRow,
+        can_act: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx.theme().mode);
+        let id = |part: &str| SharedString::from(format!("chat-change-{item_id}-{index}-{part}"));
+        let (badge, colour, surface) = match row.kind {
+            ChangeKind::Created => ("Created", p.success, p.success_surface),
+            ChangeKind::Modified => ("Modified", p.warning, p.warning_surface),
+            ChangeKind::Deleted => ("Deleted", p.error, p.error_surface),
+        };
+        // A deleted file, or a created one that Undo removed, has nothing to open.
+        let gone = row.kind == ChangeKind::Deleted
+            || (row.kind == ChangeKind::Created && row.decision == Decision::Undone);
+        let path = if gone {
+            div()
+                .flex_1()
+                .min_w_0()
+                .px_2()
+                .child(row.path.clone())
+                .into_any_element()
+        } else {
+            let open = row.path.clone();
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    path_button(Button::new(id("open")), row.path.clone())
+                        .ghost()
+                        .disabled(!can_act)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.settings.open = false;
+                            this.open_file(open.clone(), false, None, window, cx)
+                        })),
+                )
+                .into_any_element()
+        };
+        let decided = |word: &'static str| {
+            div()
+                .flex_none()
+                .text_size(px(12.))
+                .text_color(p.secondary_foreground)
+                .child(word)
+                .into_any_element()
+        };
+        let decision = match row.decision {
+            Decision::Undecided => {
+                let keep = decide(true, change_set, Some(row.path.clone()));
+                let undo = decide(false, change_set, Some(row.path.clone()));
+                div()
+                    .h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .child(
+                        compact_button(Button::new(id("keep")), "Keep")
+                            .disabled(!can_act)
+                            .on_click(
+                                cx.listener(move |this, _, _, _| this.chat_command(keep.clone())),
+                            ),
+                    )
+                    .child(
+                        compact_button(Button::new(id("undo")), "Undo")
+                            .disabled(!can_act || !row.undoable)
+                            .when(!row.undoable, |button| {
+                                button.tooltip("Too large to restore")
+                            })
+                            .on_click(
+                                cx.listener(move |this, _, _, _| this.chat_command(undo.clone())),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            Decision::Kept => decided("Kept"),
+            Decision::Undone => decided("Undone"),
+        };
+        div()
+            .id(id("row"))
+            .h_flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .min_w_0()
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(colour)
+                    .bg(surface)
+                    .text_color(colour)
+                    .text_size(px(11.))
+                    .font_semibold()
+                    .child(badge),
+            )
+            .child(path)
+            .child(decision)
             .into_any_element()
     }
 
@@ -677,6 +879,23 @@ impl Workspace {
                                     this.chat_command(Command::CheckMyWork)
                                 }),
                             ),
+                    )
+                    .child(
+                        compact_button(Button::new(("chat-step-do-it", index)), "Do it for me")
+                            .disabled(!can_act)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.begin_takeover(TakeoverRequest::Step, window, cx)
+                            })),
+                    )
+                    .child(
+                        compact_button(
+                            Button::new(("chat-step-build-rest", index)),
+                            "Build the rest for me",
+                        )
+                        .disabled(!can_act)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.begin_takeover(TakeoverRequest::Rest, window, cx)
+                        })),
                     ),
             )
             .into_any_element()
@@ -818,14 +1037,27 @@ impl Workspace {
                     .child("Claude checks the \"done when\" criteria."),
             )
             .child(
-                div().h_flex().child(
-                    compact_button(Button::new("chat-check-again"), "Check again")
-                        .primary()
-                        .disabled(!can_act)
-                        .on_click(
-                            cx.listener(|this, _, _, _| this.chat_command(Command::CheckMyWork)),
-                        ),
-                ),
+                div()
+                    .h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        compact_button(Button::new("chat-check-again"), "Check again")
+                            .primary()
+                            .disabled(!can_act)
+                            .on_click(
+                                cx.listener(|this, _, _, _| {
+                                    this.chat_command(Command::CheckMyWork)
+                                }),
+                            ),
+                    )
+                    .child(
+                        compact_button(Button::new("chat-fix-it"), "Fix it for me")
+                            .disabled(!can_act)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.begin_takeover(TakeoverRequest::Rest, window, cx)
+                            })),
+                    ),
             )
             .into_any_element()
     }

@@ -57,6 +57,9 @@ actions!(
     ]
 );
 
+/// Claude edits the files on disk during a takeover, so the editor writes none of them.
+const TAKEOVER_SAVE_PAUSED: &str = "Claude is editing files; saving is paused.";
+
 /// Menu/shortcut commands must work even when the old editor focus handle is
 /// temporarily absent from the view tree (for example while showing a diff).
 pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace>) {
@@ -280,6 +283,7 @@ impl Workspace {
                         .update_in(cx, |view, window, cx| {
                             view.checkpoint_async(cx);
                             view.development_tick(window, cx);
+                            view.chat_tick(window, cx);
                             let rescan = view.disk_events.swap(false, Ordering::Relaxed)
                                 || view.last_index.elapsed() > Duration::from_secs(30);
                             if !view.loading
@@ -677,6 +681,10 @@ impl Workspace {
     }
 
     fn save_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.takeover_running() {
+            self.message(TAKEOVER_SAVE_PAUSED, true, cx);
+            return;
+        }
         if self.loading || self.copy_inflight {
             self.message("Wait for the current file operation to finish.", false, cx);
             return;
@@ -746,6 +754,10 @@ impl Workspace {
         }
     }
     fn save_all(&mut self, cx: &mut Context<Self>) {
+        if self.takeover_running() {
+            self.message(TAKEOVER_SAVE_PAUSED, true, cx);
+            return;
+        }
         for index in 0..self.tabs.len() {
             if self.tabs[index].document.dirty() {
                 self.save_index(index, cx);

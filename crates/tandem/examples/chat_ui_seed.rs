@@ -1,17 +1,23 @@
 //! Offline seed for checking the chat panel by hand. It writes a small project and a state
-//! folder with two tasks: one in Plan, and one in a guided Build with stored guidance for
-//! its first step (selected). It starts no helper and uses no Claude subscription.
+//! folder with three tasks: one in Plan; one in a guided Build with stored guidance for its
+//! first step (selected); and one whose first step Claude did in a takeover, with the three
+//! changed files waiting for Keep or Undo. It starts no helper and uses no Claude
+//! subscription.
 use anyhow::{Result, ensure};
 use std::{fs, path::PathBuf};
 use tandem_core::chat::{
-    ActivityKind, BreakdownItem, Guidance, HelpLevel, ItemKind, Mode, Phase, Plan, PlanStep,
-    StepKind,
+    ActivityKind, BreakdownItem, ChangeSet, ChangeSetStatus, Decision, FileChange, Guidance,
+    HelpLevel, ItemKind, Mode, Phase, Plan, PlanStep, StepKind, TakeoverScope,
 };
-use tandem_core::{Project, Store, new_id};
+use tandem_core::takeover::Snapshot;
+use tandem_core::{Project, Store, new_id, now_ms};
 
 const CARGO_TOML: &str = "[package]\nname = \"seed-cli\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nclap = { version = \"4\", features = [\"derive\"] }\n";
 const CLI_RS: &str = "use clap::Parser;\n\n#[derive(Parser)]\npub struct Args {\n    /// The name to greet.\n    pub name: String,\n}\n";
 const MAIN_RS: &str = "mod cli;\n\nuse clap::Parser;\n\nfn main() {\n    let args = cli::Args::parse();\n    println!(\"Hello, {}!\", args.name);\n}\n";
+/// `src/cli.rs` after Claude's takeover of step 1: the same file with the `json` flag.
+const CLI_RS_WITH_JSON: &str = "use clap::Parser;\n\n#[derive(Parser)]\npub struct Args {\n    /// The name to greet.\n    pub name: String,\n    /// Print the result as JSON.\n    #[arg(long)]\n    pub json: bool,\n}\n";
+const JSON_RS: &str = "/// The greeting as a JSON object.\npub fn greeting(name: &str) -> String {\n    format!(\"{{\\\"greeting\\\":\\\"Hello, {name}!\\\"}}\")\n}\n";
 
 fn step(kind: StepKind, target: &str, summary: &str) -> PlanStep {
     PlanStep {
@@ -57,6 +63,43 @@ fn first_step_guidance() -> Guidance {
         path: Some("src/cli.rs".into()),
         anchor: Some("pub struct Args {".into()),
     }
+}
+
+/// Plays Claude's takeover of step 1 for real: snapshots the project into the state
+/// folder, modifies `src/cli.rs`, creates `src/json.rs` and deletes `src/main.rs`, then
+/// records the diff as a change set waiting for review.
+fn seed_takeover(store: &mut Store, project: &Project, task_id: &str) -> Result<ChangeSet> {
+    let id = new_id();
+    let snapshot = Snapshot::capture(project, &store.directory.join("takeover").join(&id))?;
+    fs::write(project.root.join("src/cli.rs"), CLI_RS_WITH_JSON)?;
+    fs::write(project.root.join("src/json.rs"), JSON_RS)?;
+    fs::remove_file(project.root.join("src/main.rs"))?;
+    let files: Vec<FileChange> = snapshot
+        .diff(project)?
+        .into_iter()
+        .map(|change| FileChange {
+            path: change.path,
+            kind: change.kind,
+            decision: Decision::Undecided,
+            after_hash: change.after_hash,
+            undoable: change.undoable,
+        })
+        .collect();
+    ensure!(
+        files.len() == 3,
+        "The seeded takeover should change three files, not {}.",
+        files.len()
+    );
+    let set = ChangeSet {
+        id,
+        task_id: task_id.into(),
+        scope: TakeoverScope::Step(0),
+        status: ChangeSetStatus::Review,
+        files,
+        created_at_ms: now_ms(),
+    };
+    store.save_change_set(&set)?;
+    Ok(set)
 }
 
 fn main() -> Result<()> {
@@ -124,7 +167,6 @@ fn main() -> Result<()> {
         store.append_chat_item(&task.id, &kind)?;
     }
 
-    // Created last, so it is the selected task when Tandem opens the project.
     let mut build = store.create_chat_task(project.key())?;
     build.title = "Add a --json flag to the CLI (guided)".into();
     build.phase = Phase::Build;
@@ -136,13 +178,33 @@ fn main() -> Result<()> {
     guidance.check(&plan.steps[0])?;
     store.save_chat_guidance(&build.id, &guidance)?;
     for kind in [
-        ItemKind::Plan { plan },
+        ItemKind::Plan { plan: plan.clone() },
         ItemKind::Notice {
             text: "You are building this. Claude guides each step.".into(),
         },
     ] {
         store.append_chat_item(&build.id, &kind)?;
     }
+
+    let mut takeover = store.create_chat_task(project.key())?;
+    takeover.title = "Add a --json flag to the CLI (Claude did step 1)".into();
+    takeover.phase = Phase::Build;
+    takeover.mode = Mode::Guided;
+    takeover.current_step = 1;
+    takeover.plan = Some(plan.clone());
+    store.save_chat_task(&takeover)?;
+    let set = seed_takeover(&mut store, &project, &takeover.id)?;
+    for kind in [
+        ItemKind::Plan { plan },
+        ItemKind::Notice {
+            text: "Step 1 done: Added the json flag to Args.".into(),
+        },
+        ItemKind::Changes { change_set: set.id },
+    ] {
+        store.append_chat_item(&takeover.id, &kind)?;
+    }
+    // Creating a task selects it; the guided build stays the one Tandem opens with.
+    store.select_chat_task(project.key(), &build.id)?;
 
     println!("project={}", project_path.display());
     println!("state_dir={}", state_path.display());
