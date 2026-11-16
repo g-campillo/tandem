@@ -45,6 +45,8 @@ Open a folder with ⌘O, **Recent**, or a folder argument; Tandem reopens the la
 
 The panel below the editor has two tabs: **Terminal**, a basic interactive `/bin/sh` in the project folder with 2,000 lines of scrollback, started only when you open it, and **Problems**, the language tools' diagnostics and navigation results. Rust (rust-analyzer) and Python (Pyright) tools are enabled per project in Settings → **Language tools**, after a notice that they run with your user permissions; enable them only for projects you trust.
 
+With language tools on, rest the pointer on a name in the editor to see a tooltip: its signature, highlighted like the code in the editor, above its documentation. An error or a warning shows in the same tooltip, in a block of its own colour, as soon as the pointer is on the underlined text. The tooltip opens only while the pointer is on that text itself, never from the empty space beside a line, and closes when the pointer leaves it. Move the pointer onto the tooltip to scroll it or to select and copy its text (⌘C); a click or a scroll outside it, or any other key, closes it.
+
 | Action | Shortcut |
 | --- | --- |
 | Open folder / quick open / new file | ⌘O / ⌘P / ⌘N |
