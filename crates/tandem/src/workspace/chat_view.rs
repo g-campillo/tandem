@@ -9,7 +9,7 @@ use crate::appearance::{
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 use tandem_claude::prompts::kind_label;
@@ -104,10 +104,10 @@ pub(super) fn help_level_menu(
         .into_any_element()
 }
 
-/// "You" or "Claude" above a message.
-fn speaker(name: &'static str, p: Palette) -> Div {
+/// "You" or "Claude" above a message, in the chat's small print.
+fn speaker(name: &'static str, p: Palette, small: Pixels) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(small)
         .font_semibold()
         .text_color(p.secondary_foreground)
         .child(name)
@@ -151,11 +151,44 @@ fn phase_trail(phase: Phase, p: Palette) -> AnyElement {
 }
 
 impl Workspace {
+    /// Markdown in the chat, in the chat's text and code fonts.
+    fn chat_markdown(
+        &self,
+        id: impl Into<ElementId>,
+        text: impl Into<SharedString>,
+        cx: &App,
+    ) -> TextView {
+        let (chat, code) = (&self.look.fonts.chat, &self.look.fonts.chat_code);
+        let code_font = || {
+            StyleRefinement::default()
+                .font_family(code.family.clone())
+                .font_features(code.features.clone())
+        };
+        let mut style = TextViewStyle::default().code_block(code_font().text_size(px(code.size)));
+        // The editor's highlight theme, so code has the editor's colours.
+        style.highlight_theme = cx.theme().highlight_theme.clone();
+        TextView::markdown(id, text)
+            .style(style)
+            .inline_code_style(code_font())
+            .font_family(chat.family.clone())
+            .text_size(px(chat.size))
+            .selectable(true)
+    }
+
+    /// The chat's text size, its small print (speaker names, notes, hints: one pixel
+    /// less) and its badges (two less); none below 10.
+    fn chat_sizes(&self) -> (Pixels, Pixels, Pixels) {
+        let size = self.look.fonts.chat.size;
+        (px(size), px((size - 1.).max(10.)), px((size - 2.).max(10.)))
+    }
+
     pub(super) fn chat_panel(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
         let state = self.chat_state();
         let panel = div()
             .v_flex()
+            .font_family(self.look.fonts.chat.family.clone())
+            .text_size(px(self.look.fonts.chat.size))
             .w(px(width))
             .min_w_0()
             .flex_shrink_0()
@@ -184,6 +217,8 @@ impl Workspace {
         let task_menu = state.map(|state| self.task_menu(state, cx));
         let phase = state.and_then(|state| state.task.as_ref().map(|task| task.phase));
         div()
+            // A control, so not in the chat's text font that the panel sets.
+            .font_family(cx.theme().font_family.clone())
             .h_flex()
             .flex_wrap()
             .flex_shrink_0()
@@ -258,6 +293,7 @@ impl Workspace {
 
     fn chat_body(&self, state: &ChatState, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let (_, small, _) = self.chat_sizes();
         let notice = view::connection_notice(&state.connection)
             .map(|notice| self.connection_card(notice, state.turn.is_some(), cx));
         let items: Vec<AnyElement> = state
@@ -298,14 +334,12 @@ impl Workspace {
                                 .v_flex()
                                 .min_w_0()
                                 .gap_1()
-                                .child(speaker("Claude", p))
-                                .child(
-                                    TextView::markdown(
-                                        "chat-streaming-text",
-                                        view::display_markdown(&text),
-                                    )
-                                    .selectable(true),
-                                ),
+                                .child(speaker("Claude", p, small))
+                                .child(self.chat_markdown(
+                                    "chat-streaming-text",
+                                    view::display_markdown(&text),
+                                    cx,
+                                )),
                         )
                     })
                     .when_some(working, |d, working| {
@@ -323,6 +357,8 @@ impl Workspace {
     ) -> AnyElement {
         let command = notice.command.clone();
         let can_retry = notice.can_retry;
+        let (size, _, _) = self.chat_sizes();
+        let code = &self.look.fonts.chat_code;
         solid_section(div(), cx)
             .v_flex()
             .flex_shrink_0()
@@ -333,11 +369,17 @@ impl Workspace {
             .border_1()
             .child(div().font_semibold().child(notice.title))
             .when(!notice.body.is_empty(), |d| {
-                d.child(div().text_size(px(13.)).child(notice.body))
+                d.child(div().text_size(size).child(notice.body))
             })
             .when_some(command, |d, command| {
                 let copied = command.clone();
-                d.child(code_note("chat-sign-in", command, cx)).child(
+                d.child(
+                    code_note("chat-sign-in", command, cx)
+                        .font_family(code.family.clone())
+                        .font_features(code.features.clone())
+                        .text_size(px(code.size)),
+                )
+                .child(
                     compact_button(Button::new("chat-copy-sign-in"), "Copy").on_click(
                         move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
@@ -359,21 +401,22 @@ impl Workspace {
 
     fn chat_item(&self, state: &ChatState, item: &ChatItem, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let (_, small, _) = self.chat_sizes();
+        let code = &self.look.fonts.chat_code;
         let id = item.id as usize;
         let row = div().id(("chat-item", id)).v_flex().min_w_0().gap_1();
         let muted = |row: Stateful<Div>, text: String| {
-            row.text_size(px(12.))
+            row.text_size(small)
                 .text_color(p.secondary_foreground)
                 .child(text)
         };
         match &item.kind {
             ItemKind::User { text } => row
-                .child(speaker("You", p))
+                .child(speaker("You", p, small))
                 .child(div().min_w_0().child(text.clone())),
-            ItemKind::Assistant { text } => row.child(speaker("Claude", p)).child(
-                TextView::markdown(("chat-text", id), view::display_markdown(text))
-                    .selectable(true),
-            ),
+            ItemKind::Assistant { text } => row
+                .child(speaker("Claude", p, small))
+                .child(self.chat_markdown(("chat-text", id), view::display_markdown(text), cx)),
             ItemKind::Activity { kind, label } => {
                 muted(row, format!("↳ {}", view::activity_text(*kind, label)))
             }
@@ -396,7 +439,12 @@ impl Workspace {
                     .child(div().font_semibold().child(title.clone()))
                     .when(!detail.is_empty(), |d| d.child(div().child(detail.clone())))
                     .when_some(command.clone(), |d, command| {
-                        d.child(code_note(("chat-permission-command", id), command, cx))
+                        d.child(
+                            code_note(("chat-permission-command", id), command, cx)
+                                .font_family(code.family.clone())
+                                .font_features(code.features.clone())
+                                .text_size(px(code.size)),
+                        )
                     })
                     .when(pending, |d| {
                         d.child(
@@ -422,7 +470,7 @@ impl Workspace {
                     .when_some(*allowed, |d, allowed| {
                         d.child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(small)
                                 .text_color(p.secondary_foreground)
                                 .child(if allowed { "Allowed" } else { "Denied" }),
                         )
@@ -510,6 +558,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let (_, small, _) = self.chat_sizes();
         let can_act = card.can_act;
         let rows: Vec<AnyElement> = card
             .rows
@@ -554,7 +603,7 @@ impl Workspace {
             .child(
                 div()
                     .min_w_0()
-                    .text_size(px(12.))
+                    .text_size(small)
                     .text_color(p.secondary_foreground)
                     .child(IGNORED_NOT_TRACKED),
             )
@@ -573,6 +622,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let (_, small, badge_size) = self.chat_sizes();
         let id = |part: &str| SharedString::from(format!("chat-change-{item_id}-{index}-{part}"));
         let (badge, colour, surface) = match row.kind {
             ChangeKind::Created => ("Created", p.success, p.success_surface),
@@ -608,7 +658,7 @@ impl Workspace {
         let decided = |word: &'static str| {
             div()
                 .flex_none()
-                .text_size(px(12.))
+                .text_size(small)
                 .text_color(p.secondary_foreground)
                 .child(word)
                 .into_any_element()
@@ -659,7 +709,7 @@ impl Workspace {
                     .border_color(colour)
                     .bg(surface)
                     .text_color(colour)
-                    .text_size(px(11.))
+                    .text_size(badge_size)
                     .font_semibold()
                     .child(badge),
             )
@@ -703,13 +753,11 @@ impl Workspace {
                     .child(check_title(result)),
             )
             .when(!result.explanation.trim().is_empty(), |d| {
-                d.child(
-                    TextView::markdown(
-                        ("chat-check-text", item_id),
-                        view::display_markdown(&result.explanation),
-                    )
-                    .selectable(true),
-                )
+                d.child(self.chat_markdown(
+                    ("chat-check-text", item_id),
+                    view::display_markdown(&result.explanation),
+                    cx,
+                ))
             })
             .children(findings)
             .into_any_element()
@@ -724,6 +772,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let (_, small, _) = self.chat_sizes();
         let label = finding_label(finding);
         let head = match finding.path.clone() {
             Some(path) => {
@@ -752,7 +801,7 @@ impl Workspace {
                 div()
                     .min_w_0()
                     .pl_2()
-                    .text_size(px(12.))
+                    .text_size(small)
                     .child(format!("Why: {}", finding.why)),
             )
             .when_some(filled(&finding.hint), |d, hint| {
@@ -760,7 +809,7 @@ impl Workspace {
                     div()
                         .min_w_0()
                         .pl_2()
-                        .text_size(px(12.))
+                        .text_size(small)
                         .text_color(p.secondary_foreground)
                         .child(format!("Hint: {hint}")),
                 )
@@ -893,6 +942,8 @@ impl Workspace {
         let index = card.index;
         let blocks = view::step_blocks(guidance, &card.language);
         let p = palette(cx.theme().mode);
+        let (_, small, _) = self.chat_sizes();
+        let code = &self.look.fonts.chat_code;
         let unmatched = (!blocks.unmatched.is_empty()).then(|| {
             let rows = blocks.unmatched.iter().map(|item| {
                 div()
@@ -907,8 +958,9 @@ impl Workspace {
                             .px_1()
                             .rounded(px(4.))
                             .bg(p.content)
-                            .font_family("Menlo")
-                            .text_size(px(12.))
+                            .font_family(code.family.clone())
+                            .font_features(code.features.clone())
+                            .text_size(px(code.size))
                             .child(item.part.clone()),
                     )
                     .child(div().flex_1().min_w_0().child(item.explanation.clone()))
@@ -919,7 +971,7 @@ impl Workspace {
                 .gap_1()
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(small)
                         .font_semibold()
                         .text_color(p.secondary_foreground)
                         .child("More explanations"),
@@ -935,28 +987,22 @@ impl Workspace {
             .v_flex()
             .min_w_0()
             .gap_2()
-            .child(
-                TextView::markdown(
-                    ("chat-step-summary", index),
-                    view::display_markdown(&guidance.summary),
-                )
-                .selectable(true),
-            )
-            .child(
-                TextView::markdown(
-                    ("chat-step-why", index),
-                    view::display_markdown(&format!("Why: {}", guidance.why)),
-                )
-                .selectable(true),
-            )
+            .child(self.chat_markdown(
+                ("chat-step-summary", index),
+                view::display_markdown(&guidance.summary),
+                cx,
+            ))
+            .child(self.chat_markdown(
+                ("chat-step-why", index),
+                view::display_markdown(&format!("Why: {}", guidance.why)),
+                cx,
+            ))
             .when_some(view::where_line(guidance), |d, place| {
-                d.child(
-                    TextView::markdown(
-                        ("chat-step-where", index),
-                        view::display_markdown(&format!("Where: {place}")),
-                    )
-                    .selectable(true),
-                )
+                d.child(self.chat_markdown(
+                    ("chat-step-where", index),
+                    view::display_markdown(&format!("Where: {place}")),
+                    cx,
+                ))
             })
             .children(blocks)
             .children(unmatched)
@@ -967,10 +1013,11 @@ impl Workspace {
     /// commands.
     fn step_block(&self, index: usize, block: &StepBlock, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let (_, small, _) = self.chat_sizes();
         let code = self.code_view(index, block, cx);
         let hint = (!block.parts.is_empty()).then(|| {
             div()
-                .text_size(px(12.))
+                .text_size(small)
                 .text_color(p.secondary_foreground)
                 .child("Point at a part to see what it does.")
         });
@@ -986,7 +1033,7 @@ impl Workspace {
             BlockKind::Pseudocode => column
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(small)
                         .font_semibold()
                         .text_color(p.secondary_foreground)
                         .child("Pseudocode"),
@@ -1015,20 +1062,19 @@ impl Workspace {
     /// Claude is preparing it or a button to ask for it.
     fn unguided_view(&self, card: &StepCard, cx: &mut Context<Self>) -> Div {
         let p = palette(cx.theme().mode);
+        let (_, small, _) = self.chat_sizes();
         div()
             .v_flex()
             .min_w_0()
             .gap_2()
-            .child(
-                TextView::markdown(
-                    ("chat-step-plan-summary", card.index),
-                    view::display_markdown(&card.summary),
-                )
-                .selectable(true),
-            )
+            .child(self.chat_markdown(
+                ("chat-step-plan-summary", card.index),
+                view::display_markdown(&card.summary),
+                cx,
+            ))
             .child(if card.preparing {
                 div()
-                    .text_size(px(12.))
+                    .text_size(small)
                     .text_color(p.secondary_foreground)
                     .child("Preparing this step…")
                     .into_any_element()
@@ -1046,6 +1092,7 @@ impl Workspace {
     /// Every step is finished: Claude checks the "done when" criteria.
     fn final_card(&self, can_act: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let (_, small, _) = self.chat_sizes();
         solid_section(div().id("chat-final-card"), cx)
             .v_flex()
             .min_w_0()
@@ -1057,7 +1104,7 @@ impl Workspace {
             .child(div().font_semibold().child("All steps are finished"))
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(small)
                     .text_color(p.secondary_foreground)
                     .child("Claude checks the \"done when\" criteria."),
             )

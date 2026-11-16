@@ -88,7 +88,7 @@ pub(super) fn code_note(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
     cx: &App,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     panel_code(div().id(id), cx)
         .p_2()
         .rounded(px(6.))

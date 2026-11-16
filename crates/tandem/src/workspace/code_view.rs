@@ -234,6 +234,7 @@ impl Workspace {
         let painted = painted_runs(&runs, &marked, p.secondary_foreground, hovered, p.selected);
         let id = step * 4 + block.kind as usize;
         let kind = block.kind;
+        let face = self.look.fonts.chat_code.clone();
         let mut code = InteractiveText::new(
             ("chat-code-text", id),
             StyledText::new(text).with_highlights(painted),
@@ -250,6 +251,10 @@ impl Workspace {
         }
         // Shown exactly as given, one line per line, scrolling sideways when it is wide.
         let panel = panel_code(div().id(("chat-code", id)), cx)
+            .font_family(face.family.clone())
+            .font_features(face.features.clone())
+            .text_size(px(face.size))
+            .line_height(px(face.line_height()))
             .p_2()
             .rounded(px(6.))
             .h_flex()
@@ -325,6 +330,7 @@ impl Workspace {
             .parts
             .get(hover.part)?;
         let (explanation, code) = view::inline_code(&part.explanation);
+        let (chat, face) = (&self.look.fonts.chat, &self.look.fonts.chat_code);
         let p = palette(cx.theme().mode);
         let code_style = HighlightStyle {
             background_color: Some(p.hover()),
@@ -347,13 +353,14 @@ impl Workspace {
                             .border_color(p.border)
                             .bg(p.surface)
                             .shadow_md()
-                            .text_size(px(13.))
-                            .line_height(px(18.))
+                            .text_size(px(chat.size))
+                            .line_height(relative(1.4))
                             .text_color(p.foreground)
                             .child(
                                 div()
-                                    .font_family("Menlo")
-                                    .text_size(px(12.))
+                                    .font_family(face.family.clone())
+                                    .font_features(face.features.clone())
+                                    .text_size(px(face.size))
                                     .text_color(p.secondary_foreground)
                                     .child(view::part_label(&part.part)),
                             )
