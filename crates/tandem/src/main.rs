@@ -23,23 +23,19 @@ fn main() -> Result<()> {
                     .context("--state-dir needs a directory")?
             }
             Some("--no-restore") => restore = false,
-            Some("--runtime-status") => {
-                let runtime = tandem_codex::discover_runtime()?;
-                println!(
-                    "{} · {} · {}",
-                    tandem_codex::EXPECTED_RUNTIME,
-                    if runtime.bundled {
-                        "bundled"
-                    } else {
-                        "development"
-                    },
-                    runtime.binary.display()
-                );
-                return Ok(());
-            }
+            Some("--runtime-status") => match runtime_status() {
+                Ok(line) => {
+                    println!("{line}");
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+            },
             Some("--help") => {
                 println!(
-                    "Tandem local editor\nUsage: tandem [FOLDER] [--state-dir DIRECTORY] [--no-restore] [--runtime-status]"
+                    "Tandem local editor\nUsage: tandem [FOLDER] [--state-dir DIRECTORY] [--no-restore] [--runtime-status]\n  --runtime-status  print which Claude helper and Node.js Tandem would start, then exit"
                 );
                 return Ok(());
             }
@@ -59,7 +55,7 @@ fn main() -> Result<()> {
         .run(move |cx| {
             gpui_kit::init(cx);
             cx.bind_keys([
-                KeyBinding::new("cmd-,", ApplicationHealth, None),
+                KeyBinding::new("cmd-,", Settings, None),
                 KeyBinding::new("cmd-o", OpenProject, None),
                 KeyBinding::new("cmd-s", Save, None),
                 KeyBinding::new("cmd-alt-s", SaveAll, None),
@@ -80,20 +76,20 @@ fn main() -> Result<()> {
                 KeyBinding::new("cmd--", ZoomOut, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-shift-l", DevelopmentPanel, None),
+                KeyBinding::new("cmd-shift-l", ToggleChat, None),
+                KeyBinding::new("cmd-l", FocusChat, None),
+                KeyBinding::new("cmd-shift-m", ShowProblems, None),
                 KeyBinding::new("alt-shift-f", FormatFile, None),
                 KeyBinding::new("shift-f12", References, None),
                 KeyBinding::new("cmd-shift-o", Symbols, None),
-                KeyBinding::new("cmd-alt-a", AnalyzeTask, None),
-                KeyBinding::new("cmd-alt-g", GuideStep, None),
-                KeyBinding::new("cmd-alt-r", ReviewStep, None),
-                KeyBinding::new("cmd-alt-t", TakeoverPanel, None),
-                KeyBinding::new("cmd-alt-z", UndoAgentImport, None),
-                KeyBinding::new("cmd-.", CancelCompanion, None),
+                KeyBinding::new("cmd-.", StopClaude, None),
+                // The toolkit binds ⌘. to code actions inside inputs, which Tandem does not
+                // offer; Stop must work from the editor and the composer too.
+                KeyBinding::new("cmd-.", StopClaude, Some("Input")),
             ]);
             cx.set_menus([
                 Menu::new("Tandem").items([
-                    MenuItem::action("Application Health & Recovery", ApplicationHealth),
+                    MenuItem::action("Settings…", Settings),
                     MenuItem::action("Quit Tandem", Quit),
                 ]),
                 Menu::new("File").items([
@@ -115,11 +111,12 @@ fn main() -> Result<()> {
                     MenuItem::action("Replace in File", ReplaceInFile),
                 ]),
                 Menu::new("View").items([
-                    MenuItem::action("Tools and Task", DevelopmentPanel),
+                    MenuItem::action("Chat", ToggleChat),
                     MenuItem::action("Quick Open", QuickOpen),
                     MenuItem::action("Search Project", ProjectSearch),
                     MenuItem::action("Compare with Disk", Changes),
                     MenuItem::action("Terminal", ToggleTerminal),
+                    MenuItem::action("Problems", ShowProblems),
                     MenuItem::action("Increase Text Size", ZoomIn),
                     MenuItem::action("Decrease Text Size", ZoomOut),
                 ]),
@@ -128,13 +125,10 @@ fn main() -> Result<()> {
                     MenuItem::action("References at Cursor", References),
                     MenuItem::action("Document Symbols", Symbols),
                 ]),
-                Menu::new("Companion").items([
-                    MenuItem::action("Analyze / Discuss", AnalyzeTask),
-                    MenuItem::action("Prepare Current Action", GuideStep),
-                    MenuItem::action("Review Current Action", ReviewStep),
-                    MenuItem::action("Takeover Scope", TakeoverPanel),
-                    MenuItem::action("Undo Agent Import", UndoAgentImport),
-                    MenuItem::action("Stop AI Work", CancelCompanion),
+                Menu::new("Chat").items([
+                    MenuItem::action("Focus Chat", FocusChat),
+                    MenuItem::action("New Task", NewTask),
+                    MenuItem::action("Stop Claude", StopClaude),
                 ]),
             ]);
             cx.on_window_closed(|cx, _| {

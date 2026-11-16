@@ -1,20 +1,16 @@
-mod health;
-use health::HealthUi;
-mod agent;
-use agent::AgentUi;
-mod companion;
-mod companion_state;
-mod companion_view;
-mod conversation_view;
-mod documents_view;
+mod chat;
+mod chat_logic;
+mod chat_view;
 mod panels;
-mod research_adapter;
-mod walkthrough_view;
-use companion::CompanionUi;
 mod provider;
+mod settings;
 mod tools;
 mod view;
-use tools::{Development, Panel};
+use chat::ChatUi;
+use chat_logic::{BottomTab, next_bottom};
+use settings::SettingsUi;
+pub use settings::runtime_status;
+use tools::Development;
 
 use anyhow::{Context as _, Result, anyhow};
 use gpui_kit::component::input::{EditorState, InputEditsEvent, InputEvent, InputState, Position};
@@ -25,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tandem_claude::Command;
 use tandem_core::*;
 use tandem_terminal::{Terminal, TerminalView};
 
@@ -47,17 +44,15 @@ actions!(
         Changes,
         ZoomIn,
         ZoomOut,
-        DevelopmentPanel,
         FormatFile,
         References,
         Symbols,
-        AnalyzeTask,
-        GuideStep,
-        ReviewStep,
-        CancelCompanion,
-        TakeoverPanel,
-        UndoAgentImport,
-        ApplicationHealth
+        Settings,
+        ToggleChat,
+        FocusChat,
+        NewTask,
+        StopClaude,
+        ShowProblems
     ]
 );
 
@@ -81,12 +76,7 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
             });
         });
     }
-    route::<ApplicationHealth>(cx, window, view.clone(), |v, _, cx| {
-        v.dev.visible = true;
-        v.dev.panel = Panel::Health;
-        v.dev.scroll.set_offset(point(px(0.0), px(0.0)));
-        v.refresh_health(cx);
-    });
+    route::<Settings>(cx, window, view.clone(), |v, _, cx| v.toggle_settings(cx));
     route::<OpenProject>(cx, window, view.clone(), |v, w, c| v.choose_project(w, c));
     route::<ShowRecent>(cx, window, view.clone(), |v, _, c| {
         v.show_recent = !v.show_recent;
@@ -117,10 +107,11 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     route::<ToggleTerminal>(cx, window, view.clone(), |v, _, c| v.toggle_terminal(c));
     route::<ZoomIn>(cx, window, view.clone(), |v, _, c| v.zoom(1.0, c));
     route::<ZoomOut>(cx, window, view.clone(), |v, _, c| v.zoom(-1.0, c));
-    route::<DevelopmentPanel>(cx, window, view.clone(), |v, _, c| {
-        v.dev.visible = !v.dev.visible;
+    route::<ToggleChat>(cx, window, view.clone(), |v, _, c| {
+        v.chat.visible = !v.chat.visible;
         c.notify();
     });
+    route::<FocusChat>(cx, window, view.clone(), |v, w, c| v.focus_chat(w, c));
     route::<FormatFile>(cx, window, view.clone(), |v, w, c| {
         v.language_action("textDocument/formatting", w, c)
     });
@@ -130,53 +121,15 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     route::<Symbols>(cx, window, view.clone(), |v, w, c| {
         v.language_action("textDocument/documentSymbol", w, c)
     });
-    route::<AnalyzeTask>(cx, window, view.clone(), |v, w, c| {
-        v.dev.visible = true;
-        v.dev.panel = Panel::Companion;
-        v.run_companion(CompanionAction::Analyze, w, c);
+    route::<NewTask>(cx, window, view.clone(), |v, _, _| {
+        v.chat_command(Command::NewTask)
     });
-    route::<GuideStep>(cx, window, view.clone(), |v, w, c| {
-        v.dev.visible = true;
-        v.dev.panel = Panel::Companion;
-        v.run_companion(CompanionAction::Guide, w, c);
+    route::<StopClaude>(cx, window, view.clone(), |v, _, _| {
+        v.chat_command(Command::Stop)
     });
-    route::<ReviewStep>(cx, window, view.clone(), |v, w, c| {
-        v.dev.visible = true;
-        v.dev.panel = Panel::Companion;
-        v.run_companion(CompanionAction::Review, w, c);
-    });
-    route::<TakeoverPanel>(cx, window, view.clone(), |v, _, c| {
-        v.dev.visible = true;
-        v.dev.panel = Panel::Agent;
-        v.dev.scroll.set_offset(point(px(0.0), px(0.0)));
+    route::<ShowProblems>(cx, window, view, |v, _, c| {
+        v.bottom = Some(BottomTab::Problems);
         c.notify();
-    });
-    route::<UndoAgentImport>(cx, window, view.clone(), |v, w, c| {
-        if let Some(id) = v
-            .agent
-            .imports
-            .iter()
-            .find(|g| g.status == ImportStatus::Applied)
-            .map(|g| g.id.clone())
-        {
-            v.dev.visible = true;
-            v.dev.panel = Panel::Agent;
-            v.agent_preview(Some(id), w, c);
-        }
-    });
-    route::<CancelCompanion>(cx, window, view, |v, _, c| {
-        if let Some(cancel) = &v.agent.cancel {
-            cancel.store(true, Ordering::Relaxed);
-            c.notify();
-        }
-        if let Some(cancel) = &v.companion.cancel {
-            cancel.store(true, Ordering::Relaxed);
-            if let Some(op) = &mut v.companion.foreground {
-                op.stop();
-            }
-            v.companion.status = "Stopping…".into();
-            c.notify();
-        }
     });
 }
 
@@ -201,12 +154,6 @@ struct LoadedProject {
     documents: Vec<Document>,
     warnings: Vec<String>,
     tools: ProjectTools,
-    tasks: Vec<TaskPlan>,
-    checks: Vec<CheckRecord>,
-    model_runs: Vec<ModelRun>,
-    guidance: GuidanceSettings,
-    agent_runs: Vec<AgentRun>,
-    imports: Vec<ImportTransaction>,
 }
 
 pub struct Workspace {
@@ -240,13 +187,13 @@ pub struct Workspace {
     _watcher: Option<notify::RecommendedWatcher>,
     _subscriptions: Vec<Subscription>,
     terminal: Option<Entity<TerminalView>>,
-    show_terminal: bool,
+    /// The visible tab of the panel below the editor; `None` hides the panel.
+    bottom: Option<BottomTab>,
     diff: Option<Entity<EditorState>>,
     close_pending: bool,
     dev: Development,
-    companion: CompanionUi,
-    agent: AgentUi,
-    health: HealthUi,
+    chat: ChatUi,
+    settings: SettingsUi,
 }
 
 impl Workspace {
@@ -283,9 +230,8 @@ impl Workspace {
             )
         };
         let mut view = Self {
-            health: HealthUi::default(),
-            agent: AgentUi::new(window, cx),
-            companion: CompanionUi::new(window, cx),
+            chat: ChatUi::new(window, cx),
+            settings: SettingsUi::default(),
             dev: Development::new(window, cx),
             store,
             project: None,
@@ -317,7 +263,7 @@ impl Workspace {
             _watcher: None,
             _subscriptions: vec![appearance, subscription],
             terminal: None,
-            show_terminal: false,
+            bottom: None,
             diff: None,
             close_pending: false,
         };
@@ -330,7 +276,6 @@ impl Workspace {
                         .update_in(cx, |view, window, cx| {
                             view.checkpoint_async(cx);
                             view.development_tick(window, cx);
-                            view.companion_tick(window, cx);
                             let rescan = view.disk_events.swap(false, Ordering::Relaxed)
                                 || view.last_index.elapsed() > Duration::from_secs(30);
                             if !view.loading
@@ -375,8 +320,6 @@ impl Workspace {
         // that snapshot a fresh sequence so an older background write loses.
         if changed {
             self.generation = self.generation.saturating_add(1);
-            self.companion.code_epoch = self.companion.code_epoch.saturating_add(1);
-            self.companion.context = None;
             if let Some(manager) = &self.dev.language {
                 manager.invalidate();
             }
@@ -397,25 +340,7 @@ impl Workspace {
             sequence: self.generation,
         })
     }
-    fn working_snapshots(&mut self, cx: &App) -> Result<Vec<Document>> {
-        self.snapshot_live(cx);
-        let Some(project) = &self.project else {
-            return Ok(vec![]);
-        };
-        self.store
-            .lock()
-            .map_err(|_| anyhow!("Draft store unavailable"))?
-            .working_documents(
-                project.key(),
-                &self
-                    .tabs
-                    .iter()
-                    .map(|t| t.document.clone())
-                    .collect::<Vec<_>>(),
-            )
-    }
     fn flush(&mut self, cx: &App) -> Result<()> {
-        self.preserve_composer(cx)?;
         self.snapshot_live(cx);
         if let Some(state) = self.state() {
             self.store
@@ -434,13 +359,9 @@ impl Workspace {
         Ok(())
     }
     pub fn flush_for_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.companion.busy || self.agent.busy {
-            self.message("Companion work is active. Cancel it before closing; completed work will be retained.",true,cx);
-            return false;
-        }
-        if self.dev.check_cancel.is_some() {
+        if self.chat_turn_running() {
             self.message(
-                "A check is running. Cancel it in Checks before closing.",
+                "Claude is still working. Stop it (⌘.) before closing.",
                 true,
                 cx,
             );
@@ -527,13 +448,9 @@ impl Workspace {
     }
 
     fn open_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.companion.busy || self.agent.busy {
-            self.message("Cancel companion work before switching projects.", true, cx);
-            return;
-        }
-        if self.dev.check_cancel.is_some() {
+        if self.chat_turn_running() {
             self.message(
-                "Cancel the active check before switching projects.",
+                "Claude is still working. Stop it (⌘.) before switching projects.",
                 true,
                 cx,
             );
@@ -599,12 +516,10 @@ impl Workspace {
                         }
                         view.stop_language(cx);
                         view.tabs.clear(); view.active = None; view.diff = None; view.close_pending = false;
-                        view.terminal = None; view.show_terminal = false; view._watcher = None;
+                        view.terminal = None; view.bottom = None; view._watcher = None;
                         view.project = Some(loaded.project.clone()); view.index = loaded.index; view.show_recent = false;
-                        view.dev.reset(loaded.tools,loaded.tasks,loaded.checks,window,cx);
-                        view.companion.reset_project(loaded.guidance,loaded.model_runs,window,cx);
-                        view.restore_conversation(window,cx);
-                        view.agent=AgentUi::new(window,cx);view.agent.selected=loaded.agent_runs.first().map(|r|r.id.clone());view.agent.runs=loaded.agent_runs;view.agent.imports=loaded.imports;
+                        view.dev.reset(loaded.tools, window, cx);
+                        view.start_chat(window, cx);
                         let name = loaded.project.root.file_name().map(|name| name.to_string_lossy()).unwrap_or_else(|| "Project".into());
                         window.set_window_title(&format!("{name} — Tandem"));
                         view.font_size = loaded.state.font_size.clamp(10.0, 30.0); view.expanded.clear(); view.search_hits.clear();
@@ -653,7 +568,6 @@ impl Workspace {
                     view.diff = None;
                     view.changed(cx);
                     view.invalidate_language(cx);
-                    view.invalidate_companion(cx);
                 }
             }
         });
@@ -666,7 +580,7 @@ impl Workspace {
             _changes: changes,
         });
         self.active = Some(self.tabs.len() - 1);
-        self.invalidate_companion(cx);
+        self.settings.open = false;
         self.diff = None;
         self.close_pending = false;
         self.changed(cx);
@@ -750,6 +664,7 @@ impl Workspace {
     }
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = Some(index);
+        self.settings.open = false;
         self.invalidate_language(cx);
         self.diff = None;
         self.close_pending = false;
@@ -917,7 +832,6 @@ impl Workspace {
         }
         self.tabs.remove(index);
         self.invalidate_language(cx);
-        self.invalidate_companion(cx);
         self.active =
             (!self.tabs.is_empty()).then_some(index.min(self.tabs.len().saturating_sub(1)));
         self.close_pending = false;
@@ -936,6 +850,8 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // The comparison takes the editor area, where Settings would cover it.
+        self.settings.open = false;
         self.snapshot_live(cx);
         let Some(project) = self.project.clone() else {
             return;
@@ -1230,7 +1146,7 @@ impl Workspace {
                 }
             }
         }
-        self.show_terminal = !self.show_terminal;
+        self.bottom = next_bottom(self.bottom, BottomTab::Terminal);
         cx.notify();
     }
     fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -1277,7 +1193,7 @@ impl Workspace {
 
 fn load_project(path: PathBuf, store: Arc<Mutex<Store>>) -> Result<LoadedProject> {
     let project = Project::open(&path)?;
-    let (state, drafts, tools, tasks, checks, model_runs, guidance, agent_runs, imports) = {
+    let (state, drafts, tools) = {
         let store = store
             .lock()
             .map_err(|_| anyhow!("Recovery store unavailable"))?;
@@ -1287,16 +1203,6 @@ fn load_project(path: PathBuf, store: Arc<Mutex<Store>>) -> Result<LoadedProject
                 .unwrap_or_else(|| WorkspaceState::new(&project)),
             store.drafts(project.key())?,
             store.project_tools(project.key())?,
-            store.tasks(project.key())?,
-            store.checks(project.key())?,
-            store
-                .model_runs(project.key())?
-                .into_iter()
-                .filter(|r| r.request.action != CompanionAction::Delegate)
-                .collect(),
-            store.guidance()?,
-            store.agent_runs(project.key())?,
-            store.imports(project.key())?,
         )
     };
     let mut drafts: HashMap<_, _> = drafts
@@ -1337,11 +1243,5 @@ fn load_project(path: PathBuf, store: Arc<Mutex<Store>>) -> Result<LoadedProject
         documents,
         warnings,
         tools,
-        tasks,
-        checks,
-        model_runs,
-        guidance,
-        agent_runs,
-        imports,
     })
 }

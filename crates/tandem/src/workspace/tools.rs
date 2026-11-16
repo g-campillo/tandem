@@ -2,19 +2,8 @@ use super::*;
 
 use serde_json::{Value, json};
 use std::rc::Rc;
-use tandem_checks::{CheckEnvironment, Recipe};
 use tandem_lsp::{LanguageDocument, LanguageManager, LanguageStamp, ServerConfig};
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Panel {
-    Tools,
-    Problems,
-    Checks,
-    Task,
-    Companion,
-    Agent,
-    Health,
-}
 #[derive(Clone)]
 pub struct Navigation {
     pub path: String,
@@ -22,9 +11,6 @@ pub struct Navigation {
     pub label: String,
 }
 pub struct Development {
-    pub visible: bool,
-    pub panel: Panel,
-    pub scroll: ScrollHandle,
     pub settings: ProjectTools,
     pub rust: Option<RustTools>,
     pub python: Option<PythonTools>,
@@ -32,11 +18,8 @@ pub struct Development {
     pub python_path: Entity<InputState>,
     pub python_language: Option<LanguageManager>,
     pub python_health: String,
-    pub environment: Option<CheckEnvironment>,
-    pub recipes: Vec<Recipe>,
     pub discovering: bool,
     pub tool_error: String,
-    pub check_error: String,
     pub language: Option<LanguageManager>,
     pub health: String,
     pub last_edit: Instant,
@@ -46,20 +29,10 @@ pub struct Development {
     pub problems: Vec<Navigation>,
     pub navigation: Vec<Navigation>,
     pub navigation_stamp: Option<LanguageStamp>,
-    pub check_cancel: Option<Arc<AtomicBool>>,
-    pub check_updates: Option<Arc<Mutex<Option<CheckRecord>>>>,
-    pub checks: Vec<CheckRecord>,
-    pub selected_check: Option<String>,
-    pub pending_recipe: Option<String>,
-    pub tasks: Vec<TaskPlan>,
-    pub selected_task: Option<String>,
 }
 impl Development {
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
         Self {
-            visible: true,
-            panel: Panel::Companion,
-            scroll: ScrollHandle::default(),
             settings: ProjectTools::default(),
             rust: None,
             python: None,
@@ -68,11 +41,8 @@ impl Development {
                 .new(|cx| InputState::new(window, cx).placeholder("Optional absolute Python path")),
             python_language: None,
             python_health: "Python tools off".into(),
-            environment: None,
-            recipes: vec![],
             discovering: false,
             tool_error: String::new(),
-            check_error: String::new(),
             language: None,
             health: "Language tools off".into(),
             last_edit: Instant::now(),
@@ -82,31 +52,16 @@ impl Development {
             problems: vec![],
             navigation: vec![],
             navigation_stamp: None,
-            check_cancel: None,
-            check_updates: None,
-            checks: vec![],
-            selected_check: None,
-            pending_recipe: None,
-            tasks: vec![],
-            selected_task: None,
         }
     }
     pub fn reset(
         &mut self,
         settings: ProjectTools,
-        tasks: Vec<TaskPlan>,
-        checks: Vec<CheckRecord>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let visible = self.visible;
         *self = Self::new(window, cx);
-        self.visible = visible;
         self.settings = settings;
-        self.selected_task = tasks.first().map(|t| t.id.clone());
-        self.tasks = tasks;
-        self.selected_check = checks.first().map(|c| c.id.clone());
-        self.checks = checks;
     }
 }
 impl Drop for Development {
@@ -116,9 +71,6 @@ impl Drop for Development {
         }
         if let Some(language) = &self.python_language {
             language.stop();
-        }
-        if let Some(cancel) = &self.check_cancel {
-            cancel.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -131,44 +83,17 @@ impl Workspace {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let runs = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join("Library/Caches/Tandem/checks");
         self.dev.discovering = true;
         self.dev.tool_error.clear();
-        self.dev.check_error.clear();
         let epoch = self.epoch;
         let selected_python = self.dev.settings.python_interpreter.clone();
         let operation = cx.background_spawn(async move {
             let rust = RustTools::discover(&project.root);
             let python = PythonTools::discover(&project.root, selected_python.as_deref());
-            let checks = CheckEnvironment::discover_with_python(
-                &project.root,
-                runs,
-                selected_python.as_deref(),
-            )
-            .map(|env| {
-                let ids = if project.root.join("Cargo.toml").is_file() {
-                    vec![
-                        "cargo-check",
-                        "cargo-test",
-                        "python-unittest",
-                        "python-pytest",
-                        "python-benchmark",
-                    ]
-                } else {
-                    vec!["python-unittest", "python-pytest", "python-benchmark"]
-                };
-                (
-                    ids.into_iter()
-                        .filter_map(|id| env.recipe(id).ok())
-                        .collect::<Vec<_>>(),
-                    env,
-                )
-            });
-            (rust, python, checks)
+            (rust, python)
         });
         cx.spawn(async move |view, cx| {
-            let (rust, python, checks) = operation.await;
+            let (rust, python) = operation.await;
             let _ = view.update(cx, |view, cx| {
                 if view.epoch != epoch {
                     return;
@@ -179,16 +104,6 @@ impl Workspace {
                     Err(error) => {
                         view.dev.rust = None;
                         view.dev.tool_error = error.to_string();
-                    }
-                }
-                match checks {
-                    Ok((recipes, env)) => {
-                        view.dev.recipes = recipes;
-                        view.dev.environment = Some(env);
-                    }
-                    Err(error) => {
-                        view.dev.environment = None;
-                        view.dev.check_error = error.to_string();
                     }
                 }
                 match python {
@@ -488,16 +403,6 @@ impl Workspace {
         }
         if self.disk_events.load(Ordering::Relaxed) {
             self.invalidate_language(cx);
-            self.invalidate_companion(cx);
-        }
-        self.poll_agent(cx);
-        let update = self
-            .dev
-            .check_updates
-            .as_ref()
-            .and_then(|u| u.lock().unwrap().take());
-        if let Some(record) = update {
-            self.receive_check(record, cx);
         }
         self.sync_language(cx);
         for (language, manager) in [
@@ -566,8 +471,7 @@ impl Workspace {
         }
         self.sync_language(cx);
         let Some(manager) = self.language_manager().cloned() else {
-            self.dev.visible = true;
-            self.dev.panel = Panel::Tools;
+            self.open_settings(cx);
             self.message("Enable trusted tools for this file’s language.", false, cx);
             return;
         };
@@ -639,209 +543,11 @@ impl Workspace {
                 },
                 _=>{
                     view.dev.navigation=navigation_results(&reply.value,&relative,&view.project.as_ref().unwrap().root);
-                    view.dev.navigation_stamp=Some(reply.stamp);view.dev.visible=true;view.dev.panel=Panel::Problems;
+                    view.dev.navigation_stamp=Some(reply.stamp);view.bottom=Some(BottomTab::Problems);
                     view.message(format!("{} language navigation result(s)",view.dev.navigation.len()),false,cx);
                 }
             }Ok(())})();if let Err(e)=applied{view.message(e.to_string(),true,cx);}cx.notify();
         });}).detach();
-    }
-    pub(super) fn check_dispatch_available(&self) -> bool {
-        companion_state::check_dispatch_allowed(
-            self.loading,
-            self.dev.check_cancel.is_some(),
-            self.agent.busy,
-            self.companion.local_action.is_some(),
-        )
-    }
-    pub(super) fn prepare_recipe(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.check_dispatch_available() {
-            return;
-        }
-        let Some(recipe) = self.dev.recipes.iter().find(|r| r.id == id) else {
-            return;
-        };
-        if self.dev.settings.recipe_grants.get(id) == Some(&recipe.grant_fingerprint) {
-            self.start_check(id, cx);
-        } else {
-            self.dev.pending_recipe = Some(id.into());
-            cx.notify();
-        }
-    }
-    pub(super) fn authorize_recipe(&mut self, cx: &mut Context<Self>) {
-        if !self.check_dispatch_available() {
-            return;
-        }
-        let Some(id) = self.dev.pending_recipe.clone() else {
-            return;
-        };
-        let Some(recipe) = self.dev.recipes.iter().find(|r| r.id == id) else {
-            return;
-        };
-        let Some(project) = &self.project else {
-            return;
-        };
-        let mut settings = self.dev.settings.clone();
-        settings
-            .recipe_grants
-            .insert(id.clone(), recipe.grant_fingerprint.clone());
-        let result = self
-            .store
-            .lock()
-            .unwrap()
-            .save_project_tools(project.key(), &settings);
-        match result {
-            Ok(()) => {
-                self.dev.settings = settings;
-                self.dev.pending_recipe = None;
-                self.start_check(&id, cx);
-            }
-            Err(e) => self.message(e.to_string(), true, cx),
-        }
-    }
-    fn start_check(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.check_dispatch_available() {
-            return;
-        }
-        if let Err(e) = self.flush(cx) {
-            self.message(
-                format!("Check not started: drafts could not be preserved: {e}"),
-                true,
-                cx,
-            );
-            return;
-        }
-        self.snapshot_live(cx);
-        let overlays = match self.working_snapshots(cx) {
-            Ok(documents) => documents,
-            Err(e) => {
-                self.message(format!("Could not capture retained drafts: {e}"), true, cx);
-                return;
-            }
-        };
-        let (Some(project), Some(env), Some(recipe)) = (
-            self.project.clone(),
-            self.dev.environment.clone(),
-            self.dev.recipes.iter().find(|r| r.id == id).cloned(),
-        ) else {
-            return;
-        };
-        if self.dev.settings.recipe_grants.get(id) != Some(&recipe.grant_fingerprint) {
-            return;
-        }
-        let mut record = CheckRecord::pending(
-            project.key().into(),
-            recipe.id.clone(),
-            recipe.fingerprint.clone(),
-        );
-        let stored = (|| -> Result<()> {
-            let mut store = self.store.lock().unwrap();
-            // Re-read durable approval/action state at dispatch. save_check
-            // authenticates the origin again inside the journal transaction.
-            let session = self
-                .companion
-                .session
-                .as_ref()
-                .map(|s| {
-                    store
-                        .load_session(&s.id)?
-                        .context("Check's conversation is unavailable")
-                })
-                .transpose()?;
-            companion_state::bind_check_record(&mut record, session.as_ref(), self.active_task());
-            store.save_check(&record)
-        })();
-        if let Err(e) = stored {
-            self.message(format!("Check not started: {e}"), true, cx);
-            return;
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        let updates = Arc::new(Mutex::new(None));
-        self.dev.check_cancel = Some(cancel.clone());
-        self.dev.check_updates = Some(updates.clone());
-        self.dev.selected_check = Some(record.id.clone());
-        self.receive_check(record.clone(), cx);
-        let store = self.store.clone();
-        let epoch = self.epoch;
-        let operation = cx.background_spawn(async move {
-            tandem_checks::run_check(
-                &env,
-                &project,
-                &overlays,
-                &recipe,
-                record,
-                &cancel,
-                |record| {
-                    store
-                        .lock()
-                        .map_err(|_| anyhow!("Check journal unavailable"))?
-                        .save_check(record)?;
-                    *updates.lock().unwrap() = Some(record.clone());
-                    Ok(())
-                },
-            )
-        });
-        cx.spawn(async move |view, cx| {
-            let result = operation.await;
-            let _ = view.update(cx, |view, cx| {
-                if view.epoch != epoch {
-                    return;
-                }
-                view.dev.check_cancel = None;
-                view.dev.check_updates = None;
-                match result {
-                    Ok(record) => view.receive_check(record, cx),
-                    Err(e) => view.message(
-                        format!(
-                            "Could not persist final check result: {e}. Check outcome is uncertain."
-                        ),
-                        true,
-                        cx,
-                    ),
-                }
-                view.invalidate_check_review();
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-    fn receive_check(&mut self, record: CheckRecord, cx: &mut Context<Self>) {
-        self.invalidate_check_review();
-        if record.completed_at_ms.is_some() {
-            self.status = format!(
-                "{} · {:?}. {}",
-                record.recipe_id, record.status, record.detail
-            );
-            self.error = matches!(
-                record.status,
-                CheckStatus::Failed | CheckStatus::Unvalidated | CheckStatus::Interrupted
-            );
-        }
-        if let Some(existing) = self.dev.checks.iter_mut().find(|c| c.id == record.id) {
-            if existing.sequence <= record.sequence {
-                *existing = record;
-            }
-        } else {
-            self.dev.checks.insert(0, record);
-            self.dev.checks.truncate(30);
-        }
-        cx.notify();
-    }
-    /// All start/progress/terminal check paths reconcile against durable review
-    /// evidence. Clearing a busy flag never restores a cached review by itself.
-    pub(super) fn invalidate_check_review(&mut self) {
-        if let (Some(session), Some((review, _))) =
-            (&self.companion.session, &self.companion.review)
-            && companion_state::review_checks_current(
-                &self.store.lock().unwrap(),
-                session,
-                review,
-                self.companion.review_check_version.as_ref(),
-            )
-            .is_err()
-        {
-            self.companion.review_stale = true;
-        }
     }
 }
 

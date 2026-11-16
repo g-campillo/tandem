@@ -79,14 +79,14 @@ impl Workspace {
                 navigation_button(
                     compact_button(
                         Button::new("terminal"),
-                        if self.show_terminal {
+                        if self.bottom == Some(BottomTab::Terminal) {
                             "Hide Terminal"
                         } else {
                             "Terminal"
                         },
                     )
                     .icon(IconName::SquareTerminal),
-                    self.show_terminal,
+                    self.bottom == Some(BottomTab::Terminal),
                     cx,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal(cx))),
@@ -98,7 +98,9 @@ impl Workspace {
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.terminal = None;
-                            this.show_terminal = false;
+                            if this.bottom == Some(BottomTab::Terminal) {
+                                this.bottom = None;
+                            }
                             cx.notify();
                         })),
                 )
@@ -106,40 +108,31 @@ impl Workspace {
             .child(div().flex_1().min_w_0())
             .child(
                 navigation_button(
+                    compact_button(Button::new("toolbar-settings"), "Settings  ⌘,")
+                        .icon(IconName::Settings2),
+                    self.settings.open,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+            )
+            .child(
+                navigation_button(
                     compact_button(
-                        Button::new("development-tools"),
-                        if self.dev.visible {
-                            "Hide Companion"
+                        Button::new("toggle-chat"),
+                        if self.chat.visible {
+                            "Hide Chat"
                         } else {
-                            "Companion & Tools"
+                            "Chat"
                         },
                     )
                     .icon(IconName::PanelRight),
-                    self.dev.visible,
+                    self.chat.visible,
                     cx,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.dev.visible = !this.dev.visible;
+                    this.chat.visible = !this.chat.visible;
                     cx.notify();
                 })),
-            )
-            .child(
-                div()
-                    .id("mode")
-                    .role(Role::Label)
-                    .aria_label(if self.agent.busy {
-                        "Agent takeover uses an isolated copy. Live buffers remain yours."
-                    } else {
-                        "Manual editing. AI source changes are off."
-                    })
-                    .text_size(px(12.))
-                    .text_color(p.secondary_foreground)
-                    .px_2()
-                    .child(if self.agent.busy {
-                        "Agent · isolated copy"
-                    } else {
-                        "AI edits off"
-                    }),
             )
             .into_any_element()
     }
@@ -510,17 +503,21 @@ impl Workspace {
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
-                    .when_some(self.diff.clone(), |d, diff| {
-                        d.child(
-                            Editor::new(&diff)
-                                .readonly(true)
-                                .aria_label("Read-only changes preview")
-                                .h(relative(1.0))
-                                .size_full()
-                                .text_size(px(self.font_size)),
-                        )
-                    })
-                    .when(self.diff.is_none(), |d| {
+                    .when(self.settings.open, |d| d.child(self.settings_view(cx)))
+                    .when_some(
+                        self.diff.clone().filter(|_| !self.settings.open),
+                        |d, diff| {
+                            d.child(
+                                Editor::new(&diff)
+                                    .readonly(true)
+                                    .aria_label("Read-only changes preview")
+                                    .h(relative(1.0))
+                                    .size_full()
+                                    .text_size(px(self.font_size)),
+                            )
+                        },
+                    )
+                    .when(self.diff.is_none() && !self.settings.open, |d| {
                         d.when_some(editor, |d, editor| {
                             d.child(
                                 Editor::new(&editor)
@@ -534,18 +531,83 @@ impl Workspace {
                         .when(self.active.is_none(), |d| d.child(empty))
                     }),
             )
-            .when(self.show_terminal, |d| {
-                d.when_some(self.terminal.clone(), |d, terminal| d.child(terminal))
-            })
+            .children(self.bottom_panel(cx))
             .into_any_element()
+    }
+
+    /// The Terminal and Problems tabs below the editor, while one of them is shown.
+    fn bottom_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let bottom = self.bottom?;
+        let p = palette(cx.theme().mode);
+        let header = div()
+            .h_flex()
+            .flex_wrap()
+            .gap_1()
+            .p_1()
+            .bg(p.chrome())
+            .border_t_1()
+            .border_b_1()
+            .border_color(p.border)
+            .child(
+                navigation_button(
+                    compact_button(Button::new("bottom-terminal"), "Terminal")
+                        .icon(IconName::SquareTerminal),
+                    bottom == BottomTab::Terminal,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal(cx))),
+            )
+            .child(
+                navigation_button(
+                    compact_button(
+                        Button::new("bottom-problems"),
+                        format!("Problems ({})", self.dev.problems.len()),
+                    )
+                    .icon(IconName::TriangleAlert),
+                    bottom == BottomTab::Problems,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.bottom = next_bottom(this.bottom, BottomTab::Problems);
+                    cx.notify();
+                })),
+            );
+        let content = match bottom {
+            BottomTab::Terminal => self
+                .terminal
+                .clone()
+                .map(|terminal| terminal.into_any_element()),
+            BottomTab::Problems => Some(
+                div()
+                    .id("bottom-problems-content")
+                    .min_w_0()
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
+                    .p_3()
+                    .bg(p.surface)
+                    .child(self.problems_panel(cx))
+                    .into_any_element(),
+            ),
+        };
+        Some(
+            div()
+                .v_flex()
+                .flex_shrink_0()
+                .min_w_0()
+                .child(header)
+                .children(content)
+                .into_any_element(),
+        )
     }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx.theme().mode);
-        let geometry =
-            WorkspaceGeometry::for_width(f32::from(window.viewport_size().width), self.dev.visible);
+        let geometry = WorkspaceGeometry::for_width(
+            f32::from(window.viewport_size().width),
+            self.chat.visible,
+        );
         let backup = if self.project.is_none() {
             "Ready"
         } else if self.checkpointed >= self.generation {
@@ -553,7 +615,7 @@ impl Render for Workspace {
         } else {
             "Backing up drafts…"
         };
-        if self.show_terminal
+        if self.bottom == Some(BottomTab::Terminal)
             && let Some(terminal) = &self.terminal
         {
             let columns = (geometry.terminal_available_width() / 7.3).max(40.0) as u16;
@@ -612,14 +674,14 @@ impl Render for Workspace {
                     .min_h_0()
                     .child(self.sidebar_view(geometry.sidebar, cx))
                     .child(self.content_view(cx))
-                    .when(self.dev.visible, |d| {
+                    .when(self.chat.visible, |d| {
                         d.child(
                             div()
                                 .h_flex()
                                 .items_stretch()
                                 .min_h_0()
                                 .flex_shrink_0()
-                                .child(self.development_panel(geometry.utility, cx)),
+                                .child(self.chat_panel(geometry.utility, cx)),
                         )
                     }),
             )
