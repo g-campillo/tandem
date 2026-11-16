@@ -6437,10 +6437,12 @@ name = "tandem-claude"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "libc",
  "semver",
  "serde",
  "serde_json",
+ "tandem-core",
  "tempfile",
 ]
 

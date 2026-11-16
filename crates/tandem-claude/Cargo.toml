@@ -11,6 +11,8 @@ serde_json.workspace = true
 libc.workspace = true
 serde = { version = "1", features = ["derive"] }
 semver = "1"
+tandem-core = { path = "../tandem-core" }
+async-channel = "2"
 
 [dev-dependencies]
 tempfile = "3"
