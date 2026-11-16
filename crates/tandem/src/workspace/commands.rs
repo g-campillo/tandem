@@ -2,6 +2,7 @@
 mod editing;
 mod layout;
 mod palette;
+mod selection;
 
 use super::*;
 use gpui_kit::component::command::CommandState;
@@ -36,7 +37,14 @@ actions!(
         ToggleWordWrap,
         ToggleFullScreen,
         Unfold,
-        UnfoldAll
+        UnfoldAll,
+        ExpandSelection,
+        ShrinkSelection,
+        SelectLine,
+        AddCursorsToLineEnds,
+        AddNextOccurrence,
+        SelectAllOccurrences,
+        GoToBracket
     ]
 );
 
@@ -116,6 +124,10 @@ pub struct CommandsUi {
     pub(super) word_wrap: bool,
     /// The bottom panel's tab when ⌘J last hid it, so ⌘J reopens that tab.
     last_bottom: BottomTab,
+    /// The occurrences ⌘D has selected so far.
+    occurrences: Option<selection::OccurrenceSession>,
+    /// The selections Expand Selection has passed through.
+    expansion: Option<selection::ExpansionSession>,
 }
 
 impl Default for CommandsUi {
@@ -126,6 +138,8 @@ impl Default for CommandsUi {
             // The toolkit's default.
             word_wrap: true,
             last_bottom: BottomTab::Terminal,
+            occurrences: None,
+            expansion: None,
         }
     }
 }
@@ -269,6 +283,21 @@ fn selection() -> Vec<CommandSpec> {
     use gpui_kit::component::input::SelectAll;
     vec![
         spec::<SelectAll>("Select All", Selection, "⌘A", &[], Editor),
+        spec::<ExpandSelection>(
+            "Expand Selection",
+            Selection,
+            "⌃⇧→",
+            &["ctrl-shift-right", "ctrl-shift-cmd-right"],
+            Editor,
+        ),
+        spec::<ShrinkSelection>(
+            "Shrink Selection",
+            Selection,
+            "⌃⇧←",
+            &["ctrl-shift-left", "ctrl-shift-cmd-left"],
+            Editor,
+        ),
+        spec::<SelectLine>("Select Line", Selection, "", &[], Editor),
         spec::<CopyLineUp>("Copy Line Up", Selection, "⇧⌥↑", &["shift-alt-up"], Editor).separated(),
         spec::<CopyLineDown>(
             "Copy Line Down",
@@ -281,6 +310,21 @@ fn selection() -> Vec<CommandSpec> {
         spec::<MoveLineDown>("Move Line Down", Selection, "⌥↓", &["alt-down"], Editor),
         spec::<AddCursorAbove>("Add Cursor Above", Selection, "⌥⌘↑", &[], Editor).separated(),
         spec::<AddCursorBelow>("Add Cursor Below", Selection, "⌥⌘↓", &[], Editor),
+        spec::<AddCursorsToLineEnds>(
+            "Add Cursors to Line Ends",
+            Selection,
+            "⇧⌥I",
+            &["shift-alt-i"],
+            Editor,
+        ),
+        spec::<AddNextOccurrence>("Add Next Occurrence", Selection, "⌘D", &["cmd-d"], Editor),
+        spec::<SelectAllOccurrences>(
+            "Select All Occurrences",
+            Selection,
+            "⇧⌘L",
+            &["cmd-shift-l"],
+            Editor,
+        ),
     ]
 }
 
@@ -322,14 +366,13 @@ fn view() -> Vec<CommandSpec> {
 }
 
 fn go() -> Vec<CommandSpec> {
+    use KeyScope::Editor;
+    use MenuId::Go;
     use gpui_kit::component::input::GoToDefinition;
-    vec![spec::<GoToDefinition>(
-        "Go to Definition",
-        MenuId::Go,
-        "F12",
-        &["f12"],
-        KeyScope::Editor,
-    )]
+    vec![
+        spec::<GoToDefinition>("Go to Definition", Go, "F12", &["f12"], Editor),
+        spec::<GoToBracket>("Go to Bracket", Go, "⇧⌘\\", &["cmd-|"], Editor),
+    ]
 }
 
 fn code() -> Vec<CommandSpec> {
@@ -467,6 +510,15 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace
     route::<ToggleFullScreen>(cx, window, &view, |_, w, _| w.toggle_fullscreen());
     route::<Unfold>(cx, window, &view, |v, w, c| v.unfold(w, c));
     route::<UnfoldAll>(cx, window, &view, |v, w, c| v.unfold_all(w, c));
+    route::<ExpandSelection>(cx, window, &view, |v, w, c| v.expand_selection(w, c));
+    route::<ShrinkSelection>(cx, window, &view, |v, w, c| v.shrink_selection(w, c));
+    route::<SelectLine>(cx, window, &view, |v, w, c| v.select_line(w, c));
+    route::<AddCursorsToLineEnds>(cx, window, &view, |v, w, c| {
+        v.add_cursors_to_line_ends(w, c)
+    });
+    route::<AddNextOccurrence>(cx, window, &view, |v, w, c| v.add_next_occurrence(w, c));
+    route::<SelectAllOccurrences>(cx, window, &view, |v, w, c| v.select_all_occurrences(w, c));
+    route::<GoToBracket>(cx, window, &view, |v, w, c| v.go_to_bracket(w, c));
 }
 
 /// The pattern of `install_actions`: dispatch runs while GPUI has borrowed the window, so
@@ -714,12 +766,18 @@ mod tests {
             items("Selection"),
             [
                 "Select All",
+                "Expand Selection",
+                "Shrink Selection",
+                "Select Line",
                 "Copy Line Up",
                 "Copy Line Down",
                 "Move Line Up",
                 "Move Line Down",
                 "Add Cursor Above",
-                "Add Cursor Below"
+                "Add Cursor Below",
+                "Add Cursors to Line Ends",
+                "Add Next Occurrence",
+                "Select All Occurrences"
             ]
         );
         let edit = items("Edit");
@@ -755,6 +813,28 @@ mod tests {
                 "{title} is not in View"
             );
         }
+    }
+
+    #[test]
+    fn selection_commands_are_in_selection_and_go() {
+        let menus = extend_menus(Vec::new());
+        let items = |title: &str| {
+            let menu = menus
+                .iter()
+                .find(|menu| menu.name.as_ref() == title)
+                .unwrap_or_else(|| panic!("there is no {title} menu"));
+            action_names(&menu.items)
+        };
+        assert!(
+            items("Go").iter().any(|name| name == "Go to Bracket"),
+            "Go to Bracket is not in Go"
+        );
+        assert!(
+            items("Selection")
+                .iter()
+                .any(|name| name == "Select All Occurrences"),
+            "Select All Occurrences is not in Selection"
+        );
     }
 
     #[test]
