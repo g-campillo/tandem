@@ -6,7 +6,7 @@ use tandem_core::chat::{
 
 /// Appended to Claude Code's system prompt for every session.
 pub const SYSTEM_APPEND: &str = "\
-You are the companion inside Tandem, a code editor for learning by building. The user is an experienced engineer, strongest in Python, then Java and JavaScript, who is learning Rust, Go and TypeScript. Never guess how much help they need: Tandem names the help level to use.
+You are the companion inside Tandem, a code editor for learning by building. The user is an experienced engineer who is learning Rust, Go and TypeScript. Never guess how much help they need: Tandem names the help level to use.
 
 How a task works
 1. Discuss. The user describes a feature. Research before you answer: read the project's code, search the web when facts may have changed, and ask clarifying questions in plain chat. Do not edit files.
@@ -15,13 +15,17 @@ How a task works
 
 Rules that always apply
 - Give the reason for everything. Write \"do X, because Y\", never only \"do X\".
+- Explain every language on its own terms. Never compare code to Python or any other programming language, and never explain a construct by what it would be in another language, unless the user asks for that comparison.
 - Follow the help level Tandem names for the step.
-  beginner: give the complete code for the step and explain every keyword, construct and function call in it; explain terminal commands token by token.
-  intermediate: describe the change, give pseudocode rather than the finished code, and explain the parts that are new or unusual in this language.
-  expert: a short description and the reason.
+  beginner: give the complete code for the step and explain every keyword, construct and function call in it; explain terminal commands token by token. Copy each explained part exactly from the code or command, because the user reads an explanation by pointing at that part. For an edit, give the exact line where the change goes, because Tandem takes the user there.
+  intermediate: describe the change, say in words where it goes, give pseudocode rather than the finished code, and explain the parts that are new or unusual in this language.
+  expert: a short description, where the change goes in words, and the reason.
 - Use Tandem's tools for plans, step guidance and verdicts. Use plain chat for conversation and questions.
 - Change project files only while Tandem says a takeover is active. At every other time explain, because the user writes the code.
 - Lines that begin with [Tandem] come from the editor, not from the user.";
+
+/// Repeated in every turn that asks Claude to explain code.
+const OWN_TERMS: &str = "Explain the code on its own terms: do not compare it to Python or any other programming language unless the user asked for that.";
 
 const RECAP_MESSAGES: usize = 6;
 const RECAP_MESSAGE_CHARS: usize = 500;
@@ -50,20 +54,23 @@ pub fn chat(task: &ChatTask, items: &[ChatItem], text: &str, recap: bool) -> Str
 pub fn guidance(plan: &Plan, step: usize, level: HelpLevel) -> String {
     let active = &plan.steps[step];
     let rule = match (level, active.kind) {
-        (HelpLevel::Beginner, StepKind::RunCommand) => {
-            "Put the exact command in command and add a breakdown entry for every token of it."
-                .to_owned()
-        }
-        (HelpLevel::Beginner, _) => "Put the complete code for this step in code, set anchor to one exact existing line next to where it goes (leave it out for a new file), and add a breakdown entry for every keyword, construct and function call in that code.".to_owned(),
-        (HelpLevel::Intermediate, StepKind::RunCommand) => "Put the exact command in command and explain in breakdown only the parts that are new or unusual.".to_owned(),
-        (HelpLevel::Intermediate, _) => format!(
+        (HelpLevel::Beginner, StepKind::RunCommand) => "Put the exact command in command and add a breakdown entry for every token of it, each part copied exactly from the command.".to_owned(),
+        (HelpLevel::Beginner, StepKind::EditFile) => "Put the complete code for this step in code and add a breakdown entry for every keyword, construct and function call in that code, each part copied exactly from the code. Set location to where the change goes in the file as it is now: action (insert, update or remove), line (the number of the existing line the new code goes next to, or of the first line to replace or remove), anchor (the exact text of that line), end_line (the last line to replace or remove, when there are several) and placement (before or after the anchor line, for an insert; after is the default). Read the file first, so that the line number and the anchor are exact.".to_owned(),
+        (HelpLevel::Beginner, StepKind::CreateFile) => "Put the complete code for this step in code and add a breakdown entry for every keyword, construct and function call in that code, each part copied exactly from the code. Leave location out, because the file is new.".to_owned(),
+        (HelpLevel::Intermediate, StepKind::RunCommand) => "Put the exact command in command and explain in breakdown only the parts that are new or unusual, each part copied exactly from the command.".to_owned(),
+        (HelpLevel::Intermediate, StepKind::EditFile) => format!(
+            "Describe the change, say in where, in words, where it goes (for example: in src/cli.rs, inside struct Args, after the verbose field), put pseudocode in pseudocode and leave code empty, and add breakdown entries only for what is new or unusual in {}.",
+            active.language
+        ),
+        (HelpLevel::Intermediate, StepKind::CreateFile) => format!(
             "Describe the change, put pseudocode in pseudocode and leave code empty, and add breakdown entries only for what is new or unusual in {}.",
             active.language
         ),
         (HelpLevel::Expert, StepKind::RunCommand) => {
             "Put the exact command in command; summary and why only.".to_owned()
         }
-        (HelpLevel::Expert, _) => {
+        (HelpLevel::Expert, StepKind::EditFile) => "Keep it short: summary, why and where (in words, where the change goes); leave code, pseudocode and breakdown empty.".to_owned(),
+        (HelpLevel::Expert, StepKind::CreateFile) => {
             "Keep it short: summary and why only; leave code, pseudocode and breakdown empty."
                 .to_owned()
         }
@@ -82,7 +89,7 @@ pub fn guidance(plan: &Plan, step: usize, level: HelpLevel) -> String {
             level.id()
         ),
         format!(
-            "Call show_step for exactly this step. {rule} Do not edit files and do not move to another step. After the tool call, reply with one short sentence."
+            "Call show_step for exactly this step. {rule} {OWN_TERMS} Do not edit files and do not move to another step. After the tool call, reply with one short sentence."
         ),
     ]
     .join("\n")
@@ -108,7 +115,7 @@ pub fn check(plan: &Plan, step: usize, level: HelpLevel, unsaved: &[String]) -> 
             unsaved.join(", ")
         ));
     }
-    lines.push("Inspect the user's work for this step only. You may run build, test or lint commands. Then call report_check with scope \"step\": verdict \"pass\" when the step is done correctly, or \"needs_changes\" with what to fix and why, written for the help level. Do not edit files.".to_owned());
+    lines.push(format!("Inspect the user's work for this step only. You may run build, test or lint commands. Then call report_check with scope \"step\": verdict \"pass\" when the step is done correctly, or \"needs_changes\" with what to fix and why, written for the help level. {OWN_TERMS} Do not edit files."));
     lines.join("\n")
 }
 
@@ -335,6 +342,37 @@ mod tests {
         assert!(SYSTEM_APPEND.starts_with("You are the companion inside Tandem,"));
         assert!(SYSTEM_APPEND.contains("\n\nHow a task works\n1. Discuss."));
         assert!(SYSTEM_APPEND.ends_with("come from the editor, not from the user."));
+        assert!(
+            SYSTEM_APPEND.contains("Copy each explained part exactly from the code or command")
+        );
+        assert!(SYSTEM_APPEND.contains("For an edit, give the exact line where the change goes"));
+        assert!(SYSTEM_APPEND.contains("say in words where it goes"));
+    }
+
+    #[test]
+    fn the_system_append_forbids_comparisons_with_other_languages() {
+        assert!(
+            SYSTEM_APPEND
+                .contains("Never compare code to Python or any other programming language")
+        );
+        assert!(SYSTEM_APPEND.contains("unless the user asks for that comparison"));
+        assert!(!SYSTEM_APPEND.contains("strongest in"));
+    }
+
+    #[test]
+    fn guidance_and_check_prompts_repeat_the_own_terms_rule() {
+        let rule = "do not compare it to Python or any other programming language unless the user asked for that";
+        let plan = guided_plan();
+        for level in HelpLevel::ALL {
+            for index in 0..3 {
+                let prompt = guidance(&plan, index, level);
+                assert!(prompt.contains(rule), "{level:?} {index}: {prompt}");
+            }
+        }
+        assert!(check(&plan, 0, HelpLevel::Beginner, &[]).contains(rule));
+        assert!(!final_check(&plan).contains("Python"));
+        assert!(!takeover_step(&plan, 0).contains("Python"));
+        assert!(!takeover_rest(&plan, 0).contains("Python"));
     }
 
     #[test]
@@ -521,7 +559,7 @@ mod tests {
              Step: Edit src/cli.rs\n\
              Summary: Add `json` to Args\n\
              Language: rust. Help level: beginner.\n\
-             Call show_step for exactly this step. Put the complete code for this step in code, set anchor to one exact existing line next to where it goes (leave it out for a new file), and add a breakdown entry for every keyword, construct and function call in that code. Do not edit files and do not move to another step. After the tool call, reply with one short sentence."
+             Call show_step for exactly this step. Put the complete code for this step in code and add a breakdown entry for every keyword, construct and function call in that code, each part copied exactly from the code. Set location to where the change goes in the file as it is now: action (insert, update or remove), line (the number of the existing line the new code goes next to, or of the first line to replace or remove), anchor (the exact text of that line), end_line (the last line to replace or remove, when there are several) and placement (before or after the anchor line, for an insert; after is the default). Read the file first, so that the line number and the anchor are exact. Explain the code on its own terms: do not compare it to Python or any other programming language unless the user asked for that. Do not edit files and do not move to another step. After the tool call, reply with one short sentence."
         );
     }
 
@@ -532,22 +570,22 @@ mod tests {
             (
                 0,
                 HelpLevel::Intermediate,
-                "Describe the change, put pseudocode in pseudocode and leave code empty, and add breakdown entries only for what is new or unusual in rust.",
+                "Describe the change, say in where, in words, where it goes (for example: in src/cli.rs, inside struct Args, after the verbose field), put pseudocode in pseudocode and leave code empty, and add breakdown entries only for what is new or unusual in rust.",
             ),
             (
                 0,
                 HelpLevel::Expert,
-                "Keep it short: summary and why only; leave code, pseudocode and breakdown empty.",
+                "Keep it short: summary, why and where (in words, where the change goes); leave code, pseudocode and breakdown empty.",
             ),
             (
                 1,
                 HelpLevel::Beginner,
-                "Put the exact command in command and add a breakdown entry for every token of it.",
+                "Put the exact command in command and add a breakdown entry for every token of it, each part copied exactly from the command.",
             ),
             (
                 1,
                 HelpLevel::Intermediate,
-                "Put the exact command in command and explain in breakdown only the parts that are new or unusual.",
+                "Put the exact command in command and explain in breakdown only the parts that are new or unusual, each part copied exactly from the command.",
             ),
             (
                 1,
@@ -557,7 +595,17 @@ mod tests {
             (
                 2,
                 HelpLevel::Beginner,
-                "Put the complete code for this step in code, set anchor to one exact existing line",
+                "Put the complete code for this step in code and add a breakdown entry for every keyword, construct and function call in that code, each part copied exactly from the code. Leave location out, because the file is new.",
+            ),
+            (
+                2,
+                HelpLevel::Intermediate,
+                "Describe the change, put pseudocode in pseudocode and leave code empty, and add breakdown entries only for what is new or unusual in rust.",
+            ),
+            (
+                2,
+                HelpLevel::Expert,
+                "Keep it short: summary and why only; leave code, pseudocode and breakdown empty.",
             ),
         ];
         for (index, level, rule) in cases {
@@ -589,7 +637,7 @@ mod tests {
             check(&plan, 0, HelpLevel::Intermediate, &[]),
             "[Tandem] The user clicked \"Check my work\" for step 1 of 3: Edit src/cli.rs. Add `json` to Args\n\
              Help level: intermediate.\n\
-             Inspect the user's work for this step only. You may run build, test or lint commands. Then call report_check with scope \"step\": verdict \"pass\" when the step is done correctly, or \"needs_changes\" with what to fix and why, written for the help level. Do not edit files."
+             Inspect the user's work for this step only. You may run build, test or lint commands. Then call report_check with scope \"step\": verdict \"pass\" when the step is done correctly, or \"needs_changes\" with what to fix and why, written for the help level. Explain the code on its own terms: do not compare it to Python or any other programming language unless the user asked for that. Do not edit files."
         );
         let unsaved = ["src/cli.rs".to_owned(), "src/main.rs".to_owned()];
         assert_eq!(
@@ -597,7 +645,7 @@ mod tests {
             "[Tandem] The user clicked \"Check my work\" for step 2 of 3: Run cargo add serde. Add serde\n\
              Help level: beginner.\n\
              These files have unsaved changes in the editor: src/cli.rs, src/main.rs. Read them with read_editor_buffer, because the Read tool shows the older saved version. Commands you run see only saved files; say so if it matters.\n\
-             Inspect the user's work for this step only. You may run build, test or lint commands. Then call report_check with scope \"step\": verdict \"pass\" when the step is done correctly, or \"needs_changes\" with what to fix and why, written for the help level. Do not edit files."
+             Inspect the user's work for this step only. You may run build, test or lint commands. Then call report_check with scope \"step\": verdict \"pass\" when the step is done correctly, or \"needs_changes\" with what to fix and why, written for the help level. Explain the code on its own terms: do not compare it to Python or any other programming language unless the user asked for that. Do not edit files."
         );
     }
 

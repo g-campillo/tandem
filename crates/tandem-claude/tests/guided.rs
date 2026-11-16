@@ -11,8 +11,8 @@ use support::{
 use tandem_claude::view::{final_card, step_card};
 use tandem_claude::{BufferText, ChatState, Command, TurnKind};
 use tandem_core::chat::{
-    BreakdownItem, ChatTask, CheckResult, Finding, Guidance, HelpLevel, ItemKind, Mode, Phase,
-    Plan, PlanStep, StepKind,
+    BreakdownItem, ChatTask, CheckResult, EditAction, EditLocation, Finding, Guidance, HelpLevel,
+    ItemKind, Mode, Phase, Placement, Plan, PlanStep, StepKind,
 };
 
 const GUIDANCE_SHOWN: &str = "Guidance is on screen. Reply with one short sentence.";
@@ -25,6 +25,9 @@ const NO_GUIDANCE: &str =
     "Claude did not show guidance for this step. Use \"Guide me through this step\" to try again.";
 const NO_VERDICT: &str = "Claude did not give a verdict. Use \"Check my work\" again.";
 const TASK_COMPLETE: &str = "Task complete.";
+/// `src/cli.rs` before step 1, 7 lines: line 4 is `pub struct Args {`, line 6
+/// `    pub name: String,`.
+const CLI: &str = "use clap::Parser;\n\n#[derive(Parser)]\npub struct Args {\n    /// The name to greet.\n    pub name: String,\n}\n";
 
 fn step(kind: StepKind, target: &str, summary: &str) -> PlanStep {
     PlanStep {
@@ -84,7 +87,7 @@ fn beginner_input() -> Value {
         "summary": "Add a `json` flag field to the Args struct.",
         "why": "clap turns each field of the struct into a command-line flag.",
         "code": "    #[arg(long)]\n    json: bool,",
-        "anchor": "pub struct Args {",
+        "location": {"action": "insert", "line": 4, "anchor": "pub struct Args {"},
         "breakdown": [
             {"part": "#[arg(long)]", "explanation": "Makes the field a --json flag."},
             {"part": "bool", "explanation": "A flag is either set or not."}
@@ -112,7 +115,15 @@ fn beginner_guidance() -> Guidance {
             },
         ],
         path: Some("src/cli.rs".into()),
-        anchor: Some("pub struct Args {".into()),
+        anchor: None,
+        where_: None,
+        location: Some(EditLocation {
+            action: EditAction::Insert,
+            line: 4,
+            end_line: None,
+            anchor: "pub struct Args {".into(),
+            placement: Placement::After,
+        }),
     }
 }
 
@@ -122,6 +133,7 @@ fn intermediate_input() -> Value {
         "step": 1,
         "summary": "Add a boolean flag to Args.",
         "why": "clap derives flags from the struct's fields.",
+        "where": "in src/cli.rs, inside struct Args, after the last field",
         "pseudocode": "in Args: add a long flag named json of type bool",
         "breakdown": [{"part": "#[arg(long)]", "explanation": "An attribute, new in Rust."}]
     })
@@ -381,6 +393,177 @@ fn intermediate_guidance_with_finished_code_is_refused() {
     let guidance = state.guidance.clone().expect("guidance");
     assert_eq!(guidance.level, HelpLevel::Intermediate);
     assert_eq!(guidance.code, None);
+    let stored = harness.with_store(|store| {
+        store
+            .chat_guidance(&task.id, 0, HelpLevel::Intermediate)
+            .unwrap()
+    });
+    assert_eq!(stored, Some(guidance));
+    harness.finish();
+}
+
+/// Writes `src/cli.rs` of the plan's first step into the harness project.
+fn write_cli(harness: &Harness) {
+    std::fs::write(harness.project.join("src/cli.rs"), CLI).expect("src/cli.rs");
+}
+
+#[test]
+fn a_beginner_location_is_checked_against_the_file() {
+    let mut harness = Harness::new();
+    let task = store_task(&harness, Phase::Plan, 0);
+    write_cli(&harness);
+    let mut wrong_anchor = beginner_input();
+    wrong_anchor["location"] = json!({"action": "insert", "line": 6, "anchor": "pub age: u8,"});
+    let mut no_location = beginner_input();
+    no_location.as_object_mut().unwrap().remove("location");
+    let mut moved = beginner_input();
+    moved["location"] = json!({"action": "insert", "line": 2, "anchor": "pub struct Args {"});
+    harness.start(
+        &[
+            preamble(),
+            turn_ok_with(json!({"policy": "guided"})),
+            vec![
+                show_step("r1", wrong_anchor),
+                answered("r1", false),
+                show_step("r2", no_location),
+                answered("r2", false),
+                show_step("r3", moved),
+                answered("r3", true),
+                assistant("Step 1 is on screen."),
+                turn_finished(3, "completed"),
+            ],
+            closing(),
+        ]
+        .concat(),
+    );
+    harness.wait_ready();
+    harness.send(Command::ChooseGuided);
+    let state = finished_with(&harness, "Step 1 is on screen.");
+
+    let wrong_anchor = response_text(&harness, "r1");
+    assert!(
+        wrong_anchor.contains("location.anchor is not a line of src/cli.rs"),
+        "{wrong_anchor}"
+    );
+    assert!(
+        wrong_anchor.contains("Line 6 is `pub name: String,`."),
+        "{wrong_anchor}"
+    );
+    let no_location = response_text(&harness, "r2");
+    assert!(
+        no_location.starts_with("At the beginner level, say exactly where the change goes"),
+        "{no_location}"
+    );
+    assert_eq!(response_text(&harness, "r3"), GUIDANCE_SHOWN);
+    let shown = state.guidance.clone().expect("guidance");
+    assert_eq!(
+        shown.location.as_ref().map(|location| location.line),
+        Some(4)
+    );
+    assert_eq!(shown, beginner_guidance());
+    let stored = harness.with_store(|store| {
+        store
+            .chat_guidance(&task.id, 0, HelpLevel::Beginner)
+            .unwrap()
+    });
+    assert_eq!(stored, Some(shown));
+    harness.finish();
+}
+
+#[test]
+fn a_beginner_location_is_checked_against_unsaved_changes() {
+    let mut harness = Harness::new();
+    let task = store_task(&harness, Phase::Plan, 0);
+    write_cli(&harness);
+    harness.buffers.lock().unwrap().insert(
+        "src/cli.rs".into(),
+        BufferText {
+            text: format!("// new first line\n{CLI}"),
+            dirty: true,
+        },
+    );
+    let mut input = beginner_input();
+    // Line 7 of the buffer; on disk that text is line 6.
+    input["location"] = json!({"action": "insert", "line": 7, "anchor": "pub name: String,"});
+    harness.start(
+        &[
+            preamble(),
+            turn_ok_with(json!({"policy": "guided"})),
+            vec![
+                show_step("r1", input),
+                answered("r1", true),
+                assistant("Step 1 is on screen."),
+                turn_finished(3, "completed"),
+            ],
+            closing(),
+        ]
+        .concat(),
+    );
+    harness.wait_ready();
+    harness.send(Command::ChooseGuided);
+    let state = finished_with(&harness, "Step 1 is on screen.");
+
+    assert_eq!(response_text(&harness, "r1"), GUIDANCE_SHOWN);
+    let location = state
+        .guidance
+        .as_ref()
+        .and_then(|guidance| guidance.location.clone())
+        .expect("a location");
+    assert_eq!(location.line, 7);
+    assert_eq!(location.anchor, "pub name: String,");
+    let stored = harness.with_store(|store| {
+        store
+            .chat_guidance(&task.id, 0, HelpLevel::Beginner)
+            .unwrap()
+    });
+    assert_eq!(stored, state.guidance);
+    harness.finish();
+}
+
+#[test]
+fn an_intermediate_edit_needs_where_and_keeps_no_location() {
+    let mut harness = Harness::new();
+    let task = store_task(&harness, Phase::Plan, 0);
+    set_level(&harness, "rust", HelpLevel::Intermediate);
+    write_cli(&harness);
+    let mut no_where = intermediate_input();
+    no_where.as_object_mut().unwrap().remove("where");
+    let mut with_location = intermediate_input();
+    with_location["location"] =
+        json!({"action": "insert", "line": 4, "anchor": "pub struct Args {"});
+    harness.start(
+        &[
+            preamble(),
+            turn_ok_with(json!({"policy": "guided"})),
+            vec![
+                show_step("r1", no_where),
+                answered("r1", false),
+                show_step("r2", with_location),
+                answered("r2", true),
+                assistant("Pseudocode is on screen."),
+                turn_finished(3, "completed"),
+            ],
+            closing(),
+        ]
+        .concat(),
+    );
+    harness.wait_ready();
+    harness.send(Command::ChooseGuided);
+    let state = finished_with(&harness, "Pseudocode is on screen.");
+
+    let refused = response_text(&harness, "r1");
+    assert!(
+        refused.starts_with("Say where the change goes in `where`, in words"),
+        "{refused}"
+    );
+    assert_eq!(response_text(&harness, "r2"), GUIDANCE_SHOWN);
+    let guidance = state.guidance.clone().expect("guidance");
+    assert_eq!(guidance.level, HelpLevel::Intermediate);
+    assert_eq!(
+        guidance.where_.as_deref(),
+        Some("in src/cli.rs, inside struct Args, after the last field")
+    );
+    assert_eq!(guidance.location, None);
     let stored = harness.with_store(|store| {
         store
             .chat_guidance(&task.id, 0, HelpLevel::Intermediate)

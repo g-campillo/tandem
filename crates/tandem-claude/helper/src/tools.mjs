@@ -34,20 +34,42 @@ const TOOLS = [
       step: z.number().int().min(1),
       summary: z.string().min(1).max(2000),
       why: z.string().min(1).max(4000),
+      where: z
+        .string()
+        .max(500)
+        .optional()
+        .describe(
+          'Where the change goes, in words, for example: in src/cli.rs, inside struct Args, after the verbose field. Needed for an edit at the intermediate and expert levels.',
+        ),
       code: z.string().max(20000).optional(),
       pseudocode: z.string().max(10000).optional(),
       command: z.string().max(2000).optional(),
       breakdown: z
         .array(
           z.object({
-            part: z.string().min(1).max(300),
+            part: z.string().min(1).max(300).describe('Copied exactly from the code or command.'),
             explanation: z.string().min(1).max(2000),
           }),
         )
         .max(60)
         .optional(),
       path: z.string().max(500).optional(),
-      anchor: z.string().max(500).optional(),
+      location: z
+        .object({
+          action: z.enum(['insert', 'update', 'remove']),
+          line: z
+            .number()
+            .int()
+            .min(1)
+            .describe(
+              '1-based line number in the file as it is now: the line the new code goes next to, or the first line to replace or remove.',
+            ),
+          end_line: z.number().int().min(1).optional().describe('The last line to replace or remove, when there are several.'),
+          anchor: z.string().min(1).max(500).describe('The exact text of the line at `line`.'),
+          placement: z.enum(['before', 'after']).optional().describe('Insert only: before or after the anchor line. The default is after.'),
+        })
+        .optional()
+        .describe('Beginner edits of an existing file only: exactly where the change goes.'),
     },
   },
   {

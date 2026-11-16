@@ -4,8 +4,7 @@ use super::chat_logic::{check_title, finding_label};
 use super::panels::code_note;
 use super::*;
 use crate::appearance::{
-    Palette, compact_button, palette, panel_code, panel_error, path_button, solid_section,
-    wrapping_button,
+    Palette, compact_button, palette, panel_error, path_button, solid_section, wrapping_button,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Textarea;
@@ -15,7 +14,8 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 use tandem_claude::prompts::kind_label;
 use tandem_claude::view::{
-    self, ChangeRow, ChangesCard, ComposerMode, ConnectionNotice, StepCard, TrailState,
+    self, BlockKind, ChangeRow, ChangesCard, ComposerMode, ConnectionNotice, StepBlock, StepCard,
+    TrailState,
 };
 use tandem_claude::{ChatState, Connection, TakeoverRequest};
 use tandem_core::chat::{
@@ -61,23 +61,6 @@ fn decide(keep: bool, change_set: &str, path: Option<String>) -> Command {
 fn copy_button(id: impl Into<ElementId>, text: String) -> Button {
     compact_button(Button::new(id), "Copy")
         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
-}
-
-/// Code shown exactly as given, one line per line, scrolling sideways when it is wide.
-fn code_block(id: impl Into<ElementId>, text: String, cx: &App) -> Stateful<Div> {
-    panel_code(div().id(id), cx)
-        .p_2()
-        .rounded(px(6.))
-        .h_flex()
-        .overflow_x_scroll()
-        .child(
-            div()
-                .flex_none()
-                .w_auto()
-                .min_w_full()
-                .whitespace_nowrap()
-                .child(text),
-        )
 }
 
 /// The text of an optional guidance field, when it has any.
@@ -788,12 +771,15 @@ impl Workspace {
     /// The card pinned above the composer during Build: the open step, or the final check
     /// once every step is finished.
     fn build_card(&self, state: &ChatState, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let card = match view::step_card(state) {
-            Some(card) => self.step_card(card, cx),
+        let (card, hover) = match view::step_card(state) {
+            Some(card) => {
+                let hover = self.code_hover_card(&card, cx);
+                (self.step_card(card, cx), hover)
+            }
             None if view::final_card(state) => {
                 let can_act =
                     matches!(state.connection, Connection::Ready { .. }) && state.turn.is_none();
-                self.final_card(can_act, cx)
+                (self.final_card(can_act, cx), None)
             }
             None => return None,
         };
@@ -810,6 +796,7 @@ impl Workspace {
                 .border_t_1()
                 .border_color(p.border)
                 .child(card)
+                .children(hover)
                 .into_any_element(),
         )
     }
@@ -826,7 +813,7 @@ impl Workspace {
             card.target
         );
         let body = match &card.guidance {
-            Some(guidance) => self.guidance_view(index, guidance, cx),
+            Some(guidance) => self.guidance_view(&card, guidance, cx),
             None => self.unguided_view(&card, cx),
         };
         solid_section(div().id(("chat-step-card", index)), cx)
@@ -899,29 +886,51 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The step's guidance: summary, why, then code, pseudocode or the command, and the
-    /// breakdown of its parts.
-    fn guidance_view(&self, index: usize, guidance: &Guidance, cx: &mut Context<Self>) -> Div {
+    /// The step's guidance: summary, why, then code, pseudocode or the command, whose parts
+    /// are explained when the user points at them, and the explanations of the parts that
+    /// are in none of them.
+    fn guidance_view(&self, card: &StepCard, guidance: &Guidance, cx: &mut Context<Self>) -> Div {
+        let index = card.index;
+        let blocks = view::step_blocks(guidance, &card.language);
         let p = palette(cx.theme().mode);
-        let breakdown = guidance.breakdown.iter().map(|item| {
+        let unmatched = (!blocks.unmatched.is_empty()).then(|| {
+            let rows = blocks.unmatched.iter().map(|item| {
+                div()
+                    .h_flex()
+                    .items_start()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(relative(0.4))
+                            .px_1()
+                            .rounded(px(4.))
+                            .bg(p.content)
+                            .font_family("Menlo")
+                            .text_size(px(12.))
+                            .child(item.part.clone()),
+                    )
+                    .child(div().flex_1().min_w_0().child(item.explanation.clone()))
+            });
             div()
-                .h_flex()
-                .items_start()
-                .gap_2()
+                .v_flex()
                 .min_w_0()
+                .gap_1()
                 .child(
                     div()
-                        .flex_none()
-                        .max_w(relative(0.4))
-                        .px_1()
-                        .rounded(px(4.))
-                        .bg(p.content)
-                        .font_family("Menlo")
                         .text_size(px(12.))
-                        .child(item.part.clone()),
+                        .font_semibold()
+                        .text_color(p.secondary_foreground)
+                        .child("More explanations"),
                 )
-                .child(div().flex_1().min_w_0().child(item.explanation.clone()))
+                .children(rows)
         });
+        let blocks: Vec<AnyElement> = blocks
+            .blocks
+            .iter()
+            .map(|block| self.step_block(index, block, cx))
+            .collect();
         div()
             .v_flex()
             .min_w_0()
@@ -940,48 +949,66 @@ impl Workspace {
                 )
                 .selectable(true),
             )
-            .when_some(filled(&guidance.code), |d, code| {
-                d.child(code_block(("chat-step-code", index), code.clone(), cx))
-                    .child(
-                        div()
-                            .h_flex()
-                            .child(copy_button(("chat-step-copy-code", index), code)),
-                    )
-            })
-            .when_some(filled(&guidance.pseudocode), |d, pseudocode| {
+            .when_some(view::where_line(guidance), |d, place| {
                 d.child(
+                    TextView::markdown(
+                        ("chat-step-where", index),
+                        view::display_markdown(&format!("Where: {place}")),
+                    )
+                    .selectable(true),
+                )
+            })
+            .children(blocks)
+            .children(unmatched)
+    }
+
+    /// One code block of the step's guidance with what goes with it: the Pseudocode label,
+    /// how to read the explanations of its parts, or the row of buttons under code and
+    /// commands.
+    fn step_block(&self, index: usize, block: &StepBlock, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx.theme().mode);
+        let code = self.code_view(index, block, cx);
+        let hint = (!block.parts.is_empty()).then(|| {
+            div()
+                .text_size(px(12.))
+                .text_color(p.secondary_foreground)
+                .child("Point at a part to see what it does.")
+        });
+        let column = div().v_flex().min_w_0().gap_2();
+        match block.kind {
+            BlockKind::Code => column
+                .child(code)
+                .children(hint)
+                .child(div().h_flex().child(copy_button(
+                    ("chat-step-copy-code", index),
+                    block.copy.clone(),
+                ))),
+            BlockKind::Pseudocode => column
+                .child(
                     div()
                         .text_size(px(12.))
                         .font_semibold()
                         .text_color(p.secondary_foreground)
                         .child("Pseudocode"),
                 )
-                .child(code_block(("chat-step-pseudocode", index), pseudocode, cx))
-            })
-            .when_some(filled(&guidance.command), |d, command| {
-                d.child(code_block(
-                    ("chat-step-command", index),
-                    command.clone(),
-                    cx,
-                ))
-                .child(
-                    div()
-                        .h_flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(copy_button(("chat-step-copy-command", index), command))
-                        .child(
-                            compact_button(
-                                Button::new(("chat-step-terminal", index)),
-                                "Open Terminal",
-                            )
+                .child(code)
+                .children(hint),
+            BlockKind::Command => column.child(code).children(hint).child(
+                div()
+                    .h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(copy_button(
+                        ("chat-step-copy-command", index),
+                        block.copy.clone(),
+                    ))
+                    .child(
+                        compact_button(Button::new(("chat-step-terminal", index)), "Open Terminal")
                             .on_click(cx.listener(|this, _, _, cx| this.show_terminal(cx))),
-                        ),
-                )
-            })
-            .when(!guidance.breakdown.is_empty(), |d| {
-                d.child(div().v_flex().min_w_0().gap_1().children(breakdown))
-            })
+                    ),
+            ),
+        }
+        .into_any_element()
     }
 
     /// The step before its guidance arrives: the plan's summary, and either a note that

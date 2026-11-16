@@ -1,7 +1,9 @@
 //! Pure decisions behind the workspace's chat and bottom panels, kept free of GPUI so they
 //! are tested directly.
 
-use tandem_core::chat::{CheckResult, Finding, HELP_LANGUAGES};
+use std::ops::Range;
+use tandem_claude::view::{BlockKind, OpenJump};
+use tandem_core::chat::{CheckResult, EditAction, Finding, HELP_LANGUAGES, Placement, locate};
 
 /// The tabs of the panel below the editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +74,45 @@ pub fn finding_label(finding: &Finding) -> String {
     }
 }
 
+/// The explained part of the step card's code that is under the pointer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeHover {
+    /// The step's index in the plan.
+    pub step: usize,
+    pub block: BlockKind,
+    /// Index into the block's `parts`.
+    pub part: usize,
+    /// Where the pointer was, in window pixels, when it reached the part.
+    pub x: f32,
+    pub y: f32,
+}
+
+/// The hover after the pointer moved over `part` of the block (`step`, `block`), or off
+/// every part of it (`None`). Returns `None` when nothing changes: the same part keeps
+/// its first position, and leaving a block that is not the hovered one clears nothing.
+pub fn hover_after(
+    current: Option<&CodeHover>,
+    step: usize,
+    block: BlockKind,
+    part: Option<usize>,
+    x: f32,
+    y: f32,
+) -> Option<Option<CodeHover>> {
+    let same_block = current.is_some_and(|hover| hover.step == step && hover.block == block);
+    match part {
+        Some(part) if same_block && current.is_some_and(|hover| hover.part == part) => None,
+        Some(part) => Some(Some(CodeHover {
+            step,
+            block,
+            part,
+            x,
+            y,
+        })),
+        None if same_block => Some(None),
+        None => None,
+    }
+}
+
 /// The 1-based number of the first line of `text` that contains `anchor` (trimmed), so
 /// "Open file" can put the cursor where a step's code goes. `None` for an empty anchor or
 /// when no line contains it.
@@ -83,6 +124,110 @@ pub fn anchor_line(text: &str, anchor: &str) -> Option<usize> {
     text.lines()
         .position(|line| line.contains(anchor))
         .map(|index| index + 1)
+}
+
+/// The (start, end of the line's text) byte offsets of every line of `text`.
+pub fn line_bounds(text: &str) -> Vec<(usize, usize)> {
+    let mut bounds = Vec::new();
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        bounds.push((start, start + content.len()));
+        start += line.len();
+    }
+    bounds
+}
+
+/// What "Open file" does in the editor once the file is open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reveal {
+    /// Focus the editor and leave the cursor where it is.
+    Focus,
+    /// Put the cursor at this byte offset.
+    Cursor(usize),
+    /// Select this byte range, with the cursor at its start.
+    Select(Range<usize>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevealPlan {
+    pub reveal: Reveal,
+    /// The status bar text and whether it is an error.
+    pub message: Option<(String, bool)>,
+}
+
+/// Where "Open file" goes in `text`, the current text of the file at `path`.
+pub fn reveal_plan(text: &str, path: &str, jump: &OpenJump) -> RevealPlan {
+    let quiet = |reveal| RevealPlan {
+        reveal,
+        message: None,
+    };
+    let location = match jump {
+        OpenJump::None => return quiet(Reveal::Focus),
+        OpenJump::LegacyAnchor(anchor) => {
+            return quiet(match anchor_line(text, anchor) {
+                Some(line) => Reveal::Cursor(line_bounds(text)[line - 1].0),
+                None => Reveal::Focus,
+            });
+        }
+        OpenJump::Location(location) => location,
+    };
+    let Some(found) = locate(text, location) else {
+        return RevealPlan {
+            reveal: Reveal::Cursor(0),
+            message: Some((
+                format!(
+                    "{path} changed since Claude prepared this step and the line it named is gone. Opened at the top."
+                ),
+                true,
+            )),
+        };
+    };
+    let bounds = line_bounds(text);
+    let (first, last) = (found.first, found.last);
+    let (start, end) = bounds[first - 1];
+    let (_, last_end) = bounds[last - 1];
+    let (reveal, message) = match (location.action, location.placement) {
+        (EditAction::Insert, Placement::After) => (
+            Reveal::Cursor(end),
+            format!("Insert the new code after line {first}."),
+        ),
+        (EditAction::Insert, Placement::Before) => (
+            Reveal::Cursor(start),
+            format!("Insert the new code before line {first}."),
+        ),
+        (EditAction::Update, _) => (
+            Reveal::Select(start..last_end),
+            if first == last {
+                format!("Replace the selected line ({first}).")
+            } else {
+                format!("Replace the selected lines ({first}–{last}).")
+            },
+        ),
+        (EditAction::Remove, _) => {
+            let next = bounds.get(last).map_or(text.len(), |(start, _)| *start);
+            (
+                Reveal::Select(start..next),
+                if first == last {
+                    format!("Delete the selected line ({first}).")
+                } else {
+                    format!("Delete the selected lines ({first}–{last}).")
+                },
+            )
+        }
+    };
+    let message = if found.moved {
+        format!(
+            "{message} {path} changed since Claude prepared this step, so check that this is the right place."
+        )
+    } else {
+        message
+    };
+    RevealPlan {
+        reveal,
+        message: Some((message, false)),
+    }
 }
 
 /// What a takeover needs to know about one open editor tab.
@@ -151,6 +296,7 @@ pub fn takeover_save_plan(tabs: &[TabFacts]) -> SavePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tandem_core::chat::EditLocation;
 
     #[test]
     fn next_bottom_hides_the_visible_tab_and_shows_any_other() {
@@ -209,6 +355,52 @@ mod tests {
         assert_eq!(rows[2].1, "TypeScript");
         assert_eq!(rows[7].1, "Kotlin");
         assert_eq!(help_languages([]).len(), 7);
+    }
+
+    #[test]
+    fn hover_after_tracks_the_part_under_the_pointer() {
+        use BlockKind::{Code, Command};
+        let first = CodeHover {
+            step: 0,
+            block: Code,
+            part: 2,
+            x: 10.,
+            y: 20.,
+        };
+        assert_eq!(
+            hover_after(None, 0, Code, Some(2), 10., 20.),
+            Some(Some(first.clone()))
+        );
+        // The same part keeps the position where the pointer reached it.
+        assert_eq!(hover_after(Some(&first), 0, Code, Some(2), 50., 60.), None);
+        assert_eq!(
+            hover_after(Some(&first), 0, Code, Some(3), 50., 60.),
+            Some(Some(CodeHover {
+                step: 0,
+                block: Code,
+                part: 3,
+                x: 50.,
+                y: 60.,
+            }))
+        );
+        assert_eq!(
+            hover_after(Some(&first), 0, Code, None, 50., 60.),
+            Some(None)
+        );
+        // Leaving another block, or another step's block, clears nothing.
+        assert_eq!(hover_after(Some(&first), 0, Command, None, 50., 60.), None);
+        assert_eq!(hover_after(Some(&first), 1, Code, None, 50., 60.), None);
+        assert_eq!(hover_after(None, 0, Code, None, 50., 60.), None);
+        assert_eq!(
+            hover_after(Some(&first), 0, Command, Some(0), 1., 2.),
+            Some(Some(CodeHover {
+                step: 0,
+                block: Command,
+                part: 0,
+                x: 1.,
+                y: 2.,
+            }))
+        );
     }
 
     #[test]
@@ -279,6 +471,188 @@ mod tests {
     #[test]
     fn anchor_line_is_none_without_a_match() {
         assert_eq!(anchor_line(CLI, "pub struct Options {"), None);
+    }
+
+    /// 7 lines, 106 bytes.
+    const CLI7: &str = "use clap::Parser;\n\n#[derive(Parser)]\npub struct Args {\n    /// The name to greet.\n    pub name: String,\n}\n";
+
+    #[test]
+    fn line_bounds_gives_each_lines_text_range() {
+        assert_eq!(
+            line_bounds(CLI7),
+            [
+                (0, 17),
+                (18, 18),
+                (19, 36),
+                (37, 54),
+                (55, 81),
+                (82, 103),
+                (104, 105)
+            ]
+        );
+        assert_eq!(line_bounds("a\r\nb"), [(0, 1), (3, 4)]);
+        assert!(line_bounds("").is_empty());
+        assert_eq!(line_bounds("a\n\n"), [(0, 1), (2, 2)]);
+    }
+
+    fn jump(
+        action: EditAction,
+        line: usize,
+        end_line: Option<usize>,
+        anchor: &str,
+        placement: Placement,
+    ) -> OpenJump {
+        OpenJump::Location(EditLocation {
+            action,
+            line,
+            end_line,
+            anchor: anchor.into(),
+            placement,
+        })
+    }
+
+    fn plan(reveal: Reveal, message: Option<&str>, error: bool) -> RevealPlan {
+        RevealPlan {
+            reveal,
+            message: message.map(|text| (text.to_owned(), error)),
+        }
+    }
+
+    #[test]
+    fn reveal_plan_puts_the_cursor_where_new_code_goes() {
+        use EditAction::Insert;
+        use Placement::{After, Before};
+        assert_eq!(
+            reveal_plan(
+                CLI7,
+                "src/cli.rs",
+                &jump(Insert, 6, None, "pub name: String,", After)
+            ),
+            plan(
+                Reveal::Cursor(103),
+                Some("Insert the new code after line 6."),
+                false
+            )
+        );
+        assert_eq!(
+            reveal_plan(
+                CLI7,
+                "src/cli.rs",
+                &jump(Insert, 1, None, "use clap::Parser;", Before)
+            ),
+            plan(
+                Reveal::Cursor(0),
+                Some("Insert the new code before line 1."),
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn reveal_plan_selects_the_lines_to_replace_or_remove() {
+        use EditAction::{Remove, Update};
+        let doc = "/// The name to greet.";
+        let cases = [
+            (
+                jump(Update, 5, None, doc, Placement::After),
+                Reveal::Select(55..81),
+                "Replace the selected line (5).",
+            ),
+            (
+                jump(Update, 5, Some(6), doc, Placement::After),
+                Reveal::Select(55..103),
+                "Replace the selected lines (5–6).",
+            ),
+            (
+                jump(Remove, 5, None, doc, Placement::After),
+                Reveal::Select(55..82),
+                "Delete the selected line (5).",
+            ),
+            (
+                jump(Remove, 6, Some(7), "pub name: String,", Placement::After),
+                Reveal::Select(82..106),
+                "Delete the selected lines (6–7).",
+            ),
+        ];
+        for (jump, reveal, message) in cases {
+            assert_eq!(
+                reveal_plan(CLI7, "src/cli.rs", &jump),
+                plan(reveal, Some(message), false),
+                "{jump:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reveal_plan_follows_an_anchor_that_moved() {
+        assert_eq!(
+            reveal_plan(
+                CLI7,
+                "src/cli.rs",
+                &jump(
+                    EditAction::Insert,
+                    2,
+                    None,
+                    "pub struct Args {",
+                    Placement::After
+                )
+            ),
+            plan(
+                Reveal::Cursor(54),
+                Some(
+                    "Insert the new code after line 4. src/cli.rs changed since Claude prepared this step, so check that this is the right place."
+                ),
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn reveal_plan_opens_at_the_top_when_the_anchor_is_gone() {
+        assert_eq!(
+            reveal_plan(
+                CLI7,
+                "src/cli.rs",
+                &jump(
+                    EditAction::Insert,
+                    6,
+                    None,
+                    "pub age: u8,",
+                    Placement::After
+                )
+            ),
+            plan(
+                Reveal::Cursor(0),
+                Some(
+                    "src/cli.rs changed since Claude prepared this step and the line it named is gone. Opened at the top."
+                ),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn reveal_plan_keeps_old_anchors_and_plain_opens() {
+        assert_eq!(
+            reveal_plan(
+                CLI7,
+                "src/cli.rs",
+                &OpenJump::LegacyAnchor("pub struct Args {".into())
+            ),
+            plan(Reveal::Cursor(37), None, false)
+        );
+        assert_eq!(
+            reveal_plan(
+                CLI7,
+                "src/cli.rs",
+                &OpenJump::LegacyAnchor("nothing here".into())
+            ),
+            plan(Reveal::Focus, None, false)
+        );
+        assert_eq!(
+            reveal_plan(CLI7, "src/cli.rs", &OpenJump::None),
+            plan(Reveal::Focus, None, false)
+        );
     }
 
     /// A clean tab of a file that exists on disk.

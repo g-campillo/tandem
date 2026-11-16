@@ -1,0 +1,46 @@
+{
+  "beginner_edit": {
+    "step": 1,
+    "summary": "Add a `json` flag field to the Args struct.",
+    "why": "clap turns each field of the struct into a command-line flag.",
+    "code": "    #[arg(long)]\n    json: bool,",
+    "breakdown": [
+      { "part": "#[arg(long)]", "explanation": "Makes the field a --json flag." },
+      { "part": "bool", "explanation": "A flag is either set or not." }
+    ],
+    "location": { "action": "insert", "line": 6, "anchor": "    pub name: String,", "placement": "after" }
+  },
+  "beginner_update": {
+    "step": 1,
+    "summary": "Reword the help text of `name`.",
+    "why": "clap shows the doc comment as the flag's help.",
+    "code": "    /// The name of the person to greet.",
+    "breakdown": [{ "part": "///", "explanation": "Starts a doc comment." }],
+    "location": { "action": "update", "line": 5, "end_line": 5, "anchor": "/// The name to greet." }
+  },
+  "intermediate_edit": {
+    "step": 1,
+    "summary": "Add a boolean flag to Args.",
+    "why": "clap derives flags from the struct's fields.",
+    "where": "in src/cli.rs, inside struct Args, after the name field",
+    "pseudocode": "in Args: add a long flag named json of type bool",
+    "breakdown": [{ "part": "#[arg(long)]", "explanation": "An attribute, new in Rust." }]
+  },
+  "expert_edit": {
+    "step": 1,
+    "summary": "Add a `json: bool` long flag to Args.",
+    "why": "clap derives flags from fields.",
+    "where": "in src/cli.rs, inside struct Args"
+  },
+  "command": {
+    "step": 2,
+    "summary": "Add serde as a dependency.",
+    "why": "serde turns Rust values into JSON.",
+    "command": "cargo add serde",
+    "breakdown": [
+      { "part": "cargo", "explanation": "Rust's build tool." },
+      { "part": "add", "explanation": "Adds a dependency to Cargo.toml." },
+      { "part": "serde", "explanation": "The crate to add." }
+    ]
+  }
+}

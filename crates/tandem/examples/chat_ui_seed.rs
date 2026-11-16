@@ -1,13 +1,15 @@
 //! Offline seed for checking the chat panel by hand. It writes a small project and a state
-//! folder with three tasks: one in Plan; one in a guided Build with stored guidance for its
-//! first step (selected); and one whose first step Claude did in a takeover, with the three
-//! changed files waiting for Keep or Undo. It starts no helper and uses no Claude
-//! subscription.
+//! folder with five tasks: one in Plan, whose transcript has a reply with fenced code; one
+//! in a guided Build with stored guidance for its first step at all three help levels
+//! (selected); one guided step whose Beginner guidance replaces a line; one guided command
+//! step; and one whose first step Claude did in a takeover, with the three changed files
+//! waiting for Keep or Undo. It starts no helper and uses no Claude subscription.
 use anyhow::{Result, ensure};
 use std::{fs, path::PathBuf};
 use tandem_core::chat::{
-    ActivityKind, BreakdownItem, ChangeSet, ChangeSetStatus, Decision, FileChange, Guidance,
-    HelpLevel, ItemKind, Mode, Phase, Plan, PlanStep, StepKind, TakeoverScope,
+    ActivityKind, BreakdownItem, ChangeSet, ChangeSetStatus, ChatTask, Decision, EditAction,
+    EditLocation, FileChange, Guidance, HelpLevel, ItemKind, Mode, Phase, Placement, Plan,
+    PlanStep, StepKind, TakeoverScope,
 };
 use tandem_core::takeover::Snapshot;
 use tandem_core::{Project, Store, new_id, now_ms};
@@ -36,7 +38,7 @@ fn part(part: &str, explanation: &str) -> BreakdownItem {
 }
 
 /// Beginner guidance for the first step: add the `json` field to `Args` in src/cli.rs.
-fn first_step_guidance() -> Guidance {
+fn beginner_step_guidance() -> Guidance {
     Guidance {
         step: 0,
         level: HelpLevel::Beginner,
@@ -61,8 +63,147 @@ fn first_step_guidance() -> Guidance {
             ),
         ],
         path: Some("src/cli.rs".into()),
-        anchor: Some("pub struct Args {".into()),
+        anchor: None,
+        where_: None,
+        location: Some(EditLocation {
+            action: EditAction::Insert,
+            line: 6,
+            end_line: None,
+            anchor: "pub name: String,".into(),
+            placement: Placement::After,
+        }),
     }
+}
+
+/// Intermediate guidance for the same step: pseudocode, and the place in words.
+fn intermediate_step_guidance() -> Guidance {
+    Guidance {
+        step: 0,
+        level: HelpLevel::Intermediate,
+        summary: "Add a boolean `json` flag to Args.".into(),
+        why: "clap derives a command-line flag from each field of the struct.".into(),
+        code: None,
+        pseudocode: Some(
+            "add a field named json of type bool\nmark it as a long flag with the arg attribute"
+                .into(),
+        ),
+        command: None,
+        breakdown: vec![
+            part("arg", "The attribute clap reads to configure a field."),
+            part(
+                "#[arg(long)]",
+                "Rust's attribute syntax: it annotates the item that follows.",
+            ),
+        ],
+        path: Some("src/cli.rs".into()),
+        anchor: None,
+        where_: Some("in `src/cli.rs`, inside `struct Args`, after the `name` field".into()),
+        location: None,
+    }
+}
+
+/// Expert guidance for the same step: a short description and the place in words.
+fn expert_step_guidance() -> Guidance {
+    Guidance {
+        step: 0,
+        level: HelpLevel::Expert,
+        summary: "Add a `json: bool` long flag to Args.".into(),
+        why: "clap derives flags from fields.".into(),
+        code: None,
+        pseudocode: None,
+        command: None,
+        breakdown: Vec::new(),
+        path: Some("src/cli.rs".into()),
+        anchor: None,
+        where_: Some("in `src/cli.rs`, inside `struct Args`".into()),
+        location: None,
+    }
+}
+
+/// Beginner guidance that replaces one line: the doc comment of `name` in src/cli.rs.
+fn update_line_guidance() -> Guidance {
+    Guidance {
+        step: 0,
+        level: HelpLevel::Beginner,
+        summary: "Replace the doc comment above `name`.".into(),
+        why: "clap prints a field's doc comment as that flag's help text.".into(),
+        code: Some("    /// The name of the person to greet.".into()),
+        pseudocode: None,
+        command: None,
+        breakdown: vec![part(
+            "///",
+            "Starts a doc comment. clap shows it as the flag's help text.",
+        )],
+        path: Some("src/cli.rs".into()),
+        anchor: None,
+        where_: None,
+        location: Some(EditLocation {
+            action: EditAction::Update,
+            line: 5,
+            end_line: None,
+            anchor: "/// The name to greet.".into(),
+            placement: Placement::After,
+        }),
+    }
+}
+
+/// Beginner guidance for a command step: run the tests.
+fn command_guidance() -> Guidance {
+    Guidance {
+        step: 0,
+        level: HelpLevel::Beginner,
+        summary: "Run the project's tests.".into(),
+        why: "The tests show whether the change works before you go on.".into(),
+        code: None,
+        pseudocode: None,
+        command: Some("cargo test --quiet".into()),
+        breakdown: vec![
+            part("cargo", "Rust's build tool and package manager."),
+            part(
+                "test",
+                "The subcommand that builds the project and runs its tests.",
+            ),
+            part(
+                "--quiet",
+                "Prints one line per test binary instead of one per test.",
+            ),
+        ],
+        path: None,
+        anchor: None,
+        where_: None,
+        location: None,
+    }
+}
+
+/// Creates a guided build at the first step of `plan`, stores `guidance` after checking
+/// each against its step, and starts the transcript as a guided build does.
+fn seed_guided_task(
+    store: &mut Store,
+    project: &Project,
+    title: &str,
+    plan: &Plan,
+    guidance: &[Guidance],
+) -> Result<ChatTask> {
+    let mut task = store.create_chat_task(project.key())?;
+    task.title = title.into();
+    task.phase = Phase::Build;
+    task.mode = Mode::Guided;
+    task.current_step = 0;
+    task.plan = Some(plan.clone());
+    store.save_chat_task(&task)?;
+    for guidance in guidance {
+        guidance.check(&plan.steps[guidance.step])?;
+        store.save_chat_guidance(&task.id, guidance)?;
+    }
+    for kind in [
+        ItemKind::Plan { plan: plan.clone() },
+        ItemKind::Notice {
+            text: "You are building this. Claude guides each step.".into(),
+        },
+    ] {
+        store.append_chat_item(&task.id, &kind)?;
+    }
+    Ok(task)
 }
 
 /// Plays Claude's takeover of step 1 for real: snapshots the project into the state
@@ -159,6 +300,9 @@ fn main() -> Result<()> {
         ItemKind::User {
             text: "No, only results.".into(),
         },
+        ItemKind::Assistant {
+            text: "Then the flag is one field, and you can try it like this:\n\n```rust\n#[arg(long)]\njson: bool,\n```\n\n```shell\ncargo run -- World --json\n```".into(),
+        },
         ItemKind::Plan { plan: plan.clone() },
         ItemKind::Assistant {
             text: "Here is the plan. Review it and pick how you want to build it.".into(),
@@ -167,24 +311,63 @@ fn main() -> Result<()> {
         store.append_chat_item(&task.id, &kind)?;
     }
 
-    let mut build = store.create_chat_task(project.key())?;
-    build.title = "Add a --json flag to the CLI (guided)".into();
-    build.phase = Phase::Build;
-    build.mode = Mode::Guided;
-    build.current_step = 0;
-    build.plan = Some(plan.clone());
-    store.save_chat_task(&build)?;
-    let guidance = first_step_guidance();
-    guidance.check(&plan.steps[0])?;
-    store.save_chat_guidance(&build.id, &guidance)?;
-    for kind in [
-        ItemKind::Plan { plan: plan.clone() },
-        ItemKind::Notice {
-            text: "You are building this. Claude guides each step.".into(),
-        },
-    ] {
-        store.append_chat_item(&build.id, &kind)?;
+    let beginner = beginner_step_guidance();
+    ensure!(
+        beginner.located(&plan.steps[0], Some(CLI_RS))? == beginner.location,
+        "The seeded location should match src/cli.rs."
+    );
+    let build = seed_guided_task(
+        &mut store,
+        &project,
+        "Add a --json flag to the CLI (guided)",
+        &plan,
+        &[
+            beginner,
+            intermediate_step_guidance(),
+            expert_step_guidance(),
+        ],
+    )?;
+
+    let update_plan = Plan {
+        goal: "Make the help text of name clearer".into(),
+        done_when: vec!["--help shows the new text".into()],
+        steps: vec![step(
+            StepKind::EditFile,
+            "src/cli.rs",
+            "Reword the doc comment of `name`",
+        )],
     }
+    .normalized()?;
+    let update = update_line_guidance();
+    ensure!(
+        update.located(&update_plan.steps[0], Some(CLI_RS))? == update.location,
+        "The seeded location should match src/cli.rs."
+    );
+    seed_guided_task(
+        &mut store,
+        &project,
+        "Reword the name help text (update a line)",
+        &update_plan,
+        &[update],
+    )?;
+
+    let command_plan = Plan {
+        goal: "See the tests pass".into(),
+        done_when: vec!["cargo test passes".into()],
+        steps: vec![step(
+            StepKind::RunCommand,
+            "cargo test --quiet",
+            "Run the tests",
+        )],
+    }
+    .normalized()?;
+    seed_guided_task(
+        &mut store,
+        &project,
+        "Run the tests (a command step)",
+        &command_plan,
+        &[command_guidance()],
+    )?;
 
     let mut takeover = store.create_chat_task(project.key())?;
     takeover.title = "Add a --json flag to the CLI (Claude did step 1)".into();

@@ -1,11 +1,15 @@
 //! Pure decisions the chat panel makes from a `ChatState`, kept here so they are tested
 //! without a UI.
 
+use std::ops::Range;
+use std::path::Path;
+
 use crate::protocol::ModelChoice;
 use crate::state::{ChatState, Connection, TurnKind};
+use tandem_core::breakdown::part_spans;
 use tandem_core::chat::{
-    ActivityKind, ChangeKind, Decision, Guidance, HelpLevel, ItemKind, PermissionMode, Phase,
-    StepKind, normalize_language,
+    ActivityKind, BreakdownItem, ChangeKind, Decision, EditAction, EditLocation, Guidance,
+    HelpLevel, ItemKind, PermissionMode, Phase, Placement, StepKind, normalize_language,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,6 +329,278 @@ pub fn level_for(state: &ChatState, language: &str) -> HelpLevel {
     state.prefs.help_level(&normalize_language(language))
 }
 
+/// The syntax grammar for a language name or a fence tag such as "rs", "TypeScript" or
+/// "rust,ignore"; `None` shows the code plain.
+pub fn grammar_for_language(name: &str) -> Option<&'static str> {
+    let tag = name
+        .trim()
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '{' | ':'))
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Some(match tag.as_str() {
+        "rust" | "rs" => "rust",
+        "go" | "golang" => "go",
+        "typescript" | "ts" | "mts" | "cts" => "typescript",
+        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "node" => "javascript",
+        "python" | "py" | "pyi" | "python3" => "python",
+        "java" => "java",
+        "shell" | "bash" | "sh" | "zsh" | "console" | "shellscript" | "terminal" => "bash",
+        "json" | "jsonc" => "json",
+        "toml" => "toml",
+        "markdown" | "md" => "markdown",
+        "diff" | "patch" => "diff",
+        _ => return None,
+    })
+}
+
+/// The grammar for a file, from its extension.
+pub fn grammar_for_path(path: &str) -> Option<&'static str> {
+    grammar_for_language(Path::new(path).extension()?.to_str()?)
+}
+
+/// Fence tags Claude uses that the toolkit does not resolve by itself, as (tag, grammar).
+pub const FENCE_ALIASES: [(&str, &str); 15] = [
+    ("golang", "go"),
+    ("mts", "typescript"),
+    ("cts", "typescript"),
+    ("jsx", "javascript"),
+    ("mjs", "javascript"),
+    ("cjs", "javascript"),
+    ("node", "javascript"),
+    ("pyi", "python"),
+    ("python3", "python"),
+    ("shell", "bash"),
+    ("zsh", "bash"),
+    ("console", "bash"),
+    ("shellscript", "bash"),
+    ("terminal", "bash"),
+    ("patch", "diff"),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    Code,
+    Pseudocode,
+    Command,
+}
+
+/// A breakdown part that occurs in a block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockPart {
+    pub part: String,
+    pub explanation: String,
+    /// Byte ranges of the block's `text`.
+    pub spans: Vec<Range<usize>>,
+}
+
+/// One code block of the step card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepBlock {
+    pub kind: BlockKind,
+    /// What the card shows: Claude's text with `\r\n` as `\n` and each tab as four spaces.
+    pub text: String,
+    /// What Copy puts on the clipboard: Claude's text unchanged.
+    pub copy: String,
+    pub grammar: Option<&'static str>,
+    /// Underline the explained parts: true above the beginner level, where few parts are.
+    pub mark_parts: bool,
+    /// The breakdown parts found in `text`, in breakdown order.
+    pub parts: Vec<BlockPart>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepBlocks {
+    /// Code, pseudocode, command: the ones the guidance has, in that order.
+    pub blocks: Vec<StepBlock>,
+    /// Breakdown entries whose part is in no block.
+    pub unmatched: Vec<BreakdownItem>,
+}
+
+/// The code blocks of `guidance` for a step in `language`, with each breakdown part
+/// mapped to where it occurs.
+pub fn step_blocks(guidance: &Guidance, language: &str) -> StepBlocks {
+    let shown = |text: &str| text.replace("\r\n", "\n").replace('\t', "    ");
+    let parts: Vec<String> = guidance
+        .breakdown
+        .iter()
+        .map(|item| shown(&item.part))
+        .collect();
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let fields = [
+        (BlockKind::Code, &guidance.code),
+        (BlockKind::Pseudocode, &guidance.pseudocode),
+        (BlockKind::Command, &guidance.command),
+    ];
+    let mut matched = vec![false; guidance.breakdown.len()];
+    let mut blocks = Vec::new();
+    for (kind, field) in fields {
+        let Some(field) = field.as_ref().filter(|field| !field.trim().is_empty()) else {
+            continue;
+        };
+        let text = shown(field);
+        let spans = part_spans(&text, &parts);
+        let mut block_parts = Vec::new();
+        for ((item, spans), matched) in guidance.breakdown.iter().zip(spans).zip(&mut matched) {
+            if spans.is_empty() {
+                continue;
+            }
+            *matched = true;
+            block_parts.push(BlockPart {
+                part: item.part.trim().to_owned(),
+                explanation: item.explanation.trim().to_owned(),
+                spans,
+            });
+        }
+        let grammar = match kind {
+            BlockKind::Code => guidance
+                .path
+                .as_deref()
+                .and_then(grammar_for_path)
+                .or_else(|| grammar_for_language(language)),
+            BlockKind::Pseudocode => None,
+            BlockKind::Command => Some("bash"),
+        };
+        blocks.push(StepBlock {
+            kind,
+            text,
+            copy: field.clone(),
+            grammar,
+            mark_parts: guidance.level != HelpLevel::Beginner,
+            parts: block_parts,
+        });
+    }
+    let unmatched = guidance
+        .breakdown
+        .iter()
+        .zip(matched)
+        .filter(|(_, matched)| !matched)
+        .map(|(item, _)| item.clone())
+        .collect();
+    StepBlocks { blocks, unmatched }
+}
+
+/// `text` as a Markdown code span.
+fn code_span(text: &str) -> String {
+    if text.contains('`') {
+        format!("`` {text} ``")
+    } else {
+        format!("`{text}`")
+    }
+}
+
+/// The step card's "Where:" text: for a beginner edit, the line the change goes next
+/// to; otherwise the words Claude gave. `None` shows no line.
+pub fn where_line(guidance: &Guidance) -> Option<String> {
+    if guidance.level == HelpLevel::Beginner
+        && let Some(location) = &guidance.location
+    {
+        let anchor = code_span(location.anchor.trim());
+        let count = location.last_line() - location.line + 1;
+        return Some(match (location.action, location.placement, count) {
+            (EditAction::Insert, Placement::After, _) => format!("Insert after {anchor}"),
+            (EditAction::Insert, Placement::Before, _) => format!("Insert before {anchor}"),
+            (EditAction::Update, _, 1) => format!("Replace the line {anchor}"),
+            (EditAction::Update, _, count) => {
+                format!("Replace the {count} lines starting at {anchor}")
+            }
+            (EditAction::Remove, _, 1) => format!("Remove the line {anchor}"),
+            (EditAction::Remove, _, count) => {
+                format!("Remove the {count} lines starting at {anchor}")
+            }
+        });
+    }
+    guidance
+        .where_
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// Where "Open file" leaves the cursor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenJump {
+    /// Open the file and leave the cursor where it is.
+    None,
+    Location(EditLocation),
+    /// Guidance stored before locations existed: the first line that contains this text.
+    LegacyAnchor(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenTarget {
+    /// Project-relative path of the step's file.
+    pub path: String,
+    pub jump: OpenJump,
+}
+
+/// What "Open file" opens for the card; `None` for a command step.
+pub fn open_target(card: &StepCard) -> Option<OpenTarget> {
+    if card.kind == StepKind::RunCommand {
+        return None;
+    }
+    let guidance = card.guidance.as_ref();
+    let path = guidance
+        .and_then(|guidance| guidance.path.clone())
+        .unwrap_or_else(|| card.target.clone());
+    let jump = match guidance.filter(|guidance| guidance.level == HelpLevel::Beginner) {
+        Some(Guidance {
+            location: Some(location),
+            ..
+        }) => OpenJump::Location(location.clone()),
+        Some(Guidance {
+            anchor: Some(anchor),
+            ..
+        }) if !anchor.trim().is_empty() => OpenJump::LegacyAnchor(anchor.clone()),
+        _ => OpenJump::None,
+    };
+    Some(OpenTarget { path, jump })
+}
+
+/// The index in `parts` of the part under byte `index`: the shortest span wins, then the
+/// earlier part.
+pub fn part_at(parts: &[BlockPart], index: usize) -> Option<usize> {
+    let spans: Vec<Vec<Range<usize>>> = parts.iter().map(|part| part.spans.clone()).collect();
+    tandem_core::breakdown::part_at(&spans, index)
+}
+
+/// `text` without its backtick pairs, and the byte ranges (of the returned text) that
+/// were between a pair.
+pub fn inline_code(text: &str) -> (String, Vec<Range<usize>>) {
+    let mut shown = String::with_capacity(text.len());
+    let mut code = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('`') {
+        let Some(length) = rest[open + 1..].find('`') else {
+            break;
+        };
+        shown.push_str(&rest[..open]);
+        let start = shown.len();
+        shown.push_str(&rest[open + 1..open + 1 + length]);
+        if shown.len() > start {
+            code.push(start..shown.len());
+        }
+        rest = &rest[open + length + 2..];
+    }
+    shown.push_str(rest);
+    (shown, code)
+}
+
+/// A part as the title of its explanation: its first line that is not blank, cut to 60
+/// characters, with "…" when something was left out.
+pub fn part_label(part: &str) -> String {
+    const MAX: usize = 60;
+    let mut lines = part.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let more = lines.next().is_some();
+    match first.char_indices().nth(MAX) {
+        Some((end, _)) => format!("{}…", &first[..end]),
+        None if more => format!("{first}…"),
+        None => first.to_owned(),
+    }
+}
+
 /// Model text ready for the Markdown renderer, with every image turned into text so that
 /// nothing remote is ever loaded. `![alt](url)` becomes `alt (url)`, any other `![` becomes
 /// `!\[`, and the `<` of an `<img` or `<image` tag becomes `&lt;`. This applies everywhere,
@@ -408,6 +684,8 @@ fn inline_image(text: &str) -> Option<(&str, &str, usize)> {
 }
 
 #[cfg(test)]
+// A part found once has a list of one span, so `vec![4..16]` is the intended value.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
     use crate::state::TurnKind;
@@ -753,6 +1031,8 @@ mod tests {
             breakdown: Vec::new(),
             path: Some("src/a.rs".into()),
             anchor: None,
+            where_: None,
+            location: None,
         }
     }
 
@@ -939,6 +1219,403 @@ mod tests {
             .insert("typescript".into(), HelpLevel::Intermediate);
         assert_eq!(level_for(&state, "typescript"), HelpLevel::Intermediate);
         assert_eq!(level_for(&state, " TS "), HelpLevel::Intermediate);
+    }
+
+    #[test]
+    fn grammar_for_language_reads_names_and_fence_tags() {
+        let cases = [
+            ("rust", Some("rust")),
+            ("RS", Some("rust")),
+            (" go ", Some("go")),
+            ("rust,ignore", Some("rust")),
+            ("python title=x", Some("python")),
+            ("ts", Some("typescript")),
+            ("tsx", None),
+            ("jsx", Some("javascript")),
+            ("js{1,3}", Some("javascript")),
+            ("shell", Some("bash")),
+            ("zsh", Some("bash")),
+            ("console", Some("bash")),
+            ("java", Some("java")),
+            ("md", Some("markdown")),
+            ("", None),
+            ("kotlin", None),
+        ];
+        for (name, grammar) in cases {
+            assert_eq!(grammar_for_language(name), grammar, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn fence_aliases_agree_with_grammar_for_language() {
+        for (tag, grammar) in FENCE_ALIASES {
+            assert_eq!(grammar_for_language(tag), Some(grammar), "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn grammar_for_path_reads_the_extension() {
+        let cases = [
+            ("src/main.rs", Some("rust")),
+            ("web/App.tsx", None),
+            ("web/app.mjs", Some("javascript")),
+            ("run.sh", Some("bash")),
+            ("Cargo.toml", Some("toml")),
+            ("Makefile", None),
+            ("notes.txt", None),
+        ];
+        for (path, grammar) in cases {
+            assert_eq!(grammar_for_path(path), grammar, "{path:?}");
+        }
+    }
+
+    fn explained(part: &str, explanation: &str) -> BreakdownItem {
+        BreakdownItem {
+            part: part.into(),
+            explanation: explanation.into(),
+        }
+    }
+
+    fn block_part(part: &str, explanation: &str, spans: Vec<Range<usize>>) -> BlockPart {
+        BlockPart {
+            part: part.into(),
+            explanation: explanation.into(),
+            spans,
+        }
+    }
+
+    #[test]
+    fn step_blocks_maps_beginner_parts_to_the_code() {
+        let code = "    #[arg(long)]\n    json: bool,";
+        let mut guidance = guidance(0);
+        guidance.level = HelpLevel::Beginner;
+        guidance.code = Some(code.into());
+        guidance.path = Some("src/cli.rs".into());
+        guidance.breakdown = vec![
+            explained("#[arg(long)]", "Makes it a --json flag."),
+            explained(" bool ", " True or false. "),
+        ];
+        assert_eq!(
+            step_blocks(&guidance, "rust"),
+            StepBlocks {
+                blocks: vec![StepBlock {
+                    kind: BlockKind::Code,
+                    text: code.into(),
+                    copy: code.into(),
+                    grammar: Some("rust"),
+                    mark_parts: false,
+                    parts: vec![
+                        block_part("#[arg(long)]", "Makes it a --json flag.", vec![4..16]),
+                        block_part("bool", "True or false.", vec![27..31]),
+                    ],
+                }],
+                unmatched: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn step_blocks_shows_tabs_as_spaces_and_copies_the_original() {
+        let mut guidance = guidance(0);
+        guidance.code = Some("\tjson: bool,\r\n".into());
+        guidance.breakdown = vec![explained("json", "The flag's name.")];
+        let blocks = step_blocks(&guidance, "rust");
+        let block = &blocks.blocks[0];
+        assert_eq!(block.text, "    json: bool,\n");
+        assert_eq!(block.copy, "\tjson: bool,\r\n");
+        assert_eq!(
+            block.parts,
+            [block_part("json", "The flag's name.", vec![4..8])]
+        );
+    }
+
+    #[test]
+    fn step_blocks_lists_parts_that_are_in_no_block() {
+        let mut guidance = guidance(0);
+        guidance.level = HelpLevel::Intermediate;
+        guidance.pseudocode =
+            Some("add a field named json of type bool\nmark it with the arg attribute".into());
+        let attribute = explained("#[arg(long)]", "Makes it a flag.");
+        guidance.breakdown = vec![explained("arg", "The attribute."), attribute.clone()];
+        let blocks = step_blocks(&guidance, "rust");
+        assert_eq!(blocks.blocks.len(), 1);
+        let block = &blocks.blocks[0];
+        assert_eq!(block.kind, BlockKind::Pseudocode);
+        assert_eq!(block.grammar, None);
+        assert!(block.mark_parts);
+        assert_eq!(block.parts.len(), 1);
+        assert_eq!(block.parts[0].part, "arg");
+        assert_eq!(block.parts[0].spans.len(), 1);
+        assert_eq!(blocks.unmatched, [attribute]);
+    }
+
+    #[test]
+    fn step_blocks_uses_bash_for_a_command() {
+        let mut guidance = guidance(1);
+        guidance.command = Some("cargo add serde".into());
+        guidance.path = None;
+        let blocks = step_blocks(&guidance, "rust");
+        assert_eq!(blocks.blocks.len(), 1);
+        assert_eq!(blocks.blocks[0].kind, BlockKind::Command);
+        assert_eq!(blocks.blocks[0].grammar, Some("bash"));
+    }
+
+    #[test]
+    fn step_blocks_picks_the_grammar_from_the_path_then_the_language() {
+        let cases = [
+            (Some("web/app.mjs"), "typescript", Some("javascript")),
+            (Some("web/App.tsx"), "typescript", Some("typescript")),
+            (Some("notes.txt"), "go", Some("go")),
+            (None, "kotlin", None),
+        ];
+        for (path, language, grammar) in cases {
+            let mut guidance = guidance(0);
+            guidance.code = Some("x".into());
+            guidance.path = path.map(Into::into);
+            assert_eq!(
+                step_blocks(&guidance, language).blocks[0].grammar,
+                grammar,
+                "{path:?} {language:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn step_blocks_skips_blank_fields_and_keeps_the_order() {
+        let mut guidance = guidance(0);
+        guidance.code = Some("  ".into());
+        assert!(step_blocks(&guidance, "rust").blocks.is_empty());
+
+        guidance.code = Some("let cargo = 1;".into());
+        guidance.command = Some("cargo add serde".into());
+        guidance.breakdown = vec![explained("cargo", "Rust's build tool.")];
+        let blocks = step_blocks(&guidance, "rust");
+        let kinds: Vec<BlockKind> = blocks.blocks.iter().map(|block| block.kind).collect();
+        assert_eq!(kinds, [BlockKind::Code, BlockKind::Command]);
+        assert_eq!(blocks.blocks[0].parts[0].spans, [4..9]);
+        assert_eq!(blocks.blocks[1].parts[0].spans, [0..5]);
+        assert!(blocks.unmatched.is_empty());
+    }
+
+    fn location(
+        action: EditAction,
+        line: usize,
+        end_line: Option<usize>,
+        anchor: &str,
+        placement: Placement,
+    ) -> EditLocation {
+        EditLocation {
+            action,
+            line,
+            end_line,
+            anchor: anchor.into(),
+            placement,
+        }
+    }
+
+    fn beginner_edit(location: EditLocation) -> Guidance {
+        let mut guidance = guidance(0);
+        guidance.level = HelpLevel::Beginner;
+        guidance.location = Some(location);
+        guidance
+    }
+
+    #[test]
+    fn where_line_names_the_line_for_a_beginner_edit() {
+        use EditAction::{Insert, Remove, Update};
+        use Placement::{After, Before};
+        let doc = "/// The name to greet.";
+        let cases = [
+            (
+                location(Insert, 6, None, "    pub name: String,", After),
+                "Insert after `pub name: String,`",
+            ),
+            (
+                location(Insert, 1, None, "use clap::Parser;", Before),
+                "Insert before `use clap::Parser;`",
+            ),
+            (
+                location(Update, 5, None, doc, After),
+                "Replace the line `/// The name to greet.`",
+            ),
+            (
+                location(Update, 5, Some(6), doc, After),
+                "Replace the 2 lines starting at `/// The name to greet.`",
+            ),
+            (
+                location(Remove, 5, None, doc, After),
+                "Remove the line `/// The name to greet.`",
+            ),
+            (
+                location(Remove, 5, Some(7), doc, After),
+                "Remove the 3 lines starting at `/// The name to greet.`",
+            ),
+            (
+                location(Insert, 3, None, "let s = `x`;", After),
+                "Insert after `` let s = `x`; ``",
+            ),
+        ];
+        for (location, text) in cases {
+            assert_eq!(
+                where_line(&beginner_edit(location.clone())).as_deref(),
+                Some(text),
+                "{location:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_line_uses_claudes_words_above_the_beginner_level() {
+        let place = " in src/cli.rs, inside struct Args ";
+        let mut guidance = guidance(0);
+        guidance.level = HelpLevel::Intermediate;
+        guidance.where_ = Some(place.into());
+        assert_eq!(
+            where_line(&guidance).as_deref(),
+            Some("in src/cli.rs, inside struct Args")
+        );
+        // Above the beginner level a location is not shown.
+        guidance.location = Some(location(
+            EditAction::Insert,
+            6,
+            None,
+            "pub name: String,",
+            Placement::After,
+        ));
+        assert_eq!(
+            where_line(&guidance).as_deref(),
+            Some("in src/cli.rs, inside struct Args")
+        );
+
+        let mut guidance = guidance.clone();
+        guidance.level = HelpLevel::Beginner;
+        guidance.location = None;
+        assert_eq!(
+            where_line(&guidance).as_deref(),
+            Some("in src/cli.rs, inside struct Args")
+        );
+
+        for level in HelpLevel::ALL {
+            for blank in [None, Some(String::new()), Some("  \n ".to_owned())] {
+                let mut guidance = guidance.clone();
+                guidance.level = level;
+                guidance.where_ = blank.clone();
+                assert_eq!(where_line(&guidance), None, "{level:?} {blank:?}");
+            }
+        }
+
+        let mut beginner = beginner_edit(location(
+            EditAction::Update,
+            5,
+            None,
+            "/// The name to greet.",
+            Placement::After,
+        ));
+        beginner.where_ = Some(place.into());
+        assert_eq!(
+            where_line(&beginner).as_deref(),
+            Some("Replace the line `/// The name to greet.`")
+        );
+    }
+
+    #[test]
+    fn open_target_jumps_only_at_the_beginner_level() {
+        let target = |guidance: Option<Guidance>, current_step: usize| {
+            let mut state = guided_state(current_step);
+            state.guidance = guidance;
+            open_target(&step_card(&state).expect("a card"))
+        };
+        let open = |path: &str, jump: OpenJump| {
+            Some(OpenTarget {
+                path: path.into(),
+                jump,
+            })
+        };
+        assert_eq!(target(None, 0), open("src/a.rs", OpenJump::None));
+
+        let insert = location(
+            EditAction::Insert,
+            6,
+            None,
+            "pub name: String,",
+            Placement::After,
+        );
+        let mut located = beginner_edit(insert.clone());
+        located.path = Some("src/b.rs".into());
+        assert_eq!(
+            target(Some(located.clone()), 0),
+            open("src/b.rs", OpenJump::Location(insert.clone()))
+        );
+        located.path = None;
+        assert_eq!(
+            target(Some(located), 0),
+            open("src/a.rs", OpenJump::Location(insert.clone()))
+        );
+
+        let mut legacy = guidance(0);
+        legacy.level = HelpLevel::Beginner;
+        legacy.anchor = Some("struct A".into());
+        assert_eq!(
+            target(Some(legacy.clone()), 0),
+            open("src/a.rs", OpenJump::LegacyAnchor("struct A".into()))
+        );
+        legacy.anchor = Some("  ".into());
+        assert_eq!(target(Some(legacy), 0), open("src/a.rs", OpenJump::None));
+
+        for level in [HelpLevel::Intermediate, HelpLevel::Expert] {
+            let mut guidance = guidance(0);
+            guidance.level = level;
+            guidance.anchor = Some("struct A".into());
+            guidance.location = Some(insert.clone());
+            assert_eq!(
+                target(Some(guidance), 0),
+                open("src/a.rs", OpenJump::None),
+                "{level:?}"
+            );
+        }
+
+        assert_eq!(target(None, 1), None);
+        let mut command = guidance(1);
+        command.level = HelpLevel::Beginner;
+        command.command = Some("go test ./...".into());
+        command.path = None;
+        assert_eq!(target(Some(command), 1), None);
+    }
+
+    #[test]
+    fn part_at_prefers_the_shortest_span() {
+        let parts = [
+            block_part("#[arg(long)]", "a", vec![4..16]),
+            block_part("long", "b", vec![10..14]),
+        ];
+        assert_eq!(part_at(&parts, 11), Some(1));
+        assert_eq!(part_at(&parts, 5), Some(0));
+        assert_eq!(part_at(&parts, 0), None);
+    }
+
+    #[test]
+    fn inline_code_removes_backtick_pairs() {
+        let cases: [(&str, &str, Vec<Range<usize>>); 7] = [
+            ("`bool` is a type", "bool is a type", vec![0..4]),
+            ("a `b` and `c`", "a b and c", vec![2..3, 8..9]),
+            ("no code", "no code", vec![]),
+            ("odd ` one", "odd ` one", vec![]),
+            ("`a` and ` b", "a and ` b", vec![0..1]),
+            ("``", "", vec![]),
+            ("é `ü` x", "é ü x", vec![3..5]),
+        ];
+        for (text, shown, code) in cases {
+            assert_eq!(inline_code(text), (shown.to_owned(), code), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn part_label_is_the_first_line_cut_to_sixty_characters() {
+        assert_eq!(part_label("#[arg(long)]"), "#[arg(long)]");
+        assert_eq!(part_label("  fn main() {\n    run();\n}"), "fn main() {…");
+        assert_eq!(part_label(&"x".repeat(61)), format!("{}…", "x".repeat(60)));
+        assert_eq!(part_label(&"x".repeat(60)), "x".repeat(60));
+        assert_eq!(part_label(""), "");
     }
 
     #[test]
