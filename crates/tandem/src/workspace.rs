@@ -3,6 +3,10 @@ mod chat_logic;
 mod chat_view;
 mod code_view;
 pub mod commands;
+// The terminal, chat and explorer fonts are read from Tasks 5, 6 and 8 on, the
+// substitutions from Task 9 on; Task 9 removes this attribute.
+#[allow(dead_code)]
+mod fonts;
 mod hover;
 mod look;
 mod pane_logic;
@@ -190,7 +194,6 @@ pub struct Workspace {
     error: bool,
     recent: Vec<String>,
     show_recent: bool,
-    font_size: f32,
     panes: PaneUi,
     look: LookUi,
     look_controls: settings_look::LookControls,
@@ -253,7 +256,8 @@ impl Workspace {
             )
         };
         let panes = PaneUi::load(&store.lock().unwrap());
-        let look = LookUi::load(&store.lock().unwrap());
+        let installed = cx.text_system().all_font_names();
+        let look = LookUi::load(&store.lock().unwrap(), installed);
         let look_controls = settings_look::LookControls::new(&look.prefs, window, cx);
         let mut view = Self {
             chat: ChatUi::new(window, cx),
@@ -275,7 +279,6 @@ impl Workspace {
             error: false,
             recent,
             show_recent: false,
-            font_size: 14.0,
             panes,
             look,
             look_controls,
@@ -299,6 +302,7 @@ impl Workspace {
             hover: cx.new(hover::HoverTip::new),
         };
         view.apply_window_look(window);
+        view.apply_fonts(cx);
         let weak = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
@@ -372,7 +376,7 @@ impl Workspace {
                 .active
                 .and_then(|i| self.tabs.get(i))
                 .map(|t| t.document.path.clone()),
-            font_size: self.font_size,
+            font_size: self.look.prefs.fonts.editor.size,
             sequence: self.generation,
         })
     }
@@ -560,7 +564,7 @@ impl Workspace {
                         view.start_chat(window, cx);
                         let name = loaded.project.root.file_name().map(|name| name.to_string_lossy()).unwrap_or_else(|| "Project".into());
                         window.set_window_title(&format!("{name} — Tandem"));
-                        view.font_size = loaded.state.font_size.clamp(10.0, 30.0); view.expanded.clear(); view.search_hits.clear();
+                        view.expanded.clear(); view.search_hits.clear();
                         view.set_sidebar(Sidebar::Files, window, cx);
                         for document in loaded.documents { view.add_tab(document, window, cx); }
                         view.active = loaded.state.active.and_then(|path| view.tabs.iter().position(|t| t.document.path == path)).or_else(|| (!view.tabs.is_empty()).then_some(0));
@@ -1201,9 +1205,11 @@ impl Workspace {
         self.bottom = next_bottom(self.bottom, BottomTab::Terminal);
         cx.notify();
     }
+    /// ⌘= and ⌘−: the editor's font size, for every project.
     fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
-        self.font_size = (self.font_size + delta).clamp(10.0, 30.0);
-        self.changed(cx);
+        let size = &mut self.look.prefs.fonts.editor.size;
+        *size = tandem_core::appearance::zoomed(*size, delta);
+        self.apply_fonts(cx);
     }
     fn navigation(&self, cx: &App) -> Vec<(String, String, usize, bool)> {
         let query = self.query.read(cx).text().to_string().to_lowercase();

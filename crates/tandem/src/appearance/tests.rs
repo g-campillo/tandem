@@ -1,4 +1,4 @@
-use super::{WorkspaceGeometry, palette, project};
+use super::{WorkspaceGeometry, palette, project, project_code_font};
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::{Theme, ThemeConfig, ThemeMode};
 use gpui_kit::{Hsla, Rgba, WindowAppearance, px, rgb};
@@ -141,6 +141,26 @@ fn appearance_reapplies_after_each_toolkit_mode_reload() {
         project(&mut theme);
         assert_eq!(theme.tokens, tokens, "reapplying is idempotent");
     }
+}
+
+#[test]
+fn appearance_code_font_follows_the_editor_font() {
+    let mut theme = Theme::default();
+    reload(&mut theme, ThemeMode::Dark);
+    project(&mut theme);
+    let toolkit_code_font = theme.mono_font_family.clone();
+    project_code_font(&mut theme, None);
+    assert_eq!(
+        theme.mono_font_family, toolkit_code_font,
+        "without an editor font the toolkit's code font stays"
+    );
+    project_code_font(&mut theme, Some("FiraCode Nerd Font".into()));
+    assert_eq!(theme.mono_font_family.as_ref(), "FiraCode Nerd Font");
+    assert_eq!(
+        theme.font_family.as_ref(),
+        ".SystemUIFont",
+        "the interface font is not the code font"
+    );
 }
 
 fn composite(foreground: Hsla, background: Hsla) -> Hsla {

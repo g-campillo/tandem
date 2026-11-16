@@ -156,7 +156,7 @@ pub fn panel_code<T: Styled>(element: T, cx: &App) -> T {
         .bg(palette(Theme::global(cx).mode).content)
         .min_w_0()
         .p_3()
-        .font_family("Menlo")
+        .font_family(Theme::global(cx).mono_font_family.clone())
         .text_size(px(12.))
         .line_height(px(18.))
         .text_color(palette(Theme::global(cx).mode).foreground)
@@ -239,8 +239,30 @@ pub fn install(window: &mut Window, cx: &mut App) -> Subscription {
     window.observe_window_appearance(apply)
 }
 
+/// The family of the editor's font. The toolkit draws its own code in it too.
+struct CodeFont(SharedString);
+
+impl gpui_kit::Global for CodeFont {}
+
+/// Makes `family` the code font of everything the toolkit draws.
+pub fn set_code_font(cx: &mut App, family: SharedString) {
+    cx.set_global(CodeFont(family));
+    apply_palette(cx);
+}
+
 fn apply_palette(cx: &mut App) {
-    Theme::update(cx, project);
+    let code_font = cx.try_global::<CodeFont>().map(|font| font.0.clone());
+    Theme::update(cx, |theme| {
+        project(theme);
+        project_code_font(theme, code_font);
+    });
+}
+
+/// Pure: the theme's code font becomes `family`, when there is one.
+fn project_code_font(theme: &mut Theme, family: Option<SharedString>) {
+    if let Some(family) = family {
+        theme.mono_font_family = family;
+    }
 }
 
 impl Palette {

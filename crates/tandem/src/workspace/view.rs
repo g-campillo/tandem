@@ -395,6 +395,7 @@ impl Workspace {
         } else {
             "Recovered unsaved draft · Review before saving."
         };
+        let face = self.look.fonts.editor.clone();
         let recent = self
             .recent
             .iter()
@@ -531,7 +532,9 @@ impl Workspace {
                                     .aria_label("Read-only changes preview")
                                     .h(relative(1.0))
                                     .size_full()
-                                    .text_size(px(self.font_size)),
+                                    .font_family(face.family.clone())
+                                    .font_features(face.features.clone())
+                                    .text_size(px(face.size)),
                             )
                         },
                     )
@@ -547,7 +550,9 @@ impl Workspace {
                                     .aria_label(format!("Editor: {path}"))
                                     .h(relative(1.0))
                                     .size_full()
-                                    .text_size(px(self.font_size)),
+                                    .font_family(face.family.clone())
+                                    .font_features(face.features.clone())
+                                    .text_size(px(face.size)),
                             )
                             .child(self.hover.clone())
                         })

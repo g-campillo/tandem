@@ -1,5 +1,6 @@
 //! How the window looks: the saved appearance, and applying its opacity and blur to the
 //! native window.
+use super::fonts::{self, pane_fonts};
 use super::*;
 use crate::native_window;
 use tandem_core::appearance::{AppearancePrefs, BLUR_MAX, OPACITY, blur_radius, window_alpha};
@@ -21,17 +22,24 @@ pub(super) struct LookUi {
     pub blur: BlurBackend,
     /// The window background last asked of GPUI, so it is only set when it changes.
     background: Option<WindowBackgroundAppearance>,
+    /// The installed font families.
+    pub installed: Vec<String>,
+    /// The fonts on screen.
+    pub fonts: fonts::PaneFonts,
 }
 
 impl LookUi {
-    /// The saved appearance, or the default one when none was saved or it cannot be read.
-    pub fn load(store: &Store) -> Self {
+    /// The saved appearance, or the default one when none was saved or it cannot be read,
+    /// with its fonts resolved against the `installed` families.
+    pub fn load(store: &Store, installed: Vec<String>) -> Self {
         let prefs = store.appearance_prefs().unwrap_or_default();
         Self {
+            fonts: pane_fonts(&prefs.fonts, &installed),
             saved: prefs.clone(),
             prefs,
             blur: BlurBackend::WindowServer,
             background: None,
+            installed,
         }
     }
 }
@@ -103,6 +111,15 @@ impl Workspace {
             window.set_background_appearance(background);
             self.look.background = Some(background);
         }
+    }
+
+    /// Resolves the saved fonts against the installed families. The panes read
+    /// `self.look.fonts` when they are drawn; the toolkit's own code font (hover
+    /// signatures, Markdown code, the diff view) follows the editor's.
+    pub(super) fn apply_fonts(&mut self, cx: &mut Context<Self>) {
+        self.look.fonts = pane_fonts(&self.look.prefs.fonts, &self.look.installed);
+        crate::appearance::set_code_font(cx, self.look.fonts.editor.family.clone());
+        cx.notify();
     }
 
     /// Writes the appearance to the store when it differs from what the store holds. A
