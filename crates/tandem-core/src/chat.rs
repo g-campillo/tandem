@@ -462,20 +462,28 @@ impl Guidance {
                     );
                 }
             }
-            StepKind::CreateFile | StepKind::EditFile => match self.level {
-                HelpLevel::Beginner => ensure!(
-                    has_code && has_breakdown,
-                    "At the beginner level, give the complete code for this step and a breakdown entry for every keyword, construct and function call."
-                ),
-                HelpLevel::Intermediate => ensure!(
-                    has_pseudocode && !has_code,
-                    "At the intermediate level, give pseudocode, not the finished code, because the user wants to write it."
-                ),
-                HelpLevel::Expert => ensure!(
-                    !has_code && !has_pseudocode && !has_breakdown,
-                    "At the expert level, give only a short description and the reason."
-                ),
-            },
+            StepKind::CreateFile | StepKind::EditFile => {
+                match self.level {
+                    HelpLevel::Beginner => ensure!(
+                        has_code && has_breakdown,
+                        "At the beginner level, give the complete code for this step and a breakdown entry for every keyword, construct and function call."
+                    ),
+                    HelpLevel::Intermediate => ensure!(
+                        has_pseudocode && !has_code,
+                        "At the intermediate level, give pseudocode, not the finished code, because the user wants to write it."
+                    ),
+                    HelpLevel::Expert => ensure!(
+                        !has_code && !has_pseudocode && !has_breakdown,
+                        "At the expert level, give only a short description and the reason."
+                    ),
+                }
+                ensure!(
+                    step.kind != StepKind::EditFile
+                        || self.level == HelpLevel::Beginner
+                        || present(&self.where_),
+                    "Say where the change goes in `where`, in words (for example: in src/cli.rs, inside struct Args, after the verbose field), because at this level the user finds the place themselves."
+                );
+            }
         }
         ensure!(
             self.breakdown
@@ -951,7 +959,7 @@ mod tests {
             breakdown: Vec::new(),
             path: Some("src/cli.rs".into()),
             anchor: None,
-            where_: None,
+            where_: Some("in src/cli.rs, inside struct Args, after the last field".into()),
             location: None,
         }
     }
@@ -1137,6 +1145,43 @@ mod tests {
         intermediate.pseudocode = Some("add a bool field".into());
         intermediate.breakdown = vec![entry("#[arg(long)]", "")];
         assert_eq!(message(intermediate.check(&file_step())), expected);
+    }
+
+    #[test]
+    fn an_edit_above_the_beginner_level_must_say_where() {
+        let expected = "Say where the change goes in `where`, in words (for example: in src/cli.rs, inside struct Args, after the verbose field), because at this level the user finds the place themselves.";
+        let mut intermediate = guidance(HelpLevel::Intermediate);
+        intermediate.pseudocode = Some("add a bool field".into());
+        let expert = guidance(HelpLevel::Expert);
+        for g in [intermediate.clone(), expert] {
+            g.check(&file_step()).unwrap();
+            for missing in [None, Some("  ".to_owned())] {
+                let mut without = g.clone();
+                without.where_ = missing;
+                assert_eq!(message(without.check(&file_step())), expected, "{g:?}");
+            }
+        }
+
+        let mut beginner = guidance(HelpLevel::Beginner);
+        beginner.code = Some("#[arg(long)]\njson: bool,".into());
+        beginner.breakdown = breakdown();
+        beginner.where_ = None;
+        beginner.check(&file_step()).unwrap();
+
+        let mut new_file = intermediate;
+        new_file.where_ = None;
+        new_file
+            .check(&step(StepKind::CreateFile, "tests/cli.rs", "rust"))
+            .unwrap();
+
+        for level in HelpLevel::ALL {
+            let mut g = guidance(level);
+            g.path = None;
+            g.where_ = None;
+            g.command = Some("cargo add serde".into());
+            g.breakdown = vec![entry("cargo", "Rust's build tool.")];
+            g.check(&command_step()).unwrap();
+        }
     }
 
     #[test]

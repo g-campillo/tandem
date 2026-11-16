@@ -1,9 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import * as mockSdk from './support/mock-sdk.mjs';
 import { TANDEM_TOOL_NAMES, createTandemServer } from '../src/tools.mjs';
 
 const NAMES = ['propose_plan', 'show_step', 'report_check', 'step_done', 'read_editor_buffer'];
+/** `show_step` inputs that Tandem's Rust tests read too. */
+const SHOW_STEP_SAMPLES = JSON.parse(
+  fs.readFileSync(new URL('./fixtures/show_step.json', import.meta.url), 'utf8'),
+);
 
 function serverWith(answer) {
   const asked = [];
@@ -79,4 +84,43 @@ test('the input shapes accept a valid plan and reject an empty one', () => {
   }
   assert.equal(shape.steps.safeParse([]).success, false);
   assert.equal(shape.steps.safeParse([{ ...valid.steps[0], kind: 'delete_file' }]).success, false);
+});
+
+function showStepShape() {
+  const { server } = serverWith({ ok: true });
+  return server.tools.find((candidate) => candidate.name === 'show_step').inputSchema;
+}
+
+test('the show_step shape accepts every fixture input', () => {
+  const shape = showStepShape();
+  const samples = Object.entries(SHOW_STEP_SAMPLES);
+  assert.equal(samples.length, 5);
+  for (const [name, sample] of samples) {
+    for (const key of Object.keys(sample)) {
+      assert.ok(Object.hasOwn(shape, key), `${name}: ${key} is not in the shape`);
+    }
+    for (const [key, schema] of Object.entries(shape)) {
+      assert.equal(schema.safeParse(sample[key]).success, true, `${name}: ${key}`);
+    }
+  }
+});
+
+test('the show_step shape rejects a bad location', () => {
+  const shape = showStepShape();
+  const valid = { action: 'insert', line: 6, anchor: 'pub name: String,', placement: 'after' };
+  assert.equal(shape.location.safeParse(valid).success, true);
+  const withoutAnchor = { ...valid };
+  delete withoutAnchor.anchor;
+  for (const bad of [
+    { ...valid, action: 'move' },
+    { ...valid, line: 0 },
+    withoutAnchor,
+    { ...valid, placement: 'inside' },
+  ]) {
+    assert.equal(shape.location.safeParse(bad).success, false, JSON.stringify(bad));
+  }
+  const keys = Object.keys(shape);
+  assert.ok(!keys.includes('anchor'));
+  assert.ok(keys.includes('where'));
+  assert.ok(keys.includes('location'));
 });

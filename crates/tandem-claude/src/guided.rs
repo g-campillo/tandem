@@ -7,14 +7,14 @@
 use crate::companion::Controller;
 use crate::prompts;
 use crate::protocol::{Policy, TurnStatus};
-use crate::state::{ChatState, Connection, TurnKind};
+use crate::state::{ChatState, Connection, HostAnswer, HostQuestion, TurnKind};
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 use tandem_core::Store;
 use tandem_core::chat::{
-    BreakdownItem, ChatPrefs, ChatTask, CheckResult, Finding, Guidance, HelpLevel, ItemKind, Mode,
-    Phase, PlanStep, StepKind, TakeoverScope, normalize_language,
+    BreakdownItem, ChatPrefs, ChatTask, CheckResult, EditLocation, Finding, Guidance, HelpLevel,
+    ItemKind, Mode, Phase, PlanStep, StepKind, TakeoverScope, normalize_language,
 };
 
 const BUILDING: &str = "You are building this. Claude guides each step.";
@@ -58,7 +58,9 @@ struct ShowStepInput {
     #[serde(default)]
     breakdown: Vec<BreakdownItem>,
     path: Option<String>,
-    anchor: Option<String>,
+    #[serde(rename = "where")]
+    where_: Option<String>,
+    location: Option<EditLocation>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -128,6 +130,34 @@ fn idle_and_ready(state: &ChatState) -> bool {
 /// `None` for a missing or blank text.
 fn non_blank(text: Option<String>) -> Option<String> {
     text.filter(|text| !text.trim().is_empty())
+}
+
+/// The guidance a `show_step` input describes for the step at `index`, at `level`.
+fn guidance_from(
+    input: ShowStepInput,
+    index: usize,
+    level: HelpLevel,
+    step: &PlanStep,
+) -> Guidance {
+    let path = match non_blank(input.path) {
+        Some(path) => Some(path.trim().to_owned()),
+        None if step.kind != StepKind::RunCommand => Some(step.target.clone()),
+        None => None,
+    };
+    Guidance {
+        step: index,
+        level,
+        summary: input.summary.trim().to_owned(),
+        why: input.why.trim().to_owned(),
+        code: non_blank(input.code),
+        pseudocode: non_blank(input.pseudocode),
+        command: non_blank(input.command).map(|command| command.trim().to_owned()),
+        breakdown: input.breakdown,
+        path,
+        anchor: None,
+        where_: non_blank(input.where_).map(|text| text.trim().to_owned()),
+        location: input.location,
+    }
 }
 
 impl Controller {
@@ -313,27 +343,21 @@ impl Controller {
             );
         }
         let level = turn_level.unwrap_or_else(|| state.prefs.help_level(&step.language));
-        let path = match non_blank(input.path) {
-            Some(path) => Some(path.trim().to_owned()),
-            None if step.kind != StepKind::RunCommand => Some(step.target.clone()),
-            None => None,
-        };
-        let guidance = Guidance {
-            step: task.current_step,
-            level,
-            summary: input.summary.trim().to_owned(),
-            why: input.why.trim().to_owned(),
-            code: non_blank(input.code),
-            pseudocode: non_blank(input.pseudocode),
-            command: non_blank(input.command).map(|command| command.trim().to_owned()),
-            breakdown: input.breakdown,
-            path,
-            anchor: non_blank(input.anchor),
-            where_: None,
-            location: None,
-        };
+        let mut guidance = guidance_from(input, task.current_step, level, step);
         if let Err(error) = guidance.check(step) {
             return (false, format!("{error:#}"));
+        }
+        let file = (level == HelpLevel::Beginner && step.kind == StepKind::EditFile)
+            .then(|| {
+                guidance
+                    .path
+                    .as_deref()
+                    .and_then(|path| self.current_text(path))
+            })
+            .flatten();
+        match guidance.located(step, file.as_deref()) {
+            Ok(location) => guidance.location = location,
+            Err(error) => return (false, format!("{error:#}")),
         }
         if let Err(error) = self.with_store(|store| store.save_chat_guidance(&task.id, &guidance)) {
             self.set_banner(format!("Could not save the step guidance: {error:#}"));
@@ -344,6 +368,21 @@ impl Controller {
             self.update(|state| state.guidance = Some(guidance));
         }
         (true, GUIDANCE_SHOWN.into())
+    }
+
+    /// The file's text as the user sees it: the editor's buffer when the file is open
+    /// (unsaved changes included), otherwise the saved file. `None` when neither can be read.
+    fn current_text(&self, path: &str) -> Option<String> {
+        match self.ask_host(HostQuestion::ReadBuffer {
+            path: path.to_owned(),
+        }) {
+            Some(HostAnswer::Buffer(Some(buffer))) => Some(buffer.text),
+            _ => self
+                .project
+                .open_document(path, false)
+                .ok()
+                .map(|document| document.text),
+        }
     }
 
     /// The `report_check` tool: one verdict per Check or FinalCheck turn, or per takeover
@@ -454,5 +493,105 @@ impl Controller {
             Some(FollowUp::FinalCheck) => self.start_final_check(),
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tandem_core::chat::{EditAction, Placement};
+
+    /// `show_step` inputs that the helper's tests read too.
+    const SAMPLES: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/helper/test/fixtures/show_step.json"
+    ));
+
+    /// `src/cli.rs` of the samples, 7 lines.
+    const CLI: &str = "use clap::Parser;\n\n#[derive(Parser)]\npub struct Args {\n    /// The name to greet.\n    pub name: String,\n}\n";
+
+    fn sample(name: &str) -> Value {
+        let samples: Value = serde_json::from_str(SAMPLES).expect("the fixture is JSON");
+        samples[name].clone()
+    }
+
+    fn edit_step() -> PlanStep {
+        PlanStep {
+            kind: StepKind::EditFile,
+            target: "src/cli.rs".into(),
+            summary: "Add a `json` flag to Args".into(),
+            language: "rust".into(),
+        }
+    }
+
+    fn command_step() -> PlanStep {
+        PlanStep {
+            kind: StepKind::RunCommand,
+            target: "cargo add serde".into(),
+            summary: "Add serde".into(),
+            language: "rust".into(),
+        }
+    }
+
+    /// The guidance the sample `name` describes for `step` at `level`.
+    fn sample_guidance(name: &str, step: &PlanStep, level: HelpLevel) -> Guidance {
+        let input = serde_json::from_value::<ShowStepInput>(sample(name))
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let index = input.step - 1;
+        guidance_from(input, index, level, step)
+    }
+
+    #[test]
+    fn the_fixture_inputs_make_valid_guidance() {
+        let mut cases = vec![
+            ("beginner_edit", edit_step(), HelpLevel::Beginner),
+            ("beginner_update", edit_step(), HelpLevel::Beginner),
+            ("intermediate_edit", edit_step(), HelpLevel::Intermediate),
+            ("expert_edit", edit_step(), HelpLevel::Expert),
+        ];
+        cases.extend(HelpLevel::ALL.map(|level| ("command", command_step(), level)));
+        for (name, step, level) in cases {
+            let guidance = sample_guidance(name, &step, level);
+            assert_eq!(guidance.level, level, "{name}");
+            if let Err(error) = guidance.check(&step) {
+                panic!("{name} at {level:?}: {error:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_fixture_locations_match_the_file() {
+        let step = edit_step();
+        let edit = sample_guidance("beginner_edit", &step, HelpLevel::Beginner);
+        let location = edit.located(&step, Some(CLI)).unwrap().expect("a location");
+        assert_eq!(location.action, EditAction::Insert);
+        assert_eq!(location.line, 6);
+        assert_eq!(location.anchor, "pub name: String,");
+        assert_eq!(location.placement, Placement::After);
+
+        let update = sample_guidance("beginner_update", &step, HelpLevel::Beginner);
+        let location = update
+            .located(&step, Some(CLI))
+            .unwrap()
+            .expect("a location");
+        assert_eq!(location.action, EditAction::Update);
+        assert_eq!(location.line, 5);
+        assert_eq!(location.end_line, None);
+
+        let intermediate = sample_guidance("intermediate_edit", &step, HelpLevel::Intermediate);
+        assert_eq!(intermediate.located(&step, Some(CLI)).unwrap(), None);
+        assert_eq!(
+            intermediate.where_.as_deref(),
+            Some("in src/cli.rs, inside struct Args, after the name field")
+        );
+    }
+
+    #[test]
+    fn an_old_anchor_field_is_ignored() {
+        let mut input = sample("beginner_edit");
+        input["anchor"] = Value::from("x");
+        let input = serde_json::from_value::<ShowStepInput>(input).unwrap();
+        let guidance = guidance_from(input, 0, HelpLevel::Beginner, &edit_step());
+        assert_eq!(guidance.anchor, None);
     }
 }
