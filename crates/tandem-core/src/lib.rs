@@ -4,6 +4,7 @@ pub use storage::*;
 // Not glob-exported: its names overlap the older workflow types.
 pub mod chat;
 mod chat_store;
+pub mod takeover;
 mod task;
 mod tools;
 pub use task::*;
