@@ -27,7 +27,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tandem_core::chat::{
     ActivityKind, ChatItem, ChatPrefs, ChatTask, DEFAULT_MODEL, ItemKind, Mode, NEW_TASK_TITLE,
-    Phase, Plan, TaskSummary,
+    PermissionMode, Phase, Plan, TaskSummary,
 };
 use tandem_core::{Project, Store, new_id, normalized_relative};
 
@@ -57,6 +57,8 @@ const STOPPED_NOTICE: &str = "Stopped.";
 const STALE_MODEL: &str = "The saved model is no longer available; using Default.";
 const MODEL_UNAVAILABLE: &str = "That model is not available.";
 const EFFORT_UNAVAILABLE: &str = "That effort is not available for this model.";
+const BYPASS_WHILE_WORKING: &str =
+    "Wait for Claude to finish, or press Stop, before switching to or from Bypass.";
 const PLAN_SHOWN: &str = "The plan is on screen with two choices: \"I'll write it\" and \"You do it\". Stop here and do not implement anything. Finish with one short sentence asking the user to review the plan.";
 const PLAN_LOCKED: &str = "The plan cannot change during Build. Adapt inside the current step, or tell the user to start a new task for a different plan.";
 const TOOL_UNAVAILABLE: &str = "This tool is not available right now.";
@@ -378,6 +380,7 @@ impl Controller {
             Command::SetModel(value) => self.set_model(value),
             Command::SetEffort(value) => self.set_effort(value),
             Command::SetUseMySetup(value) => self.set_use_my_setup(value),
+            Command::SetPermissionMode(mode) => self.set_permission_mode(mode),
             Command::ChooseGuided => self.choose_guided(),
             Command::GuideStep => self.guide_step(),
             Command::CheckMyWork => self.check_my_work(),
@@ -506,6 +509,7 @@ impl Controller {
                 use_my_setup: state.prefs.use_my_setup,
                 model: state.prefs.model.clone(),
                 effort: state.prefs.effort.clone(),
+                permission_mode: state.prefs.permission_mode,
                 system_append: prompts::SYSTEM_APPEND.to_owned(),
             };
             match self.request(|id| Outgoing::OpenSession { id, open }, OPEN_TIMEOUT) {
@@ -1076,6 +1080,7 @@ impl Controller {
             policy,
             model: prefs.model,
             effort: prefs.effort,
+            permission_mode: prefs.permission_mode,
         };
         match self.request(|id| Outgoing::Turn { id, turn }, COMMAND_TIMEOUT) {
             Ok(_) => {
@@ -1214,6 +1219,28 @@ impl Controller {
         self.save_prefs(&prefs);
         self.update(|state| state.prefs = prefs);
         self.reopen_session();
+    }
+
+    /// Saves the permission mode; it rides on the next turn. Claude Code accepts its bypass
+    /// mode only in a session launched for it, so crossing into or out of Bypass reopens
+    /// the session (resumed), which has to wait until Claude is idle.
+    fn set_permission_mode(&mut self, mode: PermissionMode) {
+        let state = self.snapshot();
+        let current = state.prefs.permission_mode;
+        if mode == current {
+            return;
+        }
+        let reopens = (mode == PermissionMode::Bypass) != (current == PermissionMode::Bypass);
+        if reopens && state.turn.is_some() {
+            return self.set_banner(BYPASS_WHILE_WORKING);
+        }
+        let mut prefs = state.prefs.clone();
+        prefs.permission_mode = mode;
+        self.save_prefs(&prefs);
+        self.update(|state| state.prefs = prefs);
+        if reopens {
+            self.reopen_session();
+        }
     }
 
     /// Interrupts a running turn (waiting up to 2 s for it to finish), then closes the

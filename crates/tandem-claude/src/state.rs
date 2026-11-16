@@ -7,7 +7,8 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use tandem_core::Store;
 use tandem_core::chat::{
-    ChangeSet, ChatItem, ChatPrefs, ChatTask, Guidance, HelpLevel, TakeoverScope, TaskSummary,
+    ChangeSet, ChatItem, ChatPrefs, ChatTask, Guidance, HelpLevel, PermissionMode, TakeoverScope,
+    TaskSummary,
 };
 
 /// How far Tandem got in reaching Claude.
@@ -139,6 +140,7 @@ pub enum Command {
     SetModel(String),
     SetEffort(Option<String>),
     SetUseMySetup(bool),
+    SetPermissionMode(PermissionMode),
     /// "I'll write it" on the plan card: start the guided build.
     ChooseGuided,
     /// Ask Claude again for guidance on the active step.

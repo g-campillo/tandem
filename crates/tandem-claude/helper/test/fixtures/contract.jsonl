@@ -1,8 +1,8 @@
 {"dir":"to_helper","frame":{"v":1,"type":"hello","id":1}}
 {"dir":"from_helper","frame":{"v":1,"type":"reply","id":1,"ok":true,"data":{"protocol":1,"helper":"<helper>","sdk":"mock","claude_code":"mock","node":"<node>"}}}
-{"dir":"to_helper","frame":{"v":1,"type":"open_session","id":2,"cwd":"/tmp/tandem-contract","session_id":"11111111-1111-4111-8111-111111111111","resume":null,"use_my_setup":false,"model":"default","effort":null,"system_append":"x"}}
+{"dir":"to_helper","frame":{"v":1,"type":"open_session","id":2,"cwd":"/tmp/tandem-contract","session_id":"11111111-1111-4111-8111-111111111111","resume":null,"use_my_setup":false,"model":"default","effort":null,"permission_mode":"ask","system_append":"x"}}
 {"dir":"from_helper","frame":{"v":1,"type":"reply","id":2,"ok":true,"data":{"auth":{"ok":true},"account":{"subscription":"Claude Ultra","provider":"firstParty"},"claude_code_version":"2.1.325","models":[{"value":"default","name":"Default (recommended)","description":"d","efforts":["low","high"]},{"value":"haiku","name":"Haiku","description":"h","efforts":[]}]}}}
-{"dir":"to_helper","frame":{"v":1,"type":"turn","id":3,"text":"plan","policy":"discuss","model":"default","effort":null}}
+{"dir":"to_helper","frame":{"v":1,"type":"turn","id":3,"text":"plan","policy":"discuss","model":"default","effort":null,"permission_mode":"ask"}}
 {"dir":"from_helper","frame":{"v":1,"type":"reply","id":3,"ok":true,"data":{}}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"turn_started","turn":3}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"text_delta","text":"Here"}}
@@ -11,20 +11,20 @@
 {"dir":"to_helper","frame":{"v":1,"type":"response","id":"r1","ok":true,"text":"shown"}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"assistant_text","text":"Here is the plan."}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"turn_finished","turn":3,"status":"completed","error":null}}
-{"dir":"to_helper","frame":{"v":1,"type":"turn","id":4,"text":"ask","policy":"guided","model":"default","effort":null}}
+{"dir":"to_helper","frame":{"v":1,"type":"turn","id":4,"text":"ask","policy":"guided","model":"default","effort":null,"permission_mode":"ask"}}
 {"dir":"from_helper","frame":{"v":1,"type":"reply","id":4,"ok":true,"data":{}}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"turn_started","turn":4}}
 {"dir":"from_helper","frame":{"v":1,"type":"request","id":"r2","request":"permission","tool":"Bash","title":"Claude wants to run npm install left-pad","detail":"","command":"npm install left-pad","path":null}}
 {"dir":"to_helper","frame":{"v":1,"type":"response","id":"r2","allow":false}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"assistant_text","text":"denied"}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"turn_finished","turn":4,"status":"completed","error":null}}
-{"dir":"to_helper","frame":{"v":1,"type":"turn","id":5,"text":"hold","policy":"takeover","model":"default","effort":null}}
+{"dir":"to_helper","frame":{"v":1,"type":"turn","id":5,"text":"hold","policy":"takeover","model":"default","effort":null,"permission_mode":"auto"}}
 {"dir":"from_helper","frame":{"v":1,"type":"reply","id":5,"ok":true,"data":{}}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"turn_started","turn":5}}
 {"dir":"to_helper","frame":{"v":1,"type":"interrupt","id":6}}
 {"dir":"from_helper","frame":{"v":1,"type":"reply","id":6,"ok":true,"data":{}}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"turn_finished","turn":5,"status":"interrupted","error":null}}
-{"dir":"to_helper","frame":{"v":1,"type":"turn","id":7,"text":"limit","policy":"discuss","model":"default","effort":null}}
+{"dir":"to_helper","frame":{"v":1,"type":"turn","id":7,"text":"limit","policy":"discuss","model":"default","effort":null,"permission_mode":"ask"}}
 {"dir":"from_helper","frame":{"v":1,"type":"reply","id":7,"ok":true,"data":{}}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"turn_started","turn":7}}
 {"dir":"from_helper","frame":{"v":1,"type":"event","event":"turn_finished","turn":7,"status":"error","error":"Your Claude plan's usage limit was reached. Try again later."}}
