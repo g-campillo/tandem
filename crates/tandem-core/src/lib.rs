@@ -1,6 +1,7 @@
 //! Local workspace IO and immutable recovery snapshots. No model or shell access.
 mod storage;
 pub use storage::*;
+pub mod appearance;
 pub mod breakdown;
 pub mod chat;
 mod chat_store;
