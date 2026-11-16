@@ -199,6 +199,7 @@ pub struct Workspace {
     bottom: Option<BottomTab>,
     diff: Option<Entity<EditorState>>,
     close_pending: bool,
+    hover: Entity<hover::HoverTip>,
     dev: Development,
     chat: ChatUi,
     settings: SettingsUi,
@@ -274,6 +275,7 @@ impl Workspace {
             bottom: None,
             diff: None,
             close_pending: false,
+            hover: cx.new(hover::HoverTip::new),
         };
         let weak = cx.entity().downgrade();
         window
@@ -314,6 +316,7 @@ impl Workspace {
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.generation = self.generation.saturating_add(1);
+        self.hover.update(cx, |tip, cx| tip.hide(cx));
         cx.notify();
     }
     fn snapshot_live(&mut self, cx: &App) {

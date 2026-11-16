@@ -544,6 +544,7 @@ impl Workspace {
                                     .size_full()
                                     .text_size(px(self.font_size)),
                             )
+                            .child(self.hover.clone())
                         })
                         .when(self.active.is_none(), |d| d.child(empty))
                     }),

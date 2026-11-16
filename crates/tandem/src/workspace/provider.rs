@@ -1,8 +1,6 @@
 use super::*;
-use gpui_kit::component::input::{CompletionProvider, DefinitionProvider, HoverProvider, Rope};
-use lsp_types::{
-    CompletionContext, CompletionResponse, GotoDefinitionResponse, Hover, LocationLink,
-};
+use gpui_kit::component::input::{CompletionProvider, DefinitionProvider, Rope};
+use lsp_types::{CompletionContext, CompletionResponse, GotoDefinitionResponse, LocationLink};
 use tandem_lsp::{LanguageManager, position_params};
 
 #[derive(Clone)]
@@ -125,32 +123,6 @@ impl DefinitionProvider for Provider {
                         .collect()
                 }
             })
-        })
-    }
-}
-impl HoverProvider for Provider {
-    fn hover(
-        &self,
-        text: &Rope,
-        offset: usize,
-        _: &mut Window,
-        cx: &mut App,
-    ) -> Task<Result<Option<Hover>>> {
-        let provider = self.clone();
-        let text = text.to_string();
-        cx.background_spawn(async move {
-            let reply = provider
-                .manager
-                .request(
-                    "textDocument/hover",
-                    &provider.file,
-                    &provider.instance,
-                    &text,
-                    position_params(&text, offset)?,
-                )
-                .await?;
-            anyhow::ensure!(provider.manager.is_current(&reply.stamp), "Stale hover");
-            Ok(serde_json::from_value(reply.value)?)
         })
     }
 }
