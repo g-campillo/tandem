@@ -6,8 +6,9 @@
 use anyhow::{Result, ensure};
 use std::{fs, path::PathBuf};
 use tandem_core::chat::{
-    ActivityKind, BreakdownItem, ChangeSet, ChangeSetStatus, Decision, FileChange, Guidance,
-    HelpLevel, ItemKind, Mode, Phase, Plan, PlanStep, StepKind, TakeoverScope,
+    ActivityKind, BreakdownItem, ChangeSet, ChangeSetStatus, Decision, EditAction, EditLocation,
+    FileChange, Guidance, HelpLevel, ItemKind, Mode, Phase, Placement, Plan, PlanStep, StepKind,
+    TakeoverScope,
 };
 use tandem_core::takeover::Snapshot;
 use tandem_core::{Project, Store, new_id, now_ms};
@@ -61,7 +62,15 @@ fn first_step_guidance() -> Guidance {
             ),
         ],
         path: Some("src/cli.rs".into()),
-        anchor: Some("pub struct Args {".into()),
+        anchor: None,
+        where_: None,
+        location: Some(EditLocation {
+            action: EditAction::Insert,
+            line: 6,
+            end_line: None,
+            anchor: "pub name: String,".into(),
+            placement: Placement::After,
+        }),
     }
 }
 
@@ -176,6 +185,10 @@ fn main() -> Result<()> {
     store.save_chat_task(&build)?;
     let guidance = first_step_guidance();
     guidance.check(&plan.steps[0])?;
+    ensure!(
+        guidance.located(&plan.steps[0], Some(CLI_RS))? == guidance.location,
+        "The seeded location should match src/cli.rs."
+    );
     store.save_chat_guidance(&build.id, &guidance)?;
     for kind in [
         ItemKind::Plan { plan: plan.clone() },

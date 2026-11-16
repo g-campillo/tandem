@@ -113,6 +113,8 @@ fn beginner_guidance() -> Guidance {
         ],
         path: Some("src/cli.rs".into()),
         anchor: Some("pub struct Args {".into()),
+        where_: None,
+        location: None,
     }
 }
 

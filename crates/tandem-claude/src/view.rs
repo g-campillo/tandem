@@ -820,6 +820,8 @@ mod tests {
             breakdown: Vec::new(),
             path: Some("src/a.rs".into()),
             anchor: None,
+            where_: None,
+            location: None,
         }
     }
 

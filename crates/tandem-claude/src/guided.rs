@@ -329,6 +329,8 @@ impl Controller {
             breakdown: input.breakdown,
             path,
             anchor: non_blank(input.anchor),
+            where_: None,
+            location: None,
         };
         if let Err(error) = guidance.check(step) {
             return (false, format!("{error:#}"));

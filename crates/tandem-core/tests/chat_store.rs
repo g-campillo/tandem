@@ -4,8 +4,8 @@ use std::time::Duration;
 use tandem_core::Store;
 use tandem_core::chat::{
     ActivityKind, BreakdownItem, ChangeKind, ChangeSet, ChangeSetStatus, ChatPrefs, Decision,
-    FileChange, Guidance, HelpLevel, ItemKind, Mode, Phase, Plan, PlanStep, StepKind,
-    TakeoverScope,
+    EditAction, EditLocation, FileChange, Guidance, HelpLevel, ItemKind, Mode, Phase, Placement,
+    Plan, PlanStep, StepKind, TakeoverScope,
 };
 
 /// Lets `now_ms()` move on so update-time ordering is observable.
@@ -41,6 +41,8 @@ fn guidance(step: usize, level: HelpLevel, summary: &str) -> Guidance {
         }],
         path: Some("src/cli.rs".into()),
         anchor: Some("struct Args".into()),
+        where_: None,
+        location: None,
     }
 }
 
@@ -326,6 +328,64 @@ fn guidance_is_stored_per_task_step_and_level() {
             .unwrap(),
         Some(next_step)
     );
+}
+
+#[test]
+fn guidance_with_a_location_and_a_place_survives_a_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = Store::open(directory.path()).unwrap();
+    let task = store.create_chat_task("/p").unwrap();
+    let saved = Guidance {
+        anchor: None,
+        where_: Some("At the end of the Args struct, after the name field.".into()),
+        location: Some(EditLocation {
+            action: EditAction::Update,
+            line: 5,
+            end_line: Some(6),
+            anchor: "/// The name to greet.".into(),
+            placement: Placement::After,
+        }),
+        ..guidance(0, HelpLevel::Beginner, "located")
+    };
+    store.save_chat_guidance(&task.id, &saved).unwrap();
+    drop(store);
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(
+        store
+            .chat_guidance(&task.id, 0, HelpLevel::Beginner)
+            .unwrap(),
+        Some(saved)
+    );
+}
+
+#[test]
+fn guidance_rows_from_before_locations_still_load() {
+    let directory = tempfile::tempdir().unwrap();
+    let task = Store::open(directory.path())
+        .unwrap()
+        .create_chat_task("/p")
+        .unwrap();
+    let path = directory.path().join("workspace.sqlite");
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO chat_guidance(task_id,step,level,data) VALUES(?1,0,'beginner',?2)",
+            params![
+                task.id,
+                r#"{"step":0,"level":"beginner","summary":"s","why":"w","code":"json: bool,","pseudocode":null,"command":null,"breakdown":[{"part":"bool","explanation":"e"}],"path":"src/cli.rs","anchor":"struct Args"}"#
+            ],
+        )
+        .unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let loaded = store
+        .chat_guidance(&task.id, 0, HelpLevel::Beginner)
+        .unwrap()
+        .expect("the old row loads");
+    assert_eq!(loaded.anchor.as_deref(), Some("struct Args"));
+    assert_eq!(loaded.where_, None);
+    assert_eq!(loaded.location, None);
+    drop(store);
+    assert_eq!(user_version(&path), 6);
 }
 
 #[test]

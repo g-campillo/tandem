@@ -242,6 +242,91 @@ pub struct BreakdownItem {
     pub explanation: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditAction {
+    Insert,
+    Update,
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    Before,
+    #[default]
+    After,
+}
+
+/// Where a beginner step's change goes in the step's file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditLocation {
+    pub action: EditAction,
+    /// 1-based number of the anchor line: the line the new code goes next to (insert),
+    /// or the first line to replace or remove.
+    pub line: usize,
+    /// 1-based number of the last line to replace or remove; `None` means `line` only.
+    #[serde(default)]
+    pub end_line: Option<usize>,
+    /// The text of line `line`; lines are compared after trimming both.
+    pub anchor: String,
+    /// Insert only: whether the new code goes before or after the anchor line.
+    #[serde(default)]
+    pub placement: Placement,
+}
+
+impl EditLocation {
+    /// The 1-based last line of the change.
+    pub fn last_line(&self) -> usize {
+        match self.action {
+            EditAction::Insert => self.line,
+            EditAction::Update | EditAction::Remove => {
+                self.end_line.unwrap_or(self.line).max(self.line)
+            }
+        }
+    }
+}
+
+/// Where a location's lines are in a text now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocatedLines {
+    /// 1-based first and last line.
+    pub first: usize,
+    pub last: usize,
+    /// The anchor is not on the recorded line; it was found by its text.
+    pub moved: bool,
+    /// How many lines of the text equal the anchor.
+    pub matches: usize,
+}
+
+/// Finds `location` in `text`: on its recorded line when that line is the anchor,
+/// otherwise on the matching line nearest to the recorded one (the earlier on a tie).
+/// `None` when no line equals the anchor.
+pub fn locate(text: &str, location: &EditLocation) -> Option<LocatedLines> {
+    let anchor = location.anchor.trim();
+    let lines: Vec<&str> = text.lines().collect();
+    let matching: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.trim() == anchor)
+        .map(|(index, _)| index + 1)
+        .collect();
+    let first = if matching.contains(&location.line) {
+        location.line
+    } else {
+        *matching
+            .iter()
+            .min_by_key(|line| (line.abs_diff(location.line), **line))?
+    };
+    let span = location.last_line() - location.line;
+    Some(LocatedLines {
+        first,
+        last: (first + span).min(lines.len()),
+        moved: first != location.line,
+        matches: matching.len(),
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Guidance {
     pub step: usize,
@@ -253,10 +338,96 @@ pub struct Guidance {
     pub command: Option<String>,
     pub breakdown: Vec<BreakdownItem>,
     pub path: Option<String>,
+    /// Guidance stored before `location` existed: a line next to where the code goes.
     pub anchor: Option<String>,
+    /// Where the change goes, in words. Shown on the card as "Where:".
+    #[serde(default, rename = "where")]
+    pub where_: Option<String>,
+    /// Where a beginner edit goes exactly; "Open file" goes there.
+    #[serde(default)]
+    pub location: Option<EditLocation>,
 }
 
 impl Guidance {
+    /// The location to store with this guidance, checked against the step file's current
+    /// text. `file` is `None` when the file cannot be read. Only a beginner edit keeps a
+    /// location; its line numbers are corrected when the anchor is on one other line.
+    /// Errors are worded for Claude to correct.
+    pub fn located(&self, step: &PlanStep, file: Option<&str>) -> Result<Option<EditLocation>> {
+        if self.level != HelpLevel::Beginner || step.kind != StepKind::EditFile {
+            return Ok(None);
+        }
+        // An empty file has no line to anchor to: the code goes at the top.
+        if file.is_some_and(|text| text.trim().is_empty()) {
+            return Ok(None);
+        }
+        let Some(location) = &self.location else {
+            ensure!(
+                file.is_none(),
+                "At the beginner level, say exactly where the change goes: set location to the action (insert, update or remove), line (the number of the line in the file as it is now) and anchor (the exact text of that line)."
+            );
+            return Ok(None);
+        };
+        let path = self.path.as_deref().unwrap_or(&step.target);
+        let anchor = location.anchor.trim();
+        ensure!(
+            location.line >= 1,
+            "location.line is a line number starting at 1."
+        );
+        ensure!(
+            !anchor.is_empty() && single_line(anchor),
+            "location.anchor must be the exact text of line location.line: one line, not empty."
+        );
+        let insert = location.action == EditAction::Insert;
+        let last = if insert {
+            location.line
+        } else {
+            location.end_line.unwrap_or(location.line)
+        };
+        ensure!(
+            last >= location.line,
+            "location.end_line must not be before location.line."
+        );
+        let span = last - location.line;
+        let mut located = EditLocation {
+            action: location.action,
+            line: location.line,
+            end_line: (span > 0).then_some(last),
+            anchor: anchor.to_owned(),
+            placement: if insert {
+                location.placement
+            } else {
+                Placement::After
+            },
+        };
+        let Some(text) = file else {
+            return Ok(Some(located));
+        };
+        let count = text.lines().count();
+        let Some(found) = locate(text, &located) else {
+            let actual = match text.lines().nth(location.line - 1) {
+                Some(line) => format!("Line {} is `{}`.", location.line, line.trim()),
+                None => format!("The file has {count} lines."),
+            };
+            bail!(
+                "location.anchor is not a line of {path} as it is now. {actual} Read the file again (read_editor_buffer shows unsaved changes) and give the line number and the exact text of that line."
+            );
+        };
+        ensure!(
+            !(found.moved && found.matches > 1),
+            "Line {} of {path} is not the anchor, and {} lines match the anchor. Set location.line to the line you mean.",
+            location.line,
+            found.matches
+        );
+        ensure!(
+            found.first + span <= count,
+            "location.end_line is past the end of {path}, which has {count} lines."
+        );
+        located.line = found.first;
+        located.end_line = (span > 0).then_some(found.first + span);
+        Ok(Some(located))
+    }
+
     /// Checks that the guidance has the shape its help level promises for this step.
     pub fn check(&self, step: &PlanStep) -> Result<()> {
         ensure!(
@@ -780,6 +951,8 @@ mod tests {
             breakdown: Vec::new(),
             path: Some("src/cli.rs".into()),
             anchor: None,
+            where_: None,
+            location: None,
         }
     }
 
@@ -975,6 +1148,235 @@ mod tests {
         assert!(g.check(&file_step()).is_err());
         g.path = None;
         g.check(&file_step()).unwrap();
+    }
+
+    /// `src/cli.rs` of the examples, 7 lines.
+    const CLI: &str = "use clap::Parser;\n\n#[derive(Parser)]\npub struct Args {\n    /// The name to greet.\n    pub name: String,\n}\n";
+
+    fn location(
+        action: EditAction,
+        line: usize,
+        end_line: Option<usize>,
+        anchor: &str,
+    ) -> EditLocation {
+        EditLocation {
+            action,
+            line,
+            end_line,
+            anchor: anchor.into(),
+            placement: Placement::After,
+        }
+    }
+
+    fn lines(first: usize, last: usize, moved: bool, matches: usize) -> Option<LocatedLines> {
+        Some(LocatedLines {
+            first,
+            last,
+            moved,
+            matches,
+        })
+    }
+
+    #[test]
+    fn locate_finds_the_recorded_line() {
+        let insert = location(EditAction::Insert, 6, None, "pub name: String,");
+        assert_eq!(locate(CLI, &insert), lines(6, 6, false, 1));
+        let update = location(EditAction::Update, 5, Some(6), "/// The name to greet.");
+        assert_eq!(locate(CLI, &update), lines(5, 6, false, 1));
+    }
+
+    #[test]
+    fn locate_searches_for_a_moved_anchor() {
+        let insert = location(EditAction::Insert, 2, None, "pub struct Args {");
+        assert_eq!(locate(CLI, &insert), lines(4, 4, true, 1));
+        let remove = location(EditAction::Remove, 3, Some(5), "/// The name to greet.");
+        assert_eq!(locate(CLI, &remove), lines(5, 7, true, 1));
+        let clamped = location(EditAction::Remove, 6, Some(9), "pub name: String,");
+        assert_eq!(locate(CLI, &clamped), lines(6, 7, false, 1));
+    }
+
+    #[test]
+    fn locate_takes_the_nearest_of_several_matches() {
+        let text = "a\n}\nb\n}\nc\n}\n";
+        let at = |line| locate(text, &location(EditAction::Insert, line, None, "}"));
+        assert_eq!(at(4), lines(4, 4, false, 3));
+        assert_eq!(at(3), lines(2, 2, true, 3));
+        assert_eq!(at(5), lines(4, 4, true, 3));
+        assert_eq!(at(40), lines(6, 6, true, 3));
+    }
+
+    #[test]
+    fn locate_is_none_without_a_matching_line() {
+        let missing = location(EditAction::Insert, 6, None, "pub age: u8,");
+        assert_eq!(locate(CLI, &missing), None);
+        let insert = location(EditAction::Insert, 1, None, "pub name: String,");
+        assert_eq!(locate("", &insert), None);
+    }
+
+    fn located_guidance(level: HelpLevel, location: EditLocation) -> Guidance {
+        Guidance {
+            location: Some(location),
+            ..guidance(level)
+        }
+    }
+
+    fn insert_at_name() -> EditLocation {
+        location(EditAction::Insert, 6, None, "    pub name: String,")
+    }
+
+    #[test]
+    fn located_keeps_a_location_only_for_a_beginner_edit() {
+        for level in [HelpLevel::Intermediate, HelpLevel::Expert] {
+            let g = located_guidance(level, insert_at_name());
+            assert_eq!(
+                g.located(&file_step(), Some(CLI)).unwrap(),
+                None,
+                "{level:?}"
+            );
+        }
+        let g = located_guidance(HelpLevel::Beginner, insert_at_name());
+        let create = step(StepKind::CreateFile, "src/cli.rs", "rust");
+        assert_eq!(g.located(&create, Some(CLI)).unwrap(), None);
+        assert_eq!(g.located(&command_step(), Some(CLI)).unwrap(), None);
+    }
+
+    #[test]
+    fn located_verifies_the_anchor_against_the_file() {
+        let located = |location: EditLocation| {
+            located_guidance(HelpLevel::Beginner, location)
+                .located(&file_step(), Some(CLI))
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(
+            located(insert_at_name()),
+            location(EditAction::Insert, 6, None, "pub name: String,")
+        );
+        let moved = located(location(EditAction::Insert, 2, None, "pub struct Args {"));
+        assert_eq!(moved.line, 4);
+        assert_eq!(moved.end_line, None);
+
+        let update = located(location(
+            EditAction::Update,
+            5,
+            Some(6),
+            "/// The name to greet.",
+        ));
+        assert_eq!((update.line, update.end_line), (5, Some(6)));
+        let one_line = located(location(
+            EditAction::Update,
+            5,
+            Some(5),
+            "/// The name to greet.",
+        ));
+        assert_eq!((one_line.line, one_line.end_line), (5, None));
+        let insert = located(location(
+            EditAction::Insert,
+            6,
+            Some(9),
+            "pub name: String,",
+        ));
+        assert_eq!((insert.line, insert.end_line), (6, None));
+
+        let mut before = location(EditAction::Update, 6, None, "pub name: String,");
+        before.placement = Placement::Before;
+        assert_eq!(located(before).placement, Placement::After);
+        let mut insert_before = location(EditAction::Insert, 6, None, "pub name: String,");
+        insert_before.placement = Placement::Before;
+        assert_eq!(located(insert_before).placement, Placement::Before);
+    }
+
+    #[test]
+    fn located_refuses_what_does_not_match_the_file() {
+        let refused = |location: EditLocation, text: &str| {
+            message(
+                located_guidance(HelpLevel::Beginner, location).located(&file_step(), Some(text)),
+            )
+        };
+        let error = refused(location(EditAction::Insert, 6, None, "pub age: u8,"), CLI);
+        assert!(
+            error.contains("location.anchor is not a line of src/cli.rs as it is now."),
+            "{error}"
+        );
+        assert!(error.contains("Line 6 is `pub name: String,`."), "{error}");
+        let error = refused(location(EditAction::Insert, 40, None, "pub age: u8,"), CLI);
+        assert!(error.contains("The file has 7 lines."), "{error}");
+
+        let error = refused(location(EditAction::Insert, 1, None, "}"), "a\n}\nb\n}\n");
+        assert!(error.contains("2 lines match the anchor"), "{error}");
+
+        let error = refused(
+            location(EditAction::Update, 6, Some(9), "pub name: String,"),
+            CLI,
+        );
+        assert!(
+            error.contains("past the end of src/cli.rs, which has 7 lines"),
+            "{error}"
+        );
+        assert_eq!(
+            refused(
+                location(EditAction::Update, 6, Some(4), "pub name: String,"),
+                CLI
+            ),
+            "location.end_line must not be before location.line."
+        );
+        assert_eq!(
+            refused(
+                location(EditAction::Insert, 0, None, "use clap::Parser;"),
+                CLI
+            ),
+            "location.line is a line number starting at 1."
+        );
+        for anchor in ["  ", "pub name: String,\n}"] {
+            let error = refused(location(EditAction::Insert, 6, None, anchor), CLI);
+            assert!(
+                error.starts_with("location.anchor must be the exact text"),
+                "{anchor:?}: {error}"
+            );
+        }
+
+        let error = message(guidance(HelpLevel::Beginner).located(&file_step(), Some(CLI)));
+        assert!(
+            error.starts_with("At the beginner level, say exactly where the change goes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn located_cannot_verify_an_unreadable_or_empty_file() {
+        let unverified = location(EditAction::Insert, 40, Some(41), "  pub age: u8,  ");
+        let g = located_guidance(HelpLevel::Beginner, unverified);
+        assert_eq!(
+            g.located(&file_step(), None).unwrap(),
+            Some(location(EditAction::Insert, 40, None, "pub age: u8,"))
+        );
+        let without = guidance(HelpLevel::Beginner);
+        assert_eq!(without.located(&file_step(), None).unwrap(), None);
+        for text in ["", "  \n"] {
+            assert_eq!(
+                g.located(&file_step(), Some(text)).unwrap(),
+                None,
+                "{text:?}"
+            );
+            assert_eq!(
+                without.located(&file_step(), Some(text)).unwrap(),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_locations_serialize_in_snake_case() {
+        let update = location(EditAction::Update, 5, Some(6), "x");
+        assert_eq!(
+            serde_json::to_value(&update).unwrap(),
+            serde_json::json!({"action":"update","line":5,"end_line":6,"anchor":"x","placement":"after"})
+        );
+        let insert: EditLocation =
+            serde_json::from_value(serde_json::json!({"action":"insert","line":1,"anchor":"x"}))
+                .unwrap();
+        assert_eq!(insert, location(EditAction::Insert, 1, None, "x"));
     }
 
     #[test]
