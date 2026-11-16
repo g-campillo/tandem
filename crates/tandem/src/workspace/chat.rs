@@ -1,13 +1,17 @@
 //! The chat panel's state in the workspace and its link to the companion controller.
-use super::chat_logic::{CodeHover, SavePlan, TabFacts, anchor_line, takeover_save_plan};
+use super::chat_logic::{CodeHover, Reveal, SavePlan, TabFacts, reveal_plan, takeover_save_plan};
 use super::*;
 use gpui_kit::component::input::TextareaState;
-use tandem_claude::view::{self, ComposerMode};
+use tandem_claude::view::{self, ComposerMode, OpenTarget};
 use tandem_claude::{
     BufferText, ChatState, Companion, CompanionConfig, HostAnswer, HostAsk, HostQuestion, Signal,
     TakeoverRequest,
 };
 use tandem_core::chat::{ChangeSet, Decision, Mode, Phase};
+
+/// How long an "Open file" waits for its file to open before it gives up on moving the
+/// cursor there.
+const STEP_REVEAL_WAIT: Duration = Duration::from_secs(10);
 
 /// What waits for the open buffers to be saved before Claude edits the files on disk.
 pub(super) enum PendingAfterSave {
@@ -34,6 +38,8 @@ pub(super) struct ChatUi {
     pub pending: Option<PendingAfterSave>,
     /// The explained part of the step card's code under the pointer.
     pub hover: Option<CodeHover>,
+    /// An "Open file" waiting for its file to become the active tab, and when it was asked.
+    pub reveal: Option<(OpenTarget, Instant)>,
     _composer_events: Subscription,
 }
 
@@ -67,6 +73,7 @@ impl ChatUi {
             decided: Vec::new(),
             pending: None,
             hover: None,
+            reveal: None,
             _composer_events: events,
         }
     }
@@ -117,6 +124,7 @@ impl Workspace {
         self.chat.decided.clear();
         self.chat.pending = None;
         self.chat.hover = None;
+        self.chat.reveal = None;
         let Some(project) = &self.project else {
             return;
         };
@@ -426,31 +434,72 @@ impl Workspace {
     }
 
     /// "Open file" on the step card: opens the step's file (a new buffer when it does not
-    /// exist yet) with the cursor on the guidance's anchor line when one is found.
+    /// exist yet). At the beginner level the cursor then goes to the change, once the file
+    /// is the active tab (see `apply_step_reveal`).
     pub(super) fn open_step_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(card) = self.chat_state().as_deref().and_then(view::step_card) else {
+        let Some(target) = self
+            .chat_state()
+            .as_deref()
+            .and_then(view::step_card)
+            .as_ref()
+            .and_then(view::open_target)
+        else {
             return;
         };
         let Some(project) = &self.project else {
             return;
         };
-        let guidance = card.guidance.as_ref();
-        let path = guidance
-            .and_then(|guidance| guidance.path.clone())
-            .unwrap_or(card.target);
-        let disk = project.root.join(&path);
-        let new = !disk.exists();
-        let line = guidance
-            .and_then(|guidance| guidance.anchor.as_deref())
-            .and_then(|anchor| {
-                let open = self.tabs.iter().find(|tab| tab.document.path == path);
-                match open {
-                    Some(tab) => anchor_line(&tab.editor.read(cx).text().to_string(), anchor),
-                    None => small_file_text(&disk).and_then(|text| anchor_line(&text, anchor)),
-                }
-            });
+        let new = !project.root.join(&target.path).exists();
+        let open = self.tabs.iter().any(|tab| tab.document.path == target.path);
         self.settings.open = false;
-        self.open_file(path, new, line, window, cx);
+        self.chat.reveal = Some((target.clone(), Instant::now()));
+        self.open_file(target.path, new, None, window, cx);
+        if open && !self.loading {
+            self.apply_step_reveal(window, cx);
+        }
+    }
+
+    /// Finishes "Open file" once the step's file is the active tab: moves the cursor or
+    /// selects the lines of the change, and says in the status bar what to do there.
+    pub(super) fn apply_step_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((target, asked)) = &self.chat.reveal else {
+            return;
+        };
+        if asked.elapsed() > STEP_REVEAL_WAIT {
+            // The open failed; a later open of that file must not jump.
+            self.chat.reveal = None;
+            return;
+        }
+        let Some(editor) = self
+            .active
+            .and_then(|index| self.tabs.get(index))
+            .filter(|tab| tab.document.path == target.path)
+            .map(|tab| tab.editor.clone())
+        else {
+            return;
+        };
+        let Some((target, _)) = self.chat.reveal.take() else {
+            return;
+        };
+        let plan = reveal_plan(
+            &editor.read(cx).text().to_string(),
+            &target.path,
+            &target.jump,
+        );
+        editor.update(cx, |editor, cx| match plan.reveal {
+            Reveal::Focus => editor.focus(window, cx),
+            Reveal::Cursor(offset) => {
+                editor.set_selected_range(offset..offset, cx);
+                editor.focus(window, cx);
+            }
+            Reveal::Select(range) => {
+                editor.set_selected_range_with_direction(range, true, cx);
+                editor.focus(window, cx);
+            }
+        });
+        if let Some((text, error)) = plan.message {
+            self.message(text, error, cx);
+        }
     }
 
     /// "Open Terminal" on the step card: shows the bottom panel on the Terminal tab,
@@ -472,13 +521,4 @@ impl Workspace {
             .update(cx, |composer, cx| composer.focus(window, cx));
         cx.notify();
     }
-}
-
-/// The text of a file on disk when it is at most `MAX_FILE_BYTES`, otherwise `None`.
-fn small_file_text(path: &std::path::Path) -> Option<String> {
-    let size = std::fs::metadata(path).ok()?.len();
-    if size > MAX_FILE_BYTES {
-        return None;
-    }
-    std::fs::read_to_string(path).ok()
 }

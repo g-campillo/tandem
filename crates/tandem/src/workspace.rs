@@ -650,7 +650,7 @@ impl Workspace {
             let _ = weak.update_in(cx, |view, window, cx| {
                 if view.epoch != epoch { return; }
                 match result {
-                    Ok(document) => { let recovered = document.recovered; view.add_tab(document, window, cx); view.go_to_line(line, window, cx); if recovered { view.message("Recovered an unsaved draft; inspect disk differences before saving.", false, cx); } }
+                    Ok(document) => { let recovered = document.recovered; view.add_tab(document, window, cx); view.go_to_line(line, window, cx); view.apply_step_reveal(window, cx); if recovered { view.message("Recovered an unsaved draft; inspect disk differences before saving.", false, cx); } }
                     Err(error) => view.message(format!("Cannot open file: {error:#}"), true, cx),
                 }
             });

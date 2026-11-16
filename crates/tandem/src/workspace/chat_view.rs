@@ -951,6 +951,15 @@ impl Workspace {
                 )
                 .selectable(true),
             )
+            .when_some(view::where_line(guidance), |d, place| {
+                d.child(
+                    TextView::markdown(
+                        ("chat-step-where", index),
+                        view::display_markdown(&format!("Where: {place}")),
+                    )
+                    .selectable(true),
+                )
+            })
             .children(blocks)
             .children(unmatched)
     }

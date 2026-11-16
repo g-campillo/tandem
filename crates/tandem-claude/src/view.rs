@@ -8,8 +8,8 @@ use crate::protocol::ModelChoice;
 use crate::state::{ChatState, Connection, TurnKind};
 use tandem_core::breakdown::part_spans;
 use tandem_core::chat::{
-    ActivityKind, BreakdownItem, ChangeKind, Decision, Guidance, HelpLevel, ItemKind, Phase,
-    StepKind, normalize_language,
+    ActivityKind, BreakdownItem, ChangeKind, Decision, EditAction, EditLocation, Guidance,
+    HelpLevel, ItemKind, Phase, Placement, StepKind, normalize_language,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -424,6 +424,84 @@ pub fn step_blocks(guidance: &Guidance, language: &str) -> StepBlocks {
         .map(|(item, _)| item.clone())
         .collect();
     StepBlocks { blocks, unmatched }
+}
+
+/// `text` as a Markdown code span.
+fn code_span(text: &str) -> String {
+    if text.contains('`') {
+        format!("`` {text} ``")
+    } else {
+        format!("`{text}`")
+    }
+}
+
+/// The step card's "Where:" text: for a beginner edit, the line the change goes next
+/// to; otherwise the words Claude gave. `None` shows no line.
+pub fn where_line(guidance: &Guidance) -> Option<String> {
+    if guidance.level == HelpLevel::Beginner
+        && let Some(location) = &guidance.location
+    {
+        let anchor = code_span(location.anchor.trim());
+        let count = location.last_line() - location.line + 1;
+        return Some(match (location.action, location.placement, count) {
+            (EditAction::Insert, Placement::After, _) => format!("Insert after {anchor}"),
+            (EditAction::Insert, Placement::Before, _) => format!("Insert before {anchor}"),
+            (EditAction::Update, _, 1) => format!("Replace the line {anchor}"),
+            (EditAction::Update, _, count) => {
+                format!("Replace the {count} lines starting at {anchor}")
+            }
+            (EditAction::Remove, _, 1) => format!("Remove the line {anchor}"),
+            (EditAction::Remove, _, count) => {
+                format!("Remove the {count} lines starting at {anchor}")
+            }
+        });
+    }
+    guidance
+        .where_
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// Where "Open file" leaves the cursor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenJump {
+    /// Open the file and leave the cursor where it is.
+    None,
+    Location(EditLocation),
+    /// Guidance stored before locations existed: the first line that contains this text.
+    LegacyAnchor(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenTarget {
+    /// Project-relative path of the step's file.
+    pub path: String,
+    pub jump: OpenJump,
+}
+
+/// What "Open file" opens for the card; `None` for a command step.
+pub fn open_target(card: &StepCard) -> Option<OpenTarget> {
+    if card.kind == StepKind::RunCommand {
+        return None;
+    }
+    let guidance = card.guidance.as_ref();
+    let path = guidance
+        .and_then(|guidance| guidance.path.clone())
+        .unwrap_or_else(|| card.target.clone());
+    let jump = match guidance.filter(|guidance| guidance.level == HelpLevel::Beginner) {
+        Some(Guidance {
+            location: Some(location),
+            ..
+        }) => OpenJump::Location(location.clone()),
+        Some(Guidance {
+            anchor: Some(anchor),
+            ..
+        }) if !anchor.trim().is_empty() => OpenJump::LegacyAnchor(anchor.clone()),
+        _ => OpenJump::None,
+    };
+    Some(OpenTarget { path, jump })
 }
 
 /// The index in `parts` of the part under byte `index`: the shortest span wins, then the
@@ -1184,6 +1262,191 @@ mod tests {
         assert_eq!(blocks.blocks[0].parts[0].spans, [4..9]);
         assert_eq!(blocks.blocks[1].parts[0].spans, [0..5]);
         assert!(blocks.unmatched.is_empty());
+    }
+
+    fn location(
+        action: EditAction,
+        line: usize,
+        end_line: Option<usize>,
+        anchor: &str,
+        placement: Placement,
+    ) -> EditLocation {
+        EditLocation {
+            action,
+            line,
+            end_line,
+            anchor: anchor.into(),
+            placement,
+        }
+    }
+
+    fn beginner_edit(location: EditLocation) -> Guidance {
+        let mut guidance = guidance(0);
+        guidance.level = HelpLevel::Beginner;
+        guidance.location = Some(location);
+        guidance
+    }
+
+    #[test]
+    fn where_line_names_the_line_for_a_beginner_edit() {
+        use EditAction::{Insert, Remove, Update};
+        use Placement::{After, Before};
+        let doc = "/// The name to greet.";
+        let cases = [
+            (
+                location(Insert, 6, None, "    pub name: String,", After),
+                "Insert after `pub name: String,`",
+            ),
+            (
+                location(Insert, 1, None, "use clap::Parser;", Before),
+                "Insert before `use clap::Parser;`",
+            ),
+            (
+                location(Update, 5, None, doc, After),
+                "Replace the line `/// The name to greet.`",
+            ),
+            (
+                location(Update, 5, Some(6), doc, After),
+                "Replace the 2 lines starting at `/// The name to greet.`",
+            ),
+            (
+                location(Remove, 5, None, doc, After),
+                "Remove the line `/// The name to greet.`",
+            ),
+            (
+                location(Remove, 5, Some(7), doc, After),
+                "Remove the 3 lines starting at `/// The name to greet.`",
+            ),
+            (
+                location(Insert, 3, None, "let s = `x`;", After),
+                "Insert after `` let s = `x`; ``",
+            ),
+        ];
+        for (location, text) in cases {
+            assert_eq!(
+                where_line(&beginner_edit(location.clone())).as_deref(),
+                Some(text),
+                "{location:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_line_uses_claudes_words_above_the_beginner_level() {
+        let place = " in src/cli.rs, inside struct Args ";
+        let mut guidance = guidance(0);
+        guidance.level = HelpLevel::Intermediate;
+        guidance.where_ = Some(place.into());
+        assert_eq!(
+            where_line(&guidance).as_deref(),
+            Some("in src/cli.rs, inside struct Args")
+        );
+        // Above the beginner level a location is not shown.
+        guidance.location = Some(location(
+            EditAction::Insert,
+            6,
+            None,
+            "pub name: String,",
+            Placement::After,
+        ));
+        assert_eq!(
+            where_line(&guidance).as_deref(),
+            Some("in src/cli.rs, inside struct Args")
+        );
+
+        let mut guidance = guidance.clone();
+        guidance.level = HelpLevel::Beginner;
+        guidance.location = None;
+        assert_eq!(
+            where_line(&guidance).as_deref(),
+            Some("in src/cli.rs, inside struct Args")
+        );
+
+        for level in HelpLevel::ALL {
+            for blank in [None, Some(String::new()), Some("  \n ".to_owned())] {
+                let mut guidance = guidance.clone();
+                guidance.level = level;
+                guidance.where_ = blank.clone();
+                assert_eq!(where_line(&guidance), None, "{level:?} {blank:?}");
+            }
+        }
+
+        let mut beginner = beginner_edit(location(
+            EditAction::Update,
+            5,
+            None,
+            "/// The name to greet.",
+            Placement::After,
+        ));
+        beginner.where_ = Some(place.into());
+        assert_eq!(
+            where_line(&beginner).as_deref(),
+            Some("Replace the line `/// The name to greet.`")
+        );
+    }
+
+    #[test]
+    fn open_target_jumps_only_at_the_beginner_level() {
+        let target = |guidance: Option<Guidance>, current_step: usize| {
+            let mut state = guided_state(current_step);
+            state.guidance = guidance;
+            open_target(&step_card(&state).expect("a card"))
+        };
+        let open = |path: &str, jump: OpenJump| {
+            Some(OpenTarget {
+                path: path.into(),
+                jump,
+            })
+        };
+        assert_eq!(target(None, 0), open("src/a.rs", OpenJump::None));
+
+        let insert = location(
+            EditAction::Insert,
+            6,
+            None,
+            "pub name: String,",
+            Placement::After,
+        );
+        let mut located = beginner_edit(insert.clone());
+        located.path = Some("src/b.rs".into());
+        assert_eq!(
+            target(Some(located.clone()), 0),
+            open("src/b.rs", OpenJump::Location(insert.clone()))
+        );
+        located.path = None;
+        assert_eq!(
+            target(Some(located), 0),
+            open("src/a.rs", OpenJump::Location(insert.clone()))
+        );
+
+        let mut legacy = guidance(0);
+        legacy.level = HelpLevel::Beginner;
+        legacy.anchor = Some("struct A".into());
+        assert_eq!(
+            target(Some(legacy.clone()), 0),
+            open("src/a.rs", OpenJump::LegacyAnchor("struct A".into()))
+        );
+        legacy.anchor = Some("  ".into());
+        assert_eq!(target(Some(legacy), 0), open("src/a.rs", OpenJump::None));
+
+        for level in [HelpLevel::Intermediate, HelpLevel::Expert] {
+            let mut guidance = guidance(0);
+            guidance.level = level;
+            guidance.anchor = Some("struct A".into());
+            guidance.location = Some(insert.clone());
+            assert_eq!(
+                target(Some(guidance), 0),
+                open("src/a.rs", OpenJump::None),
+                "{level:?}"
+            );
+        }
+
+        assert_eq!(target(None, 1), None);
+        let mut command = guidance(1);
+        command.level = HelpLevel::Beginner;
+        command.command = Some("go test ./...".into());
+        command.path = None;
+        assert_eq!(target(Some(command), 1), None);
     }
 
     #[test]
