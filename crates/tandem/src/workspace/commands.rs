@@ -1,5 +1,6 @@
 //! Editor and workbench commands in the style of VS Code: their actions, shortcuts, menu entries and handlers.
 mod editing;
+mod files;
 mod history;
 mod layout;
 mod navigation;
@@ -64,7 +65,12 @@ actions!(
         SelectTab9,
         GoBack,
         GoForward,
-        GoToLine
+        GoToLine,
+        CloseAllFiles,
+        ReopenClosedFile,
+        CopyFilePath,
+        CopyRelativeFilePath,
+        RevealInFinder
     ]
 );
 
@@ -158,6 +164,8 @@ pub struct CommandsUi {
     history_paused: bool,
     /// The Go to Line dialog's input, created the first time the dialog opens.
     line_input: Option<Entity<InputState>>,
+    /// Paths of closed tabs, most recent last (⇧⌘T).
+    closed: Vec<String>,
 }
 
 impl Default for CommandsUi {
@@ -174,6 +182,7 @@ impl Default for CommandsUi {
             history_epoch: 0,
             history_paused: false,
             line_input: None,
+            closed: Vec::new(),
         }
     }
 }
@@ -258,6 +267,31 @@ fn file() -> Vec<CommandSpec> {
         spec::<SaveAll>("Save All", File, "⌥⌘S", &[], Global).existing(),
         spec::<SaveCopy>("Save Copy…", File, "⇧⌘S", &[], Global).existing(),
         spec::<CloseFile>("Close File", File, "⌘W", &[], Global).existing(),
+        spec::<CloseAllFiles>("Close All Files", File, "⌘K ⌘W", &["cmd-k cmd-w"], Global)
+            .separated(),
+        spec::<ReopenClosedFile>("Reopen Closed File", File, "⇧⌘T", &["cmd-shift-t"], Global),
+        spec::<CopyFilePath>(
+            "Copy Path of Active File",
+            File,
+            "⌘K P",
+            &["cmd-k p"],
+            Global,
+        )
+        .separated(),
+        spec::<CopyRelativeFilePath>(
+            "Copy Relative Path of Active File",
+            File,
+            "⇧⌥⌘C",
+            &["cmd-alt-shift-c"],
+            Global,
+        ),
+        spec::<RevealInFinder>(
+            "Reveal Active File in Finder",
+            File,
+            "⌘K R",
+            &["cmd-k r"],
+            Global,
+        ),
     ]
 }
 
@@ -627,6 +661,11 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace
     route::<GoBack>(cx, window, &view, |v, w, c| v.go_history(false, w, c));
     route::<GoForward>(cx, window, &view, |v, w, c| v.go_history(true, w, c));
     route::<GoToLine>(cx, window, &view, |v, w, c| v.open_go_to_line(w, c));
+    route::<CloseAllFiles>(cx, window, &view, |v, w, c| v.close_all_files(w, c));
+    route::<ReopenClosedFile>(cx, window, &view, |v, w, c| v.reopen_closed_file(w, c));
+    route::<CopyFilePath>(cx, window, &view, |v, _, c| v.copy_file_path(false, c));
+    route::<CopyRelativeFilePath>(cx, window, &view, |v, _, c| v.copy_file_path(true, c));
+    route::<RevealInFinder>(cx, window, &view, |v, _, c| v.reveal_in_finder(c));
 }
 
 /// The pattern of `install_actions`: dispatch runs while GPUI has borrowed the window, so
@@ -1031,6 +1070,33 @@ mod tests {
             ["Replace in File", "Find Next", "Find Previous"]
         );
         assert!(matches!(edit.items[1], MenuItem::Action { .. }));
+    }
+
+    #[test]
+    fn file_commands_follow_close_file_in_two_groups() {
+        let menus = extend_menus(vec![
+            Menu::new("File").items([MenuItem::action("Close File", super::CloseFile)]),
+        ]);
+        let file = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "File")
+            .unwrap();
+        assert_eq!(
+            action_names(&file.items),
+            [
+                "Close File",
+                "Close All Files",
+                "Reopen Closed File",
+                "Copy Path of Active File",
+                "Copy Relative Path of Active File",
+                "Reveal Active File in Finder"
+            ]
+        );
+        assert!(matches!(file.items[1], MenuItem::Separator));
+        assert!(
+            matches!(&file.items[2], MenuItem::Action { name, .. } if name.as_ref() == "Close All Files")
+        );
+        assert!(matches!(file.items[4], MenuItem::Separator));
     }
 
     #[test]

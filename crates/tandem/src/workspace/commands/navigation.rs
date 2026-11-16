@@ -141,6 +141,7 @@ impl Workspace {
     pub(super) fn sync_history(&mut self) {
         if self.commands.history_epoch != self.epoch {
             self.commands.history = NavHistory::default();
+            self.commands.closed.clear();
             self.commands.history_epoch = self.epoch;
         }
     }

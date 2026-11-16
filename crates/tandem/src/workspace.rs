@@ -853,6 +853,7 @@ impl Workspace {
             self.message(format!("Could not preserve draft: {error:#}"), true, cx);
             return;
         }
+        self.note_closed(self.tabs[index].document.path.clone());
         self.tabs.remove(index);
         self.invalidate_language(cx);
         self.active =
