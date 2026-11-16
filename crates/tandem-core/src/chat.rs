@@ -85,12 +85,42 @@ pub fn normalize_language(raw: &str) -> String {
     }
 }
 
+/// How often Claude asks before it acts. Saved for all projects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Tandem asks before a command it does not allow by itself.
+    #[default]
+    Ask,
+    /// Claude Code's auto mode decides and asks only about risky actions.
+    Auto,
+    /// Nothing asks, and Claude may edit project files outside a takeover.
+    Bypass,
+}
+
+impl PermissionMode {
+    pub const ALL: [PermissionMode; 3] = [
+        PermissionMode::Ask,
+        PermissionMode::Auto,
+        PermissionMode::Bypass,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "Ask",
+            PermissionMode::Auto => "Auto",
+            PermissionMode::Bypass => "Bypass",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatPrefs {
     pub model: String,
     pub effort: Option<String>,
     pub use_my_setup: bool,
+    pub permission_mode: PermissionMode,
     pub help_levels: BTreeMap<String, HelpLevel>,
 }
 
@@ -100,6 +130,7 @@ impl Default for ChatPrefs {
             model: DEFAULT_MODEL.into(),
             effort: None,
             use_my_setup: true,
+            permission_mode: PermissionMode::Ask,
             help_levels: BTreeMap::new(),
         }
     }
@@ -578,6 +609,41 @@ mod tests {
         assert_eq!(
             HelpLevel::ALL.map(HelpLevel::id),
             ["beginner", "intermediate", "expert"]
+        );
+    }
+
+    #[test]
+    fn permission_mode_defaults_to_ask_and_has_labels() {
+        assert_eq!(ChatPrefs::default().permission_mode, PermissionMode::Ask);
+        assert_eq!(
+            PermissionMode::ALL.map(PermissionMode::label),
+            ["Ask", "Auto", "Bypass"]
+        );
+    }
+
+    #[test]
+    fn permission_mode_is_saved_by_its_wire_name() {
+        for (mode, wire) in PermissionMode::ALL
+            .into_iter()
+            .zip(["ask", "auto", "bypass"])
+        {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{wire}\""));
+            assert_eq!(serde_json::from_str::<PermissionMode>(&json).unwrap(), mode);
+        }
+        let saved_before = serde_json::from_str::<ChatPrefs>(
+            r#"{"model":"opus","effort":null,"use_my_setup":false,"help_levels":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            saved_before,
+            ChatPrefs {
+                model: "opus".into(),
+                effort: None,
+                use_my_setup: false,
+                permission_mode: PermissionMode::Ask,
+                help_levels: BTreeMap::new(),
+            }
         );
     }
 
