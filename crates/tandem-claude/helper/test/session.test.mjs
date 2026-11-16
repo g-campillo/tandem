@@ -578,6 +578,36 @@ test('an interrupted turn finishes as interrupted', async () => {
   assert.equal(finished.error, null);
 });
 
+test('a turn stopped while its settings are applied finishes as interrupted without reaching Claude', async () => {
+  const h = start();
+  const { query } = await h.open();
+  const original = query.query.setPermissionMode;
+  const modeRequested = new Promise((requested) => {
+    query.query.setPermissionMode = () =>
+      new Promise((applied) => {
+        requested(applied);
+      });
+  });
+  const from = h.frames.length;
+  const id = h.turn('hello', 'takeover');
+  const applyMode = await modeRequested;
+  const stop = h.send({ type: 'interrupt' });
+  applyMode();
+  await h.waitFor(isEvent('turn_finished', { turn: id }));
+  query.query.setPermissionMode = original;
+  assert.deepEqual(h.frames.slice(from), [
+    { type: 'reply', id, ok: true, data: {} },
+    { type: 'reply', id: stop, ok: true, data: {} },
+    { type: 'event', event: 'turn_started', turn: id },
+    { type: 'event', event: 'turn_finished', turn: id, status: 'interrupted', error: null },
+  ]);
+  assert.deepEqual(query.prompts, []);
+
+  const next = h.turn('hello');
+  const finished = await h.waitFor(isEvent('turn_finished', { turn: next }));
+  assert.equal(finished.status, 'completed');
+});
+
 test('a second turn while one runs replies busy', async () => {
   const h = start();
   await h.open();

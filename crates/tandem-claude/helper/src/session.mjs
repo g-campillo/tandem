@@ -398,7 +398,7 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
   }
 
   async function runTurn({ id, text, policy, model, effort }) {
-    const turn = { id, policy, interrupting: false };
+    const turn = { id, policy, interrupting: false, queued: false };
     current = turn;
     const wantedModel = model ?? 'default';
     const wantedEffort = effort ?? null;
@@ -415,7 +415,13 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
       return;
     }
     emit({ event: 'turn_started', turn: id });
+    if (turn.interrupting) {
+      // Stopped while the settings were applied: Claude never sees the message.
+      finishTurn('interrupted', null);
+      return;
+    }
     queue.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null });
+    turn.queued = true;
   }
 
   async function interrupt() {
@@ -423,6 +429,10 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
       return;
     }
     current.interrupting = true;
+    if (!current.queued) {
+      // Nothing is running in Claude Code yet; runTurn sees the flag and finishes the turn.
+      return;
+    }
     try {
       await q.interrupt();
     } catch {
