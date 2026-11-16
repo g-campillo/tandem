@@ -1,13 +1,15 @@
-//! Code in the chat panel: syntax colours from the editor's highlight theme.
+//! Code in the chat panel: syntax colours from the editor's highlight theme, and the
+//! explanation of the part of a step's code under the pointer.
+use super::chat_logic::hover_after;
 use super::*;
-use crate::appearance::panel_code;
+use crate::appearance::{palette, panel_code};
 use gpui_kit::component::highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter};
 use gpui_kit::component::{ActiveTheme, Rope, StyledExt};
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Once;
-use tandem_claude::view::{self, StepBlock};
+use tandem_claude::view::{self, BlockKind, BlockPart, StepBlock, StepCard};
 
 /// Registers the fence tags of `view::FENCE_ALIASES` with the toolkit, once, so that
 /// fenced code in Claude's replies is coloured for tags such as `shell` or `jsx`.
@@ -47,6 +49,35 @@ pub(super) fn syntax_runs(
         .into_iter()
         .filter(|(range, style)| !range.is_empty() && *style != HighlightStyle::default())
         .collect()
+}
+
+/// The runs to paint: the syntax colours, an underline on `marked` spans and
+/// `background` on `hovered` spans.
+pub(super) fn painted_runs(
+    syntax: &[(Range<usize>, HighlightStyle)],
+    marked: &[Range<usize>],
+    underline: Hsla,
+    hovered: &[Range<usize>],
+    background: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    // Neither extra style sets a colour, so the syntax colour stays under both.
+    let line = HighlightStyle {
+        underline: Some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(underline),
+            wavy: false,
+        }),
+        ..Default::default()
+    };
+    let fill = HighlightStyle {
+        background_color: Some(background),
+        ..Default::default()
+    };
+    let extra = marked
+        .iter()
+        .map(|range| (range.clone(), line))
+        .chain(hovered.iter().map(|range| (range.clone(), fill)));
+    combine_highlights(syntax.iter().cloned(), extra).collect()
 }
 
 /// The syntax colours of one block, kept so a block is parsed once and not on every frame.
@@ -109,9 +140,42 @@ impl Workspace {
         let theme = cx.theme().highlight_theme.clone();
         let text: SharedString = block.text.clone().into();
         let runs = cached_syntax_runs(&text, block.grammar, &theme);
+        let p = palette(cx.theme().mode);
+        let marked: Vec<Range<usize>> = if block.mark_parts {
+            block
+                .parts
+                .iter()
+                .flat_map(|part| part.spans.iter().cloned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let hovered = self
+            .chat
+            .hover
+            .as_ref()
+            .filter(|hover| hover.step == step && hover.block == block.kind)
+            .and_then(|hover| block.parts.get(hover.part))
+            .map_or(&[][..], |part| part.spans.as_slice());
+        let painted = painted_runs(&runs, &marked, p.secondary_foreground, hovered, p.selected);
         let id = step * 4 + block.kind as usize;
+        let kind = block.kind;
+        let mut code = InteractiveText::new(
+            ("chat-code-text", id),
+            StyledText::new(text).with_highlights(painted),
+        );
+        if !block.parts.is_empty() {
+            let parts: Rc<Vec<BlockPart>> = Rc::new(block.parts.clone());
+            let weak = cx.entity().downgrade();
+            code = code.on_hover(move |index, event, _, cx| {
+                let part = index.and_then(|index| view::part_at(&parts, index));
+                let _ = weak.update(cx, |workspace, cx| {
+                    workspace.code_hovered(step, kind, part, event.position, cx)
+                });
+            });
+        }
         // Shown exactly as given, one line per line, scrolling sideways when it is wide.
-        panel_code(div().id(("chat-code", id)), cx)
+        let panel = panel_code(div().id(("chat-code", id)), cx)
             .p_2()
             .rounded(px(6.))
             .h_flex()
@@ -122,21 +186,120 @@ impl Workspace {
                     .w_auto()
                     .min_w_full()
                     .whitespace_nowrap()
-                    .child(InteractiveText::new(
-                        ("chat-code-text", id),
-                        StyledText::new(text).with_highlights(runs.iter().cloned()),
-                    )),
-            )
+                    .child(code),
+            );
+        if block.parts.is_empty() {
+            return panel.into_any_element();
+        }
+        // The text element does not report the pointer leaving it, and after a scroll the
+        // code under a resting pointer is different: both hide the explanation.
+        div()
+            .id(("chat-code-hover", id))
+            .min_w_0()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.code_hovered(step, kind, None, Point::default(), cx);
+                }
+            }))
+            .on_scroll(cx.listener(move |this, _, _, cx| {
+                this.code_hovered(step, kind, None, Point::default(), cx);
+            }))
+            .child(panel)
             .into_any_element()
+    }
+
+    /// The pointer moved over `part` of a block of the step card, or off every part of it.
+    pub(super) fn code_hovered(
+        &mut self,
+        step: usize,
+        block: BlockKind,
+        part: Option<usize>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(next) = hover_after(
+            self.chat.hover.as_ref(),
+            step,
+            block,
+            part,
+            f32::from(position.x),
+            f32::from(position.y),
+        ) {
+            self.chat.hover = next;
+            cx.notify();
+        }
+    }
+
+    /// The explanation of the part under the pointer, in a small card above the pointer.
+    /// The card takes no mouse events, so the pointer keeps reaching the code under it.
+    pub(super) fn code_hover_card(
+        &self,
+        card: &StepCard,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let hover = self
+            .chat
+            .hover
+            .as_ref()
+            .filter(|hover| hover.step == card.index)?;
+        let guidance = card.guidance.as_ref()?;
+        let blocks = view::step_blocks(guidance, &card.language);
+        let part = blocks
+            .blocks
+            .iter()
+            .find(|block| block.kind == hover.block)?
+            .parts
+            .get(hover.part)?;
+        let (explanation, code) = view::inline_code(&part.explanation);
+        let p = palette(cx.theme().mode);
+        let code_style = HighlightStyle {
+            background_color: Some(p.hover()),
+            ..Default::default()
+        };
+        Some(
+            deferred(
+                anchored()
+                    .position(point(px(hover.x), px(hover.y) - px(14.)))
+                    .anchor(Anchor::BottomLeft)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap_1()
+                            .max_w(px(340.))
+                            .p_2()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(p.border)
+                            .bg(p.surface)
+                            .shadow_md()
+                            .text_size(px(13.))
+                            .line_height(px(18.))
+                            .text_color(p.foreground)
+                            .child(
+                                div()
+                                    .font_family("Menlo")
+                                    .text_size(px(12.))
+                                    .text_color(p.secondary_foreground)
+                                    .child(view::part_label(&part.part)),
+                            )
+                            .child(StyledText::new(explanation).with_highlights(
+                                code.into_iter().map(|range| (range, code_style)),
+                            )),
+                    ),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     // Named imports: the parent's glob brings in gpui's `test` macro.
-    use super::{cached_syntax_runs, register_fence_aliases, syntax_runs};
+    use super::{cached_syntax_runs, painted_runs, register_fence_aliases, syntax_runs};
     use gpui_kit::component::highlighter::{HighlightTheme, LanguageRegistry};
-    use gpui_kit::{HighlightStyle, Hsla, SharedString};
+    use gpui_kit::{HighlightStyle, Hsla, SharedString, UnderlineStyle, px, rgb};
     use std::ops::Range;
     use std::rc::Rc;
     use tandem_claude::view;
@@ -254,6 +417,63 @@ mod tests {
                 "{tag}"
             );
         }
+    }
+
+    /// The fields of a painted run that `painted_runs` sets.
+    type Painted = (
+        Range<usize>,
+        Option<Hsla>,
+        Option<Hsla>,
+        Option<UnderlineStyle>,
+    );
+
+    fn painted(runs: Vec<(Range<usize>, HighlightStyle)>) -> Vec<Painted> {
+        runs.into_iter()
+            .map(|(range, style)| (range, style.color, style.background_color, style.underline))
+            .collect()
+    }
+
+    #[test]
+    // A part found once has a list of one span, so `&[2..6]` is the intended value.
+    #[allow(clippy::single_range_in_vec_init)]
+    fn painted_runs_splits_colours_at_the_hovered_part() {
+        let red: Hsla = rgb(0xFF0000).into();
+        let background: Hsla = rgb(0x0000FF).into();
+        let underline: Hsla = rgb(0x00FF00).into();
+        let syntax = [(
+            0..4,
+            HighlightStyle {
+                color: Some(red),
+                ..Default::default()
+            },
+        )];
+
+        let hovered = painted_runs(&syntax, &[], underline, &[2..6], background);
+        assert_eq!(
+            painted(hovered),
+            [
+                (0..2, Some(red), None, None),
+                (2..4, Some(red), Some(background), None),
+                (4..6, None, Some(background), None),
+            ]
+        );
+
+        let marked = painted_runs(&syntax, &[1..3], underline, &[], background);
+        let line = UnderlineStyle {
+            thickness: px(1.),
+            color: Some(underline),
+            wavy: false,
+        };
+        assert_eq!(
+            painted(marked),
+            [
+                (0..1, Some(red), None, None),
+                (1..3, Some(red), None, Some(line)),
+                (3..4, Some(red), None, None),
+            ]
+        );
+
+        assert!(painted_runs(&[], &[], underline, &[], background).is_empty());
     }
 
     #[test]

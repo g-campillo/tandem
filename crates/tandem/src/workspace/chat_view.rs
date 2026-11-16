@@ -773,12 +773,15 @@ impl Workspace {
     /// The card pinned above the composer during Build: the open step, or the final check
     /// once every step is finished.
     fn build_card(&self, state: &ChatState, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let card = match view::step_card(state) {
-            Some(card) => self.step_card(card, cx),
+        let (card, hover) = match view::step_card(state) {
+            Some(card) => {
+                let hover = self.code_hover_card(&card, cx);
+                (self.step_card(card, cx), hover)
+            }
             None if view::final_card(state) => {
                 let can_act =
                     matches!(state.connection, Connection::Ready { .. }) && state.turn.is_none();
-                self.final_card(can_act, cx)
+                (self.final_card(can_act, cx), None)
             }
             None => return None,
         };
@@ -795,6 +798,7 @@ impl Workspace {
                 .border_t_1()
                 .border_color(p.border)
                 .child(card)
+                .children(hover)
                 .into_any_element(),
         )
     }
@@ -884,36 +888,51 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The step's guidance: summary, why, then code, pseudocode or the command, and the
-    /// breakdown of its parts.
+    /// The step's guidance: summary, why, then code, pseudocode or the command, whose parts
+    /// are explained when the user points at them, and the explanations of the parts that
+    /// are in none of them.
     fn guidance_view(&self, card: &StepCard, guidance: &Guidance, cx: &mut Context<Self>) -> Div {
         let index = card.index;
         let blocks = view::step_blocks(guidance, &card.language);
+        let p = palette(cx.theme().mode);
+        let unmatched = (!blocks.unmatched.is_empty()).then(|| {
+            let rows = blocks.unmatched.iter().map(|item| {
+                div()
+                    .h_flex()
+                    .items_start()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(relative(0.4))
+                            .px_1()
+                            .rounded(px(4.))
+                            .bg(p.content)
+                            .font_family("Menlo")
+                            .text_size(px(12.))
+                            .child(item.part.clone()),
+                    )
+                    .child(div().flex_1().min_w_0().child(item.explanation.clone()))
+            });
+            div()
+                .v_flex()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_semibold()
+                        .text_color(p.secondary_foreground)
+                        .child("More explanations"),
+                )
+                .children(rows)
+        });
         let blocks: Vec<AnyElement> = blocks
             .blocks
             .iter()
             .map(|block| self.step_block(index, block, cx))
             .collect();
-        let p = palette(cx.theme().mode);
-        let breakdown = guidance.breakdown.iter().map(|item| {
-            div()
-                .h_flex()
-                .items_start()
-                .gap_2()
-                .min_w_0()
-                .child(
-                    div()
-                        .flex_none()
-                        .max_w(relative(0.4))
-                        .px_1()
-                        .rounded(px(4.))
-                        .bg(p.content)
-                        .font_family("Menlo")
-                        .text_size(px(12.))
-                        .child(item.part.clone()),
-                )
-                .child(div().flex_1().min_w_0().child(item.explanation.clone()))
-        });
         div()
             .v_flex()
             .min_w_0()
@@ -933,34 +952,41 @@ impl Workspace {
                 .selectable(true),
             )
             .children(blocks)
-            .when(!guidance.breakdown.is_empty(), |d| {
-                d.child(div().v_flex().min_w_0().gap_1().children(breakdown))
-            })
+            .children(unmatched)
     }
 
     /// One code block of the step's guidance with what goes with it: the Pseudocode label,
-    /// or the row of buttons under code and commands.
+    /// how to read the explanations of its parts, or the row of buttons under code and
+    /// commands.
     fn step_block(&self, index: usize, block: &StepBlock, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx.theme().mode);
         let code = self.code_view(index, block, cx);
+        let hint = (!block.parts.is_empty()).then(|| {
+            div()
+                .text_size(px(12.))
+                .text_color(p.secondary_foreground)
+                .child("Point at a part to see what it does.")
+        });
         let column = div().v_flex().min_w_0().gap_2();
         match block.kind {
-            BlockKind::Code => column.child(code).child(div().h_flex().child(copy_button(
-                ("chat-step-copy-code", index),
-                block.copy.clone(),
-            ))),
-            BlockKind::Pseudocode => {
-                let p = palette(cx.theme().mode);
-                column
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_semibold()
-                            .text_color(p.secondary_foreground)
-                            .child("Pseudocode"),
-                    )
-                    .child(code)
-            }
-            BlockKind::Command => column.child(code).child(
+            BlockKind::Code => column
+                .child(code)
+                .children(hint)
+                .child(div().h_flex().child(copy_button(
+                    ("chat-step-copy-code", index),
+                    block.copy.clone(),
+                ))),
+            BlockKind::Pseudocode => column
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_semibold()
+                        .text_color(p.secondary_foreground)
+                        .child("Pseudocode"),
+                )
+                .child(code)
+                .children(hint),
+            BlockKind::Command => column.child(code).children(hint).child(
                 div()
                     .h_flex()
                     .flex_wrap()

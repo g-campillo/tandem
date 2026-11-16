@@ -1,6 +1,7 @@
 //! Pure decisions behind the workspace's chat and bottom panels, kept free of GPUI so they
 //! are tested directly.
 
+use tandem_claude::view::BlockKind;
 use tandem_core::chat::{CheckResult, Finding, HELP_LANGUAGES};
 
 /// The tabs of the panel below the editor.
@@ -69,6 +70,45 @@ pub fn finding_label(finding: &Finding) -> String {
         (Some(path), Some(line)) => format!("{path}:{line}  {}", finding.problem),
         (Some(path), None) => format!("{path}  {}", finding.problem),
         (None, _) => finding.problem.clone(),
+    }
+}
+
+/// The explained part of the step card's code that is under the pointer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeHover {
+    /// The step's index in the plan.
+    pub step: usize,
+    pub block: BlockKind,
+    /// Index into the block's `parts`.
+    pub part: usize,
+    /// Where the pointer was, in window pixels, when it reached the part.
+    pub x: f32,
+    pub y: f32,
+}
+
+/// The hover after the pointer moved over `part` of the block (`step`, `block`), or off
+/// every part of it (`None`). Returns `None` when nothing changes: the same part keeps
+/// its first position, and leaving a block that is not the hovered one clears nothing.
+pub fn hover_after(
+    current: Option<&CodeHover>,
+    step: usize,
+    block: BlockKind,
+    part: Option<usize>,
+    x: f32,
+    y: f32,
+) -> Option<Option<CodeHover>> {
+    let same_block = current.is_some_and(|hover| hover.step == step && hover.block == block);
+    match part {
+        Some(part) if same_block && current.is_some_and(|hover| hover.part == part) => None,
+        Some(part) => Some(Some(CodeHover {
+            step,
+            block,
+            part,
+            x,
+            y,
+        })),
+        None if same_block => Some(None),
+        None => None,
     }
 }
 
@@ -209,6 +249,52 @@ mod tests {
         assert_eq!(rows[2].1, "TypeScript");
         assert_eq!(rows[7].1, "Kotlin");
         assert_eq!(help_languages([]).len(), 7);
+    }
+
+    #[test]
+    fn hover_after_tracks_the_part_under_the_pointer() {
+        use BlockKind::{Code, Command};
+        let first = CodeHover {
+            step: 0,
+            block: Code,
+            part: 2,
+            x: 10.,
+            y: 20.,
+        };
+        assert_eq!(
+            hover_after(None, 0, Code, Some(2), 10., 20.),
+            Some(Some(first.clone()))
+        );
+        // The same part keeps the position where the pointer reached it.
+        assert_eq!(hover_after(Some(&first), 0, Code, Some(2), 50., 60.), None);
+        assert_eq!(
+            hover_after(Some(&first), 0, Code, Some(3), 50., 60.),
+            Some(Some(CodeHover {
+                step: 0,
+                block: Code,
+                part: 3,
+                x: 50.,
+                y: 60.,
+            }))
+        );
+        assert_eq!(
+            hover_after(Some(&first), 0, Code, None, 50., 60.),
+            Some(None)
+        );
+        // Leaving another block, or another step's block, clears nothing.
+        assert_eq!(hover_after(Some(&first), 0, Command, None, 50., 60.), None);
+        assert_eq!(hover_after(Some(&first), 1, Code, None, 50., 60.), None);
+        assert_eq!(hover_after(None, 0, Code, None, 50., 60.), None);
+        assert_eq!(
+            hover_after(Some(&first), 0, Command, Some(0), 1., 2.),
+            Some(Some(CodeHover {
+                step: 0,
+                block: Command,
+                part: 0,
+                x: 1.,
+                y: 2.,
+            }))
+        );
     }
 
     #[test]

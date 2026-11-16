@@ -1,5 +1,5 @@
 //! The chat panel's state in the workspace and its link to the companion controller.
-use super::chat_logic::{SavePlan, TabFacts, anchor_line, takeover_save_plan};
+use super::chat_logic::{CodeHover, SavePlan, TabFacts, anchor_line, takeover_save_plan};
 use super::*;
 use gpui_kit::component::input::TextareaState;
 use tandem_claude::view::{self, ComposerMode};
@@ -32,6 +32,8 @@ pub(super) struct ChatUi {
     /// (which can restore or remove files) reloads the editor and the file tree.
     pub decided: Vec<(String, usize)>,
     pub pending: Option<PendingAfterSave>,
+    /// The explained part of the step card's code under the pointer.
+    pub hover: Option<CodeHover>,
     _composer_events: Subscription,
 }
 
@@ -64,6 +66,7 @@ impl ChatUi {
             was_running: false,
             decided: Vec::new(),
             pending: None,
+            hover: None,
             _composer_events: events,
         }
     }
@@ -113,6 +116,7 @@ impl Workspace {
         self.chat.was_running = false;
         self.chat.decided.clear();
         self.chat.pending = None;
+        self.chat.hover = None;
         let Some(project) = &self.project else {
             return;
         };
