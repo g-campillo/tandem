@@ -6433,6 +6433,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tandem-claude"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "tandem-codex"
 version = "0.1.0"
 dependencies = [

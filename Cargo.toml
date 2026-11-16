@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tandem-codex", "crates/tandem-probe", "crates/tandem-editor-probe", "crates/tandem-lsp", "crates/tandem-core", "crates/tandem-terminal", "crates/tandem", "crates/tandem-checks", "crates/tandem-companion", "crates/tandem-agent"]
+members = ["crates/tandem-codex", "crates/tandem-probe", "crates/tandem-editor-probe", "crates/tandem-lsp", "crates/tandem-core", "crates/tandem-terminal", "crates/tandem", "crates/tandem-checks", "crates/tandem-companion", "crates/tandem-agent", "crates/tandem-claude"]
 resolver = "3"
 
 [workspace.package]
