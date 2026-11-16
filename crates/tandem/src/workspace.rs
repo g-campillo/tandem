@@ -1,3 +1,4 @@
+mod breadcrumbs;
 mod chat;
 mod chat_logic;
 mod chat_view;

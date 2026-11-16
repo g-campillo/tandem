@@ -1,11 +1,11 @@
 use super::chrome::file_icon_image;
-use super::chrome_logic::{file_icon, tooltip};
+use super::chrome_logic::{file_icon, tab_labels, tab_name, tooltip};
 use super::commands::shortcut;
 use super::pane_logic::{pane_geometry, row_width, terminal_columns};
 use super::*;
 use crate::appearance::{compact_button, navigation_button, palette, path_button, tree_button};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Editor, Input};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
@@ -197,62 +197,177 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The tab bar: one tab per open file, with the file's icon, its name and, in a slot
+    /// at its end, a dot for unsaved changes that turns into a close button while the pointer
+    /// is on the tab. Save and Compare with Disk sit at the bar's right end.
     fn tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let paths: Vec<&str> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.document.path.as_str())
+            .collect();
+        let labels = tab_labels(&paths);
         let tabs = self
             .tabs
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                let tab_path = tab.document.path.clone();
-                navigation_button(
-                    compact_button(
-                        Button::new(SharedString::from(format!("tab:{tab_path}"))),
-                        format!(
-                            "{}{}{}",
-                            tab.document.path,
-                            if tab.document.dirty() { " •" } else { "" },
-                            if tab.saving { " ⟳" } else { "" }
-                        ),
+                let active = self.active == Some(index);
+                let dirty = tab.document.dirty();
+                let path = tab.document.path.clone();
+                let label = labels[index].clone();
+                let selected_path = path.clone();
+                let button = Button::new(SharedString::from(format!("tab:{path}")))
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(Hsla::transparent_black())
+                            .foreground(if active {
+                                p.selected_foreground
+                            } else {
+                                p.foreground
+                            })
+                            .hover(Hsla::transparent_black())
+                            .active(Hsla::transparent_black()),
                     )
-                    .tooltip(tab_path.clone()),
-                    self.active == Some(index),
-                    cx,
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if let Some(index) = this
-                        .tabs
-                        .iter()
-                        .position(|tab| tab.document.path == tab_path)
-                    {
-                        this.select_tab(index, window, cx);
-                    }
-                }))
-                .into_any_element()
+                    .small()
+                    .h(px(24.))
+                    .icon(file_icon_image(file_icon(&path)))
+                    .accessibility_label(tab_name(&path, dirty, tab.saving))
+                    .tooltip(path.clone())
+                    .child(div().text_size(px(13.)).child(label.clone()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(index) = this
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.document.path == selected_path)
+                        {
+                            this.select_tab(index, window, cx);
+                        }
+                    }));
+                let slot = div().relative().size(px(16.)).flex_none();
+                let slot = if tab.saving {
+                    slot.child(Icon::new(IconName::LoaderCircle).xsmall())
+                } else {
+                    let layer = || {
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                    };
+                    let closed_path = path.clone();
+                    let close = Button::new(("tab-close", index))
+                        .icon(Lucide::X)
+                        .ghost()
+                        .xsmall()
+                        .accessibility_label(format!("Close {label}"))
+                        .tooltip(tooltip("Close", shortcut("Close File")))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let Some(index) = this
+                                .tabs
+                                .iter()
+                                .position(|tab| tab.document.path == closed_path)
+                            else {
+                                return;
+                            };
+                            if this.active != Some(index) {
+                                this.select_tab(index, window, cx);
+                            }
+                            this.close_file(false, window, cx);
+                        }));
+                    slot.when(dirty, |slot| {
+                        slot.child(
+                            layer()
+                                .group_hover("tab", |style| style.invisible())
+                                .child(div().size(px(7.)).rounded_full().bg(p.foreground)),
+                        )
+                    })
+                    .child(
+                        layer()
+                            .when(!active || dirty, |layer| {
+                                layer
+                                    .invisible()
+                                    .group_hover("tab", |style| style.visible())
+                            })
+                            .child(close),
+                    )
+                };
+                div()
+                    .id(("tab-item", index))
+                    .group("tab")
+                    .h_flex()
+                    .items_center()
+                    .flex_none()
+                    .h(px(26.))
+                    .px_1()
+                    .gap_1()
+                    .rounded(px(6.))
+                    .when(active, |tab| tab.bg(p.selected))
+                    .when(!active, |tab| tab.hover(|style| style.bg(p.hover())))
+                    .child(button)
+                    .child(slot)
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
+        let open = self.active.is_some();
+        let comparing = self.diff.is_some();
+        let compare_label = if comparing {
+            "Back to Code"
+        } else {
+            "Compare with Disk"
+        };
+        let actions = div()
+            .h_flex()
+            .items_center()
+            .gap_1()
+            .flex_none()
+            .px_1()
+            .child(
+                Button::new("tab-save")
+                    .icon(Lucide::Save)
+                    .ghost()
+                    .xsmall()
+                    .disabled(!open)
+                    .accessibility_label("Save")
+                    .tooltip(tooltip("Save", shortcut("Save")))
+                    .on_click(cx.listener(|this, _, _, cx| this.save_active(cx))),
+            )
+            .child(
+                Button::new("tab-compare")
+                    .icon(Lucide::FileDiff)
+                    .ghost()
+                    .xsmall()
+                    .disabled(!open)
+                    .selected(comparing)
+                    .accessibility_label(compare_label)
+                    .tooltip(tooltip(compare_label, shortcut("Compare with Disk")))
+                    .on_click(cx.listener(|this, _, window, cx| this.show_diff(window, cx))),
+            );
         div()
             .id("tabs")
             .h_flex()
-            .gap_1()
-            .min_w_0()
+            .items_center()
+            .h(px(34.))
             .flex_shrink_0()
+            .min_w_0()
             .bg(p.chrome())
             .border_b_1()
             .border_color(p.border)
-            .overflow_x_scroll()
-            .p_1()
-            .children(tabs)
-            .when(self.active.is_some(), |d| {
-                d.child(
-                    compact_button(Button::new("close-tab"), "Close")
-                        .icon(IconName::Close)
-                        .ghost()
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.close_file(false, window, cx)),
-                        ),
-                )
-            })
+            .child(
+                div()
+                    .id("tab-list")
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .px_1()
+                    .children(tabs),
+            )
+            .child(actions)
             .into_any_element()
     }
 
@@ -340,7 +455,11 @@ impl Workspace {
             .min_w_0()
             .min_h_0()
             .bg(p.content)
-            .child(self.tab_strip(cx))
+            .when(!self.tabs.is_empty(), |d| d.child(self.tab_strip(cx)))
+            .children(
+                self.breadcrumbs(cx)
+                    .filter(|_| self.diff.is_none() && !self.settings.open),
+            )
             .when(conflict || recovered || read_only, |d| {
                 d.child(
                     div()
