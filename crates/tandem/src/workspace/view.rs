@@ -536,7 +536,11 @@ impl Workspace {
                     )
                     .when(self.diff.is_none() && !self.settings.open, |d| {
                         d.when_some(editor, |d, editor| {
-                            d.child(
+                            let (hovered, tip) = (editor.clone(), self.hover.clone());
+                            d.on_mouse_move(move |event, _, cx| {
+                                super::hover::claim_diagnostic(&hovered, &tip, event, cx)
+                            })
+                            .child(
                                 Editor::new(&editor)
                                     .readonly(self.loading || takeover_running)
                                     .aria_label(format!("Editor: {path}"))

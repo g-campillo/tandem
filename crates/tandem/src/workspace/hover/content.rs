@@ -1,6 +1,7 @@
-//! Turns a language server's hover reply into the sections the tooltip shows, kept free of
-//! GPUI so it is tested directly.
+//! Turns a language server's hover reply, and a diagnostic, into what the tooltip shows,
+//! kept free of windows and entities so it is tested directly.
 
+use gpui_kit::component::highlighter::DiagnosticSeverity;
 use lsp_types::{HoverContents, MarkedString, MarkupKind};
 
 /// One block of a hover reply.
@@ -197,6 +198,53 @@ fn prose_section(lines: &[&str]) -> Vec<Section> {
     };
     let last = lines.iter().rposition(|line| !blank(line)).unwrap_or(first);
     vec![Section::Prose(lines[first..=last].join("\n"))]
+}
+
+/// How serious a diagnostic is. It picks the colours of the diagnostic's block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Error,
+    Warning,
+    /// Information and hints.
+    Note,
+}
+
+/// What the tooltip shows for a diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProblemContent {
+    pub tone: Tone,
+    /// The severity, then the source and the code where the server gave them:
+    /// `Error · rust-analyzer · E0061`.
+    pub title: String,
+    /// The server's message. It is shown as Markdown, as the toolkit's popover showed it.
+    pub message: String,
+}
+
+/// The tooltip content for a diagnostic.
+pub fn problem(
+    severity: DiagnosticSeverity,
+    source: Option<&str>,
+    code: Option<&str>,
+    message: &str,
+) -> ProblemContent {
+    let (tone, label) = match severity {
+        DiagnosticSeverity::Error => (Tone::Error, "Error"),
+        DiagnosticSeverity::Warning => (Tone::Warning, "Warning"),
+        DiagnosticSeverity::Info => (Tone::Note, "Info"),
+        DiagnosticSeverity::Hint => (Tone::Note, "Hint"),
+    };
+    let title = [Some(label), source, code]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    ProblemContent {
+        tone,
+        title,
+        message: message.trim().to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -436,5 +484,44 @@ mod tests {
         );
         assert_eq!(sections(&markdown, "plain_text"), blocks);
         assert_eq!(to_markdown(&[]), "");
+    }
+
+    #[test]
+    fn a_diagnostic_is_titled_by_severity_source_and_code() {
+        let error = problem(
+            DiagnosticSeverity::Error,
+            Some("rust-analyzer"),
+            Some("E0061"),
+            "expected 2 arguments, found 1",
+        );
+        assert_eq!(error.tone, Tone::Error);
+        assert_eq!(error.title, "Error · rust-analyzer · E0061");
+        assert_eq!(error.message, "expected 2 arguments, found 1");
+        let warning = problem(DiagnosticSeverity::Warning, Some("Pyright"), None, "w");
+        assert_eq!(
+            (warning.tone, warning.title.as_str()),
+            (Tone::Warning, "Warning · Pyright")
+        );
+        let code_only = problem(DiagnosticSeverity::Warning, None, Some("W291"), "w");
+        assert_eq!(code_only.title, "Warning · W291");
+        // Information and hints share the quiet colours; empty parts are left out.
+        let info = problem(DiagnosticSeverity::Info, Some("  "), Some(""), "i");
+        assert_eq!((info.tone, info.title.as_str()), (Tone::Note, "Info"));
+        let hint = problem(DiagnosticSeverity::Hint, None, None, "h");
+        assert_eq!((hint.tone, hint.title.as_str()), (Tone::Note, "Hint"));
+    }
+
+    #[test]
+    fn a_diagnostic_message_keeps_its_lines() {
+        let list = problem(
+            DiagnosticSeverity::Error,
+            None,
+            None,
+            "\nmissing structure fields:\n- y\n\n",
+        );
+        assert_eq!(list.message, "missing structure fields:\n- y");
+        let empty = problem(DiagnosticSeverity::Error, None, None, " \n");
+        assert_eq!(empty.message, "");
+        assert_eq!(empty.title, "Error");
     }
 }

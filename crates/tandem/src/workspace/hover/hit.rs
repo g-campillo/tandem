@@ -143,6 +143,58 @@ pub fn closes_on_key(platform: bool, key: &str) -> bool {
     !(platform && key.eq_ignore_ascii_case("c"))
 }
 
+/// `range` cut into one piece per line, without the line breaks. An empty range becomes
+/// the characters on either side of it.
+pub fn range_pieces(text: &str, range: &Range<usize>) -> Vec<Range<usize>> {
+    if range.start > range.end || range.end > text.len() {
+        return Vec::new();
+    }
+    if range.is_empty() {
+        return adjacent_chars(text, range.start)
+            .into_iter()
+            .flatten()
+            .collect();
+    }
+    let Some(covered) = text.get(range.clone()) else {
+        return Vec::new();
+    };
+    let mut pieces = Vec::new();
+    let mut start = range.start;
+    for line in covered.split('\n') {
+        let end = start + line.trim_end_matches('\r').len();
+        if end > start {
+            pieces.push(start..end);
+        }
+        start += line.len() + 1;
+    }
+    pieces
+}
+
+/// The part of `range` the pointer is on: its piece on that line, or a single character of
+/// a piece that is soft-wrapped and so has no box of its own. `None` when the pointer is
+/// not on the text of `range`.
+pub fn piece_under_pointer(
+    text: &str,
+    range: &Range<usize>,
+    pointer: Point<Pixels>,
+    bounds_of: impl Fn(&Range<usize>) -> Option<Bounds<Pixels>>,
+) -> Option<Range<usize>> {
+    let on = |range: &Range<usize>| bounds_of(range).is_some_and(|b| b.contains(&pointer));
+    range_pieces(text, range).into_iter().find_map(|piece| {
+        let ends = (
+            bounds_of(&(piece.start..piece.start)),
+            bounds_of(&(piece.end..piece.end)),
+        );
+        match ends {
+            (Some(start), Some(end)) if start.top() == end.top() => on(&piece).then_some(piece),
+            _ => text[piece.clone()]
+                .char_indices()
+                .map(|(index, c)| piece.start + index..piece.start + index + c.len_utf8())
+                .find(on),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +491,68 @@ mod tests {
         assert!(closes_on_key(true, "p"));
         assert!(!closes_on_key(true, "c"));
         assert!(!closes_on_key(true, "C"));
+    }
+
+    #[test]
+    fn a_range_is_cut_into_one_piece_per_line() {
+        let text = "ab cd\r\n\r\n  ef\ngh";
+        assert_eq!(range_pieces(text, &(3..5)), vec![3..5]);
+        assert_eq!(range_pieces(text, &(3..16)), vec![3..5, 9..13, 14..16]);
+        // An empty range is the characters around it.
+        assert_eq!(range_pieces(text, &(2..2)), vec![2..3, 1..2]);
+        assert_eq!(range_pieces(text, &(5..5)), vec![4..5]);
+        assert_eq!(range_pieces(text, &(7..7)), Vec::<Range<usize>>::new());
+        assert_eq!(range_pieces(text, &(4..99)), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn a_diagnostic_is_under_the_pointer_only_on_its_own_text() {
+        let text = "import os\nx = (1 +\n     2)\n";
+        let on = |range: Range<usize>, pointer| {
+            piece_under_pointer(text, &range, pointer, grid(text, None))
+        };
+        // `import os` is underlined to the end of the line.
+        assert_eq!(on(0..9, at(0, 0.5)), Some(0..9));
+        assert_eq!(on(0..9, at(0, 6.5)), Some(0..9), "a space inside it counts");
+        assert_eq!(on(0..9, at(0, 8.9)), Some(0..9));
+        assert_eq!(on(0..9, at(0, 9.1)), None);
+        assert_eq!(on(0..9, at(0, 40.)), None);
+        assert_eq!(on(0..9, at(0, -2.)), None);
+        assert_eq!(on(0..9, at(1, 0.5)), None);
+        // `(1 +` to `2)` spans two lines; the pointer is on the piece of its own line.
+        let open = text.find('(').unwrap();
+        let close = text.find(')').unwrap();
+        let (first, second) = (open..open + 4, 19..close + 1);
+        assert_eq!(on(open..close + 1, at(1, 5.5)), Some(first));
+        assert_eq!(
+            on(open..close + 1, at(1, 30.)),
+            None,
+            "right of its first line"
+        );
+        assert_eq!(on(open..close + 1, at(1, 1.5)), None, "before it starts");
+        assert_eq!(on(open..close + 1, at(2, 5.5)), Some(second.clone()));
+        assert_eq!(
+            on(open..close + 1, at(2, 2.5)),
+            Some(second),
+            "indentation inside it"
+        );
+        assert_eq!(on(open..close + 1, at(2, 8.5)), None);
+        // An empty range is reached from the characters next to it.
+        assert_eq!(on(9..9, at(0, 8.5)), Some(8..9));
+        assert_eq!(on(9..9, at(0, 7.5)), None);
+        assert_eq!(on(9..9, at(0, 12.)), None);
+    }
+
+    #[test]
+    fn a_soft_wrapped_diagnostic_is_matched_character_by_character() {
+        let text = "abcdefghijklm";
+        let on = |range: Range<usize>, pointer| {
+            piece_under_pointer(text, &range, pointer, grid(text, Some(10)))
+        };
+        assert_eq!(on(7..12, at(0, 7.5)), Some(7..8));
+        assert_eq!(on(7..12, at(1, 1.5)), Some(11..12));
+        assert_eq!(on(7..12, at(1, 2.5)), None);
+        assert_eq!(on(7..12, at(0, 3.5)), None);
+        assert_eq!(on(7..12, at(1, 8.5)), None);
     }
 }

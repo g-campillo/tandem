@@ -1,7 +1,7 @@
-//! The editor's hover tooltip. The toolkit asks [`HoverSource`] for a hover at the caret
-//! offset nearest the pointer, on any part of a line; the source answers only when the
-//! pointer is on a character of a symbol, and shows the reply in Tandem's own
-//! [`HoverTip`] instead of the toolkit's popover.
+//! The editor's tooltip. The toolkit asks [`HoverSource`] for a hover at the caret offset
+//! nearest the pointer, on any part of a line; the source answers only when the pointer
+//! is on a character of a symbol, and shows the reply in Tandem's own [`HoverTip`]
+//! instead of the toolkit's popover. [`claim_diagnostic`] does the same for diagnostics.
 mod content;
 mod hit;
 mod tip;
@@ -9,8 +9,8 @@ mod tip;
 pub use tip::HoverTip;
 
 use anyhow::Result;
-use gpui_kit::component::input::{EditorState, HoverProvider, Rope};
-use gpui_kit::{App, Pixels, Point, Task, WeakEntity, Window};
+use gpui_kit::component::input::{EditorState, HoverProvider, Rope, RopeExt as _};
+use gpui_kit::{App, Entity, MouseMoveEvent, Pixels, Point, Task, WeakEntity, Window};
 use lsp_types::Hover;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -133,5 +133,52 @@ impl HoverProvider for HoverSource {
             }
             Ok(None)
         })
+    }
+}
+
+/// Takes a diagnostic over from the toolkit. The toolkit opens its own popover for the
+/// diagnostic at the caret offset nearest the pointer, which is also reached from the
+/// empty space beside a line, and it has no setting to turn that popover off. So this
+/// closes the popover the moment the toolkit has opened it, before anything is painted,
+/// and shows the diagnostic in Tandem's card instead, if the pointer is on the
+/// diagnostic's own text. Called for every pointer move over the editor, after the
+/// toolkit's own handler.
+pub fn claim_diagnostic(
+    editor: &Entity<EditorState>,
+    tip: &Entity<HoverTip>,
+    event: &MouseMoveEvent,
+    cx: &mut App,
+) {
+    let state = editor.read(cx);
+    let Some(entry) = state.diagnostic_popover() else {
+        return;
+    };
+    // Only the lines the diagnostic is on are copied out of the buffer.
+    let text = state.text();
+    let start = entry.range.start.min(text.len());
+    let end = entry.range.end.clamp(start, text.len());
+    let from = text.line_start_offset(text.offset_to_point(start).row);
+    let to = text.line_end_offset(text.offset_to_point(end).row);
+    let lines = text.slice(from..to).to_string();
+    let piece = hit::piece_under_pointer(
+        &lines,
+        &(start - from..end - from),
+        event.position,
+        |range| state.range_to_bounds(&(range.start + from..range.end + from)),
+    )
+    .map(|piece| piece.start + from..piece.end + from)
+    // With a button down the pointer is dragging a selection; nothing opens then.
+    .filter(|_| event.pressed_button.is_none());
+    editor.update(cx, |state, cx| state.clear_diagnostic_popover(cx));
+    if let Some(piece) = piece {
+        let content = content::problem(
+            entry.severity,
+            entry.source.as_ref().map(|source| source.as_ref()),
+            entry.code.as_ref().map(|code| code.as_ref()),
+            &entry.message,
+        );
+        tip.update(cx, |tip, cx| {
+            tip.show_problem(editor.downgrade(), piece, content, cx)
+        });
     }
 }
