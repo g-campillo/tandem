@@ -1,4 +1,4 @@
-//! The chat panel on the right: header, connection notice, transcript, the card of the
+//! The chat panel beside the editor: header, connection notice, transcript, the card of the
 //! step being built, and composer.
 use super::chat_logic::{check_title, finding_label};
 use super::panels::code_note;
@@ -177,8 +177,6 @@ impl Workspace {
             .min_w_0()
             .flex_shrink_0()
             .min_h_0()
-            .border_l_1()
-            .border_color(p.border)
             .child(self.chat_header(state.as_deref(), cx));
         match state {
             Some(state) => panel

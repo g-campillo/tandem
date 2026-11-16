@@ -1,11 +1,11 @@
+use super::pane_logic::pane_geometry;
 use super::*;
-use crate::appearance::{
-    WorkspaceGeometry, compact_button, navigation_button, palette, path_button,
-};
+use crate::appearance::{compact_button, navigation_button, palette, path_button};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, Input};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
+use tandem_core::layout::{Pane, PaneSide};
 
 impl Workspace {
     fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -125,7 +125,10 @@ impl Workspace {
                             "Chat"
                         },
                     )
-                    .icon(IconName::PanelRight),
+                    .icon(match self.panes.layout.side(Pane::Chat) {
+                        PaneSide::Left => IconName::PanelLeft,
+                        PaneSide::Right => IconName::PanelRight,
+                    }),
                     self.chat.visible,
                     cx,
                 )
@@ -228,8 +231,6 @@ impl Workspace {
             .min_h_0()
             .flex_shrink_0()
             .bg(p.chrome())
-            .border_r_1()
-            .border_color(cx.theme().border)
             .child(
                 div()
                     .h_flex()
@@ -621,9 +622,11 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx.theme().mode);
-        let geometry = WorkspaceGeometry::for_width(
+        let shown = self.shown_panes();
+        let geometry = pane_geometry(
             f32::from(window.viewport_size().width),
-            self.chat.visible,
+            &self.panes.layout,
+            shown,
         );
         let backup = if self.project.is_none() {
             "Ready"
@@ -645,6 +648,18 @@ impl Render for Workspace {
             let columns = (geometry.terminal_available_width() / 7.3).max(40.0) as u16;
             terminal.update(cx, |terminal, _| terminal.resize_columns(columns));
         }
+        let files = shown.files.then(|| {
+            let files = self.sidebar_view(geometry.sidebar, cx);
+            self.pane_frame(Pane::Files, files, cx)
+        });
+        let chat = shown.chat.then(|| {
+            let chat = self.chat_panel(geometry.utility, cx);
+            self.pane_frame(Pane::Chat, chat, cx)
+        });
+        let (left, right) = match self.panes.layout.side(Pane::Files) {
+            PaneSide::Left => (files, chat),
+            PaneSide::Right => (chat, files),
+        };
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -696,18 +711,9 @@ impl Render for Workspace {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .child(self.sidebar_view(geometry.sidebar, cx))
+                    .children(left)
                     .child(self.content_view(cx))
-                    .when(self.chat.visible, |d| {
-                        d.child(
-                            div()
-                                .h_flex()
-                                .items_stretch()
-                                .min_h_0()
-                                .flex_shrink_0()
-                                .child(self.chat_panel(geometry.utility, cx)),
-                        )
-                    }),
+                    .children(right),
             )
             .child(
                 div()
