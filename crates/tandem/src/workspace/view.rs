@@ -1,6 +1,9 @@
+use super::chrome_logic::tooltip;
+use super::commands::shortcut;
 use super::pane_logic::{pane_geometry, terminal_columns};
 use super::*;
 use crate::appearance::{compact_button, navigation_button, palette, path_button};
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, Input};
 use gpui_kit::component::*;
@@ -8,153 +11,6 @@ use gpui_kit::prelude::FluentBuilder;
 use tandem_core::layout::{Pane, PaneSide};
 
 impl Workspace {
-    fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette(cx.theme().mode);
-        div()
-            .h_flex()
-            .flex_wrap()
-            .min_w_0()
-            .flex_shrink_0()
-            .gap_2()
-            .p_2()
-            .border_b_1()
-            .border_color(p.border)
-            .bg(p.chrome())
-            .child(
-                div()
-                    .text_size(px(16.))
-                    .font_semibold()
-                    .px_2()
-                    .child("Tandem"),
-            )
-            .child(
-                compact_button(Button::new("open-project"), "Open Folder")
-                    .icon(IconName::FolderOpen)
-                    .ghost()
-                    .on_click(cx.listener(|this, _, window, cx| this.choose_project(window, cx))),
-            )
-            .child(
-                navigation_button(
-                    compact_button(Button::new("recent-projects"), "Recent")
-                        .icon(IconName::RotateCw),
-                    self.show_recent,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_recent = !this.show_recent;
-                    cx.notify();
-                })),
-            )
-            .child(
-                compact_button(Button::new("new-file"), "New File")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_sidebar(Sidebar::New, window, cx)
-                    })),
-            )
-            .child(
-                compact_button(Button::new("save"), "Save  ⌘S")
-                    .icon(IconName::HardDrive)
-                    .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| this.save_active(cx))),
-            )
-            .child(
-                navigation_button(
-                    compact_button(
-                        Button::new("changes"),
-                        if self.diff.is_some() {
-                            "Back to Code"
-                        } else {
-                            "Changes"
-                        },
-                    )
-                    .icon(IconName::Replace),
-                    self.diff.is_some(),
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.show_diff(window, cx))),
-            )
-            .child(
-                navigation_button(
-                    compact_button(
-                        Button::new("terminal"),
-                        if self.bottom == Some(BottomTab::Terminal) {
-                            "Hide Terminal"
-                        } else {
-                            "Terminal"
-                        },
-                    )
-                    .icon(IconName::SquareTerminal),
-                    self.bottom == Some(BottomTab::Terminal),
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal(cx))),
-            )
-            .when(self.terminal.is_some(), |d| {
-                d.child(
-                    compact_button(Button::new("close-terminal"), "Stop Terminal")
-                        .icon(IconName::Square)
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.terminal = None;
-                            if this.bottom == Some(BottomTab::Terminal) {
-                                this.bottom = None;
-                            }
-                            cx.notify();
-                        })),
-                )
-            })
-            .child(div().flex_1().min_w_0())
-            .child(
-                navigation_button(
-                    compact_button(Button::new("toolbar-settings"), "Settings  ⌘,")
-                        .icon(IconName::Settings2),
-                    self.settings.open,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
-            )
-            .child(
-                navigation_button(
-                    compact_button(
-                        Button::new("toggle-chat"),
-                        if self.chat.visible {
-                            "Hide Chat"
-                        } else {
-                            "Chat"
-                        },
-                    )
-                    .icon(match self.panes.layout.side(Pane::Chat) {
-                        PaneSide::Left => IconName::PanelLeft,
-                        PaneSide::Right => IconName::PanelRight,
-                    }),
-                    self.chat.visible,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.chat.visible = !this.chat.visible;
-                    cx.notify();
-                })),
-            )
-            .when(self.takeover_running(), |d| {
-                d.child(
-                    div()
-                        .id("mode")
-                        .role(Role::Label)
-                        .aria_label(
-                            "Claude is editing files. The editor is read-only; Command-period stops Claude.",
-                        )
-                        .self_center()
-                        .text_size(px(12.))
-                        .text_color(p.warning)
-                        .px_2()
-                        .child("Claude is editing files · ⌘. stops"),
-                )
-            })
-            .into_any_element()
-    }
-
     fn sidebar_view(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
         let rows = self.navigation(cx);
@@ -443,6 +299,16 @@ impl Workspace {
                                 "Open your project"
                             }),
                     )
+                    .when(self.project.is_none(), |d| {
+                        d.child(
+                            compact_button(Button::new("welcome-open-folder"), "Open Folder…")
+                                .icon(IconName::FolderOpen)
+                                .primary()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_project(window, cx)
+                                })),
+                        )
+                    })
                     .child("⌘P opens files · ⌘N creates a file · ⌘S saves")
                     .children(recent),
             );
@@ -599,6 +465,32 @@ impl Workspace {
                     this.bottom = next_bottom(this.bottom, BottomTab::Problems);
                     cx.notify();
                 })),
+            )
+            .child(div().flex_1().min_w_0())
+            .when(self.terminal.is_some(), |d| {
+                d.child(
+                    Button::new("close-terminal")
+                        .icon(Lucide::Trash)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Stop Terminal")
+                        .accessibility_label("Stop Terminal")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.terminal = None;
+                            if this.bottom == Some(BottomTab::Terminal) {
+                                this.bottom = None;
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                Button::new("hide-panel")
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .tooltip(tooltip("Hide Panel", shortcut("Toggle Panel")))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_bottom_panel(cx))),
             );
         let content = match bottom {
             BottomTab::Terminal => self
@@ -680,7 +572,7 @@ impl Render for Workspace {
             .size_full()
             .text_color(p.foreground)
             .text_size(px(13.))
-            .child(self.toolbar(cx))
+            .child(self.title_bar(cx))
             .when(self.show_recent, |d| {
                 d.child(
                     div()

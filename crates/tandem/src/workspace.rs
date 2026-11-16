@@ -1,6 +1,11 @@
 mod chat;
 mod chat_logic;
 mod chat_view;
+mod chrome;
+// Task 7 uses `tooltip`; the rest is used from Tasks 8, 10 and 11 on. Task 11 removes
+// this attribute.
+#[allow(dead_code)]
+mod chrome_logic;
 mod code_view;
 pub mod commands;
 // The terminal, chat and explorer fonts are read from Tasks 5, 6 and 8 on, the
@@ -103,9 +108,7 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     route::<Save>(cx, window, view.clone(), |v, _, c| v.save_active(c));
     route::<SaveAll>(cx, window, view.clone(), |v, _, c| v.save_all(c));
     route::<SaveCopy>(cx, window, view.clone(), |v, w, c| v.save_copy(w, c));
-    route::<QuickOpen>(cx, window, view.clone(), |v, w, c| {
-        v.set_sidebar(Sidebar::Files, w, c)
-    });
+    route::<QuickOpen>(cx, window, view.clone(), |v, w, c| v.open_center("", w, c));
     route::<ProjectSearch>(cx, window, view.clone(), |v, w, c| {
         v.set_sidebar(Sidebar::Search, w, c)
     });

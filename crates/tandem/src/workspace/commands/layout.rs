@@ -3,7 +3,11 @@ use super::*;
 
 impl Workspace {
     /// Shows or hides the file explorer (⌘B).
-    pub(super) fn toggle_explorer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::workspace) fn toggle_explorer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.commands.explorer_visible = !self.commands.explorer_visible;
         // The explorer's input disappears with it, so the keyboard focus moves to the editor.
         if !self.commands.explorer_visible
@@ -20,7 +24,7 @@ impl Workspace {
     }
 
     /// Hides the bottom panel, or shows it again on the tab it was hidden on (⌘J).
-    pub(super) fn toggle_bottom_panel(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::workspace) fn toggle_bottom_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.bottom {
             self.commands.last_bottom = tab;
             self.bottom = None;
