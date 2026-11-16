@@ -1,5 +1,5 @@
 use super::*;
-use crate::appearance::{panel_body, panel_code, panel_heading, path_button};
+use crate::appearance::{RADIUS_CONTROL, panel_body, panel_code, panel_heading, path_button};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
@@ -91,7 +91,7 @@ pub(super) fn code_note(
 ) -> Stateful<Div> {
     panel_code(div().id(id), cx)
         .p_2()
-        .rounded(px(6.))
+        .rounded(px(RADIUS_CONTROL))
         .h_flex()
         .overflow_x_scroll()
         .child(

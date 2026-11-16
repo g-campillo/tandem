@@ -38,8 +38,8 @@ fn appearance_workspace_geometry_keeps_terminal_width_inside_content() {
             assert!(geometry.terminal_available_width() <= geometry.content);
             assert_eq!(
                 geometry.terminal_available_width(),
-                (geometry.content - 16.).max(0.),
-                "terminal columns exclude the existing 8px inset on each side"
+                (geometry.content - 30.).max(0.),
+                "terminal columns exclude the panel's inset and border and the 8px padding on each side"
             );
         }
     }
@@ -47,9 +47,9 @@ fn appearance_workspace_geometry_keeps_terminal_width_inside_content() {
     let wide = WorkspaceGeometry::for_width(1280., true);
     assert_eq!(
         (narrow.terminal_available_width() / 7.3).max(40.) as u16,
-        48
+        46
     );
-    assert_eq!((wide.terminal_available_width() / 7.3).max(40.) as u16, 85);
+    assert_eq!((wide.terminal_available_width() / 7.3).max(40.) as u16, 83);
 }
 
 fn assert_projection(theme: &Theme, mode: ThemeMode) {
@@ -60,8 +60,8 @@ fn assert_projection(theme: &Theme, mode: ThemeMode) {
     assert_eq!(theme.muted_foreground, p.secondary_foreground);
     assert_eq!(theme.primary, p.accent);
     assert_eq!(theme.primary_foreground, p.accent_foreground);
-    assert_eq!(theme.radius, px(6.));
-    assert_eq!(theme.radius_lg, px(10.));
+    assert_eq!(theme.radius, px(8.));
+    assert_eq!(theme.radius_lg, px(12.));
     assert_eq!(
         theme.font_size,
         px(16.),
@@ -222,6 +222,21 @@ fn appearance_text_and_focus_contrast() {
             assert_contrast(p.foreground, chrome, 4.5, "chrome primary text");
             assert_contrast(p.secondary_foreground, chrome, 4.5, "chrome secondary text");
             assert_contrast(p.focus.alpha(0.5), chrome, 3., "chrome toolkit focus band");
+        }
+    }
+}
+
+#[test]
+fn appearance_glass_panel_contrast() {
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        let p = palette(mode);
+        assert!(p.glass.a < 1., "a glass panel lets the window show through");
+        for backdrop in [rgb(0x000000).into(), rgb(0xFFFFFF).into()] {
+            // A glass panel is always painted over the window's chrome tint.
+            let glass = composite(p.glass, composite(p.chrome, backdrop));
+            assert_contrast(p.foreground, glass, 4.5, "glass primary text");
+            assert_contrast(p.secondary_foreground, glass, 4.5, "glass secondary text");
+            assert_contrast(p.focus.alpha(0.5), glass, 3., "glass toolkit focus band");
         }
     }
 }

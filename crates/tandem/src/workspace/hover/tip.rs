@@ -5,7 +5,7 @@
 
 use super::content::{HoverContent, ProblemContent, Tone};
 use super::hit;
-use crate::appearance::palette;
+use crate::appearance::{RADIUS_CARD, RADIUS_CONTROL, palette};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::EditorState;
 use gpui_kit::component::text::{TextView, TextViewStyle};
@@ -279,7 +279,7 @@ impl Render for HoverTip {
             StyleRefinement::default()
                 .bg(p.content)
                 .p_2()
-                .rounded(px(6.))
+                .rounded(px(RADIUS_CONTROL))
         };
         // A diagnostic sits in a block of its severity's colours, as Tandem's notices do.
         let problem = shown.problem.as_ref().map(|part| {
@@ -292,7 +292,7 @@ impl Render for HoverTip {
                 .flex_shrink_0()
                 .px(px(10.))
                 .py_2()
-                .rounded(px(6.))
+                .rounded(px(RADIUS_CONTROL))
                 .bg(surface)
                 .text_color(text)
                 .child(
@@ -319,7 +319,7 @@ impl Render for HoverTip {
                     .flex_shrink_0()
                     .px(px(10.))
                     .py_2()
-                    .rounded(px(6.))
+                    .rounded(px(RADIUS_CONTROL))
                     .bg(p.content)
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(
@@ -375,7 +375,7 @@ impl Render for HoverTip {
             .relative()
             .occlude()
             .max_w(max_width)
-            .rounded(px(10.))
+            .rounded(px(RADIUS_CARD))
             .border_1()
             .border_color(p.border)
             .bg(p.surface)

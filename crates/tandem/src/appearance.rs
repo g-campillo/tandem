@@ -3,7 +3,8 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::{Icon, Selectable, Sizable, StyledExt, Theme, ThemeMode, ThemeTokens};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    App, Div, Hsla, IntoElement, ParentElement, SharedString, Subscription, Window, div, rgb,
+    App, BoxShadow, Div, Hsla, IntoElement, ParentElement, SharedString, Subscription, Window, div,
+    point, rgb,
 };
 use gpui_kit::{FontWeight, Styled, px};
 use std::sync::Arc;
@@ -35,8 +36,9 @@ impl WorkspaceGeometry {
     }
 
     pub fn terminal_available_width(self) -> f32 {
-        // TerminalView retains p_2: 8px on either side with the 16px rem basis.
-        (self.content - 16.).max(0.)
+        // The panel is inset on both sides and has a 1 px border; TerminalView keeps its
+        // own 8 px of padding on either side.
+        (self.content - 2. * PANEL_INSET - 2. - 16.).max(0.)
     }
 }
 
@@ -47,7 +49,7 @@ pub fn compact_button(button: Button, label: impl Into<SharedString>) -> Button 
     button
         .small()
         .h(px(28.))
-        .rounded(px(6.))
+        .rounded(px(RADIUS_CONTROL))
         .font_family(".SystemUIFont")
         .accessibility_label(label.clone())
         .child(div().text_size(px(13.)).child(label))
@@ -77,7 +79,7 @@ pub fn path_button(button: Button, label: impl Into<SharedString>) -> Button {
         .w_full()
         .min_w_0()
         .justify_start()
-        .rounded(px(6.))
+        .rounded(px(RADIUS_CONTROL))
         .accessibility_label(label.clone())
         .child(
             div()
@@ -105,7 +107,7 @@ pub fn tree_button(
         .w_full()
         .min_w_0()
         .justify_start()
-        .rounded(px(6.))
+        .rounded(px(RADIUS_CONTROL))
         .accessibility_label(label.clone())
         .child(
             div()
@@ -136,7 +138,7 @@ pub fn wrapping_button(button: Button, label: impl Into<SharedString>) -> Button
         .max_w_full()
         .min_w_0()
         .py_1()
-        .rounded(px(6.))
+        .rounded(px(RADIUS_CONTROL))
         .accessibility_label(label.clone())
         .child(
             div()
@@ -212,11 +214,50 @@ pub fn panel_code<T: Styled>(element: T, cx: &App) -> T {
         .text_color(palette(Theme::global(cx).mode).foreground)
 }
 
+/// A floating glass panel: a rounded, softly lit card over the window's chrome tint.
+/// Clipping is rectangular, so its children must not paint a background of their own
+/// in its corners.
+pub fn glass_panel(cx: &App) -> Div {
+    let p = palette(Theme::global(cx).mode);
+    div()
+        .v_flex()
+        .min_w_0()
+        .min_h_0()
+        .overflow_hidden()
+        .rounded(px(RADIUS_PANEL))
+        .border_1()
+        .border_color(p.glass_border)
+        .bg(p.glass)
+        .shadow(vec![BoxShadow {
+            color: p.glass_shadow,
+            offset: point(px(0.), px(4.)),
+            blur_radius: px(16.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
+}
+
+/// The corner radius of controls: buttons, inputs, tooltips and menu rows.
+pub const RADIUS_CONTROL: f32 = 8.;
+/// The corner radius of cards: chat cards, dialogs, the command center's list and menus.
+pub const RADIUS_CARD: f32 = 12.;
+/// The corner radius of the floating glass panels: the file tree, the chat and the panel
+/// below the editor.
+pub const RADIUS_PANEL: f32 = 14.;
+/// The gap between a glass panel and the window's edge or the editor.
+pub const PANEL_INSET: f32 = 6.;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub content: Hsla,
     pub surface: Hsla,
     pub chrome: Hsla,
+    /// The fill of a floating glass panel. It is always painted over `chrome`.
+    pub glass: Hsla,
+    /// The hairline that catches the light around a glass panel.
+    pub glass_border: Hsla,
+    /// The colour of the soft shadow under a glass panel.
+    pub glass_shadow: Hsla,
     pub foreground: Hsla,
     pub secondary_foreground: Hsla,
     pub border: Hsla,
@@ -239,6 +280,9 @@ pub fn palette(mode: ThemeMode) -> Palette {
             content: rgb(0x1C1D21).into(),
             surface: rgb(0x252830).into(),
             chrome: Hsla::from(rgb(0x22252D)).alpha(0.88),
+            glass: Hsla::from(rgb(0x252830)).alpha(0.60),
+            glass_border: Hsla::white().alpha(0.12),
+            glass_shadow: Hsla::black().alpha(0.32),
             foreground: rgb(0xECEDEF).into(),
             secondary_foreground: rgb(0xADB1BC).into(),
             border: rgb(0x434852).into(),
@@ -259,6 +303,9 @@ pub fn palette(mode: ThemeMode) -> Palette {
             content: rgb(0xFBFBFD).into(),
             surface: rgb(0xFFFFFF).into(),
             chrome: Hsla::from(rgb(0xF1F3F7)).alpha(0.86),
+            glass: Hsla::from(rgb(0xFFFFFF)).alpha(0.60),
+            glass_border: Hsla::black().alpha(0.10),
+            glass_shadow: Hsla::black().alpha(0.12),
             foreground: rgb(0x202126).into(),
             // 4.6:1 even over the darkest composited light chrome.
             secondary_foreground: rgb(0x545862).into(),
@@ -348,8 +395,8 @@ fn project(theme: &mut Theme) {
     let p = palette(theme.mode);
     theme.font_family = ".SystemUIFont".into();
     theme.font_size = px(16.);
-    theme.radius = px(6.);
-    theme.radius_lg = px(10.);
+    theme.radius = px(RADIUS_CONTROL);
+    theme.radius_lg = px(RADIUS_CARD);
     theme.focus_ring = true;
 
     theme.background = p.content;
@@ -489,7 +536,7 @@ pub fn navigation_button(button: Button, selected: bool, cx: &App) -> Button {
                 .active(if selected { p.selected } else { p.pressed() }),
         )
         .selected(selected)
-        .rounded(px(6.))
+        .rounded(px(RADIUS_CONTROL))
         .when(selected, |button| button.font_weight(FontWeight::SEMIBOLD))
 }
 
@@ -500,7 +547,7 @@ pub fn solid_section<T: Styled>(element: T, cx: &App) -> T {
     element
         .bg(p.surface)
         .border_color(p.border)
-        .rounded(px(10.))
+        .rounded(px(RADIUS_CARD))
 }
 
 #[cfg(test)]

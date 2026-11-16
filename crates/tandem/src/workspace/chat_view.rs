@@ -182,16 +182,15 @@ impl Workspace {
         (px(size), px((size - 1.).max(10.)), px((size - 2.).max(10.)))
     }
 
-    pub(super) fn chat_panel(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn chat_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
         let state = self.chat_state();
         let panel = div()
             .v_flex()
             .font_family(self.look.fonts.chat.family.clone())
             .text_size(px(self.look.fonts.chat.size))
-            .w(px(width))
+            .size_full()
             .min_w_0()
-            .flex_shrink_0()
             .min_h_0()
             .child(self.chat_header(state.as_deref(), cx));
         match state {
@@ -204,7 +203,6 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .p_4()
-                    .bg(p.surface)
                     .text_color(p.secondary_foreground)
                     .child(NO_PROJECT),
             ),
@@ -225,7 +223,6 @@ impl Workspace {
             .items_center()
             .gap_2()
             .p_2()
-            .bg(p.chrome())
             .border_b_1()
             .border_color(p.border)
             .child(
@@ -313,7 +310,6 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .bg(p.surface)
             .children(notice)
             .child(
                 div()
@@ -841,7 +837,6 @@ impl Workspace {
                 .min_h_0()
                 .max_h(relative(0.45))
                 .p_2()
-                .bg(p.surface)
                 .border_t_1()
                 .border_color(p.border)
                 .child(card)
@@ -1148,7 +1143,6 @@ impl Workspace {
             .p_2()
             .border_t_1()
             .border_color(p.border)
-            .bg(p.chrome())
             .when_some(state.banner.clone(), |d, banner| {
                 d.child(panel_error(div().text_size(px(13.)).child(banner), cx))
             })

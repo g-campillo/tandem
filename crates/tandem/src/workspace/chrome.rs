@@ -405,7 +405,6 @@ impl Workspace {
             .gap_2()
             .border_t_1()
             .border_color(p.border)
-            .bg(p.content)
             .text_size(px(12.))
             .text_color(p.secondary_foreground)
             .children(branch)

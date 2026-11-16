@@ -3,7 +3,9 @@ use super::chrome_logic::{file_icon, tab_labels, tab_name, tooltip};
 use super::commands::shortcut;
 use super::pane_logic::{pane_geometry, row_width, terminal_columns};
 use super::*;
-use crate::appearance::{compact_button, navigation_button, palette, path_button, tree_button};
+use crate::appearance::{
+    PANEL_INSET, compact_button, glass_panel, navigation_button, palette, path_button, tree_button,
+};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Editor, Input};
@@ -12,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder;
 use tandem_core::layout::{Pane, PaneSide};
 
 impl Workspace {
-    fn sidebar_view(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn sidebar_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
         let face = self.look.fonts.explorer.clone();
         let rows = self.navigation(cx);
@@ -93,11 +95,9 @@ impl Workspace {
             .collect::<Vec<_>>();
         div()
             .v_flex()
-            .w(px(width))
+            .size_full()
             .min_w_0()
             .min_h_0()
-            .flex_shrink_0()
-            .bg(p.chrome())
             .font_family(face.family.clone())
             .child(
                 div()
@@ -352,7 +352,7 @@ impl Workspace {
             .h(px(34.))
             .flex_shrink_0()
             .min_w_0()
-            .bg(p.chrome())
+            .bg(p.content)
             .border_b_1()
             .border_color(p.border)
             .child(
@@ -449,7 +449,7 @@ impl Workspace {
                     .child("⌘P opens files · ⌘N creates a file · ⌘S saves")
                     .children(recent),
             );
-        div()
+        let editor_block = div()
             .v_flex()
             .flex_1()
             .min_w_0()
@@ -565,8 +565,20 @@ impl Workspace {
                         })
                         .when(self.active.is_none(), |d| d.child(empty))
                     }),
-            )
-            .children(self.bottom_panel(cx))
+            );
+        div()
+            .v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(editor_block)
+            .children(self.bottom_panel(cx).map(|panel| {
+                div()
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .p(px(PANEL_INSET))
+                    .child(glass_panel(cx).child(panel))
+            }))
             .into_any_element()
     }
 
@@ -579,8 +591,6 @@ impl Workspace {
             .flex_wrap()
             .gap_1()
             .p_1()
-            .bg(p.chrome())
-            .border_t_1()
             .border_b_1()
             .border_color(p.border)
             .child(
@@ -645,7 +655,6 @@ impl Workspace {
                     .max_h(px(240.))
                     .overflow_y_scroll()
                     .p_3()
-                    .bg(p.surface)
                     .child(self.problems_panel(cx))
                     .into_any_element(),
             ),
@@ -681,12 +690,12 @@ impl Render for Workspace {
             terminal.update(cx, |terminal, _| terminal.resize_columns(columns));
         }
         let files = shown.files.then(|| {
-            let files = self.sidebar_view(geometry.sidebar, cx);
-            self.pane_frame(Pane::Files, files, cx)
+            let files = self.sidebar_view(cx);
+            self.pane_frame(Pane::Files, geometry.sidebar, files, cx)
         });
         let chat = shown.chat.then(|| {
-            let chat = self.chat_panel(geometry.utility, cx);
-            self.pane_frame(Pane::Chat, chat, cx)
+            let chat = self.chat_panel(cx);
+            self.pane_frame(Pane::Chat, geometry.utility, chat, cx)
         });
         // The activity bar sits on the window's edge beside the file tree.
         let activity_bar = Some(self.activity_bar(cx));
@@ -699,6 +708,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .v_flex()
             .size_full()
+            .bg(p.chrome())
             .text_color(p.foreground)
             .text_size(px(13.))
             .child(self.title_bar(cx))

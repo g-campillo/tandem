@@ -409,9 +409,6 @@ impl Render for TerminalView {
             .flex_shrink_0()
             .overflow_hidden()
             .p_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
                 div()
