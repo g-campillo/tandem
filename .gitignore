@@ -1,3 +1,4 @@
 /target/
 /.tandem-local/
 .DS_Store
+/crates/tandem-claude/helper/node_modules/
