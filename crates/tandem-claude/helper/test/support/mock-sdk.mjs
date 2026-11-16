@@ -220,7 +220,23 @@ export function query({ prompt, options }) {
       return Promise.resolve();
     },
     setModel: control('setModel'),
-    setPermissionMode: control('setPermissionMode'),
+    // Refuses a mode the way Claude Code does.
+    setPermissionMode(mode) {
+      record.calls.push(['setPermissionMode', mode]);
+      if (mode === 'bypassPermissions' && options.allowDangerouslySkipPermissions !== true) {
+        return Promise.reject(
+          new Error(
+            'Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions',
+          ),
+        );
+      }
+      if (mode === 'auto' && options.env?.MOCK_AUTO === 'unavailable') {
+        return Promise.reject(
+          new Error('Cannot set permission mode to auto: auto mode unavailable for this model'),
+        );
+      }
+      return Promise.resolve();
+    },
     applyFlagSettings: control('applyFlagSettings'),
     close() {
       if (!closed) {

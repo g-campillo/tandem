@@ -536,3 +536,34 @@ fn captured_working_version_keeps_closed_drafts_and_prefers_live_buffers() {
         "latest live version"
     );
 }
+
+#[test]
+fn an_external_edit_reaches_a_clean_document_and_blocks_saving_a_dirty_one() {
+    let (_directory, project) = fixture();
+    let path = project.root.join("code.rs");
+    fs::write(&path, "original\n").unwrap();
+    let clean = project.open_document("code.rs", false).unwrap();
+    let mut dirty = clean.clone();
+    dirty.snapshot("my unsaved work\n".into());
+    assert!(matches!(project.disk_change(&clean), DiskChange::Unchanged));
+
+    // Claude edits the file on disk.
+    fs::write(&path, "claude's version\n").unwrap();
+
+    // A clean buffer is handed the new contents, which the editor then shows.
+    let DiskChange::Changed(current) = project.disk_change(&clean) else {
+        panic!("the edit on disk was not noticed");
+    };
+    assert_eq!(current.text, "claude's version\n");
+    assert!(!current.dirty());
+    assert_ne!(current.base_hash, clean.base_hash);
+
+    // A dirty buffer is told too, keeps its text, and cannot be saved over the edit.
+    assert!(matches!(
+        project.disk_change(&dirty),
+        DiskChange::Changed(_)
+    ));
+    assert!(project.save(&dirty).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "claude's version\n");
+    assert_eq!(dirty.text, "my unsaved work\n");
+}

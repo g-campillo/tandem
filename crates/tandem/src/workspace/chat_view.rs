@@ -1092,6 +1092,7 @@ impl Workspace {
                     .when(!efforts.is_empty(), |d| {
                         d.child(effort_menu(state, efforts, &weak))
                     })
+                    .child(permission_menu("chat-permissions", state, &weak))
                     .child(div().flex_1())
                     .child(self.composer_action(mode, cx)),
             )
@@ -1169,6 +1170,34 @@ fn effort_menu(
                     PopupMenuItem::new(effort.clone())
                         .checked(selected.as_deref() == Some(effort.as_str()))
                         .on_click(on_command(&weak, Command::SetEffort(Some(effort.clone())))),
+                )
+            })
+        })
+        .into_any_element()
+}
+
+/// The permissions picker: Ask, Auto or Bypass. Bypass is shown in the warning colour.
+pub(super) fn permission_menu(
+    id: impl Into<ElementId>,
+    state: &ChatState,
+    weak: &WeakEntity<Workspace>,
+) -> AnyElement {
+    let picker = view::permission_picker(state);
+    let button = compact_button(Button::new(id), picker.label.clone()).tooltip(picker.tooltip);
+    let button = if picker.warn {
+        button.warning()
+    } else {
+        button.ghost()
+    };
+    let weak = weak.clone();
+    button
+        .dropdown_menu(move |menu, _, _| {
+            picker.choices.iter().fold(menu, |menu, choice| {
+                menu.item(
+                    PopupMenuItem::new(choice.label)
+                        .checked(choice.checked)
+                        .disabled(!choice.enabled)
+                        .on_click(on_command(&weak, Command::SetPermissionMode(choice.mode))),
                 )
             })
         })

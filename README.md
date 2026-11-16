@@ -26,7 +26,7 @@ Tandem keeps its state (open tabs, drafts, chat tasks) in `~/Library/Application
 
 ## How a task works
 
-1. **Discuss.** Describe the feature in the chat. Claude reads your code, searches the web when it needs to, and asks questions. It does not change files.
+1. **Discuss.** Describe the feature in the chat. Claude reads your code, searches the web when it needs to, and asks questions. It does not change files, unless Permissions is set to Bypass and you ask it to.
 2. **Plan.** Claude proposes a plan card: the goal, the "done when" criteria, and small numbered steps, each one file to create, one edit, or one command. Ask for changes until it is right, then choose **I'll write it** or **You do it**.
 3. **Build.** The active step is pinned above the composer with guidance: what to do, why, and code or pseudocode you can copy. Write it, then press **Check my work** (⌥⌘C). A pass moves on to the next step.
 4. **Hand over when you want.** **Do it for me** lets Claude do the active step; **Build the rest for me** lets it do every remaining step.
@@ -45,6 +45,16 @@ Every level explains why.
 ## Takeover, Keep and Undo
 
 Before Claude takes over, Tandem saves your unsaved files and takes a snapshot of the project. While Claude works, the editor is read-only and ⌘. stops it. Afterwards a card lists every file Claude created, modified or deleted, including files changed by commands it ran. Press **Keep** to accept a change, or **Undo** to put the file back as it was. Undoing everything returns the plan to the step where the takeover started.
+
+## Permissions
+
+The **Permissions** button next to Model and Effort decides how often Claude asks before it acts. The choice is saved for all projects.
+
+- **Ask** (the default): an Allow/Deny card for each command Tandem does not allow by itself. Claude edits files only during a takeover.
+- **Auto**: Claude Code's auto mode. Its safety check lets routine commands run and asks only about risky ones. Claude still edits files only during a takeover.
+- **Bypass**: nothing asks. Every command runs, and Claude may edit project files in any turn when you ask it to. The button is shown in the warning colour.
+
+In every mode Claude's edit tools are refused outside the project folder. Keep and Undo exist only for a takeover: a command that runs in another turn, and in Bypass an edit outside a takeover, has no snapshot and cannot be undone in Tandem. The details are in [docs/tandem/companion.md](docs/tandem/companion.md#what-claude-may-do).
 
 ## Tests
 
@@ -68,6 +78,7 @@ Building, verifying, installing and rolling back a local release are described i
 - One task and one Claude turn at a time.
 - The plan is fixed once Build starts; a different plan needs a new task.
 - Undo does not cover ignored files (for example anything in `target/` or `node_modules/`), and cannot restore files over 2 MiB.
+- Keep and Undo cover takeovers only. Commands Claude runs in other turns, and its edits outside a takeover in Bypass, cannot be undone in Tandem.
 - A packaged Tandem is a local ad hoc build for your own Mac: it is not notarized, and it contains Anthropic's proprietary Claude Code binary, so it must not be redistributed.
 
 ## More

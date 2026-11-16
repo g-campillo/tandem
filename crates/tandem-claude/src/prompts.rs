@@ -1,6 +1,8 @@
 //! The text Tandem gives Claude: the system prompt addition and each turn's message.
 
-use tandem_core::chat::{ChatItem, ChatTask, HelpLevel, ItemKind, Phase, Plan, PlanStep, StepKind};
+use tandem_core::chat::{
+    ChatItem, ChatTask, HelpLevel, ItemKind, PermissionMode, Phase, Plan, PlanStep, StepKind,
+};
 
 /// Appended to Claude Code's system prompt for every session.
 pub const SYSTEM_APPEND: &str = "\
@@ -269,6 +271,19 @@ fn recap_block(task: &ChatTask, items: &[ChatItem]) -> String {
     block
 }
 
+/// Ends a chat turn's message in Bypass: the helper no longer refuses edits outside a
+/// takeover, so Claude is told when it may make one.
+pub const BYPASS_EDITS: &str = "[Tandem] Permissions are set to Bypass, so for this turn the rule against editing files outside a takeover does not apply. Change files only when the user's message above asks you to, and only inside the project folder. When the user asks a question or wants guidance, explain as before and let them write the code. These edits have no snapshot, so Tandem cannot undo them: name every file you changed.";
+
+/// A chat turn's message under `mode`: Bypass adds `BYPASS_EDITS`; Ask and Auto change
+/// nothing, and neither does a slash command, which goes to Claude Code as typed.
+pub fn with_permissions(message: String, mode: PermissionMode) -> String {
+    if mode != PermissionMode::Bypass || message.starts_with('/') {
+        return message;
+    }
+    format!("{message}\n\n{BYPASS_EDITS}")
+}
+
 /// The first `max` characters of `text`.
 pub(crate) fn cut(text: &str, max: usize) -> &str {
     match text.char_indices().nth(max) {
@@ -326,6 +341,75 @@ mod tests {
     fn a_slash_command_is_sent_unchanged() {
         let task = task_in(Phase::Build, 1);
         assert_eq!(chat(&task, &[], "/review src", true), "/review src");
+    }
+
+    /// A discuss message, a Build message and a finished-plan message.
+    fn chat_messages() -> [String; 3] {
+        [
+            chat(&task_in(Phase::Discuss, 0), &[], "Add a --json flag", false),
+            chat(&task_in(Phase::Build, 1), &[], "Why a Vec?", false),
+            chat(&task_in(Phase::Done, 3), &[], "Thanks", false),
+        ]
+    }
+
+    #[test]
+    fn ask_and_auto_leave_a_chat_message_unchanged() {
+        for mode in [PermissionMode::Ask, PermissionMode::Auto] {
+            for message in chat_messages() {
+                assert_eq!(with_permissions(message.clone(), mode), message, "{mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bypass_ends_a_chat_message_with_the_edit_rule() {
+        let [discuss, build, finished] = chat_messages();
+        assert_eq!(discuss, "Add a --json flag");
+        for message in [&discuss, &build, &finished] {
+            assert_eq!(
+                with_permissions(message.clone(), PermissionMode::Bypass),
+                format!("{message}\n\n{BYPASS_EDITS}")
+            );
+        }
+        assert!(
+            with_permissions(build, PermissionMode::Bypass).starts_with("[Tandem] Guided build.")
+        );
+    }
+
+    #[test]
+    fn a_slash_command_is_never_changed() {
+        for mode in PermissionMode::ALL {
+            assert_eq!(
+                with_permissions("/review src".into(), mode),
+                "/review src",
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bypass_rule_keeps_the_guided_flow() {
+        assert!(BYPASS_EDITS.starts_with("[Tandem] Permissions are set to Bypass"));
+        for part in [
+            "only when the user's message above asks you to",
+            "only inside the project folder",
+            "let them write the code",
+            "Tandem cannot undo them",
+        ] {
+            assert!(BYPASS_EDITS.contains(part), "{part}");
+        }
+    }
+
+    #[test]
+    fn guidance_and_checks_forbid_edits_in_every_mode() {
+        let plan = guided_plan();
+        for prompt in [
+            guidance(&plan, 0, HelpLevel::Beginner),
+            check(&plan, 0, HelpLevel::Intermediate, &[]),
+            final_check(&plan),
+        ] {
+            assert!(prompt.contains("Do not edit files"), "{prompt}");
+        }
     }
 
     #[test]

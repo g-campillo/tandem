@@ -4,8 +4,8 @@ use std::time::Duration;
 use tandem_core::Store;
 use tandem_core::chat::{
     ActivityKind, BreakdownItem, ChangeKind, ChangeSet, ChangeSetStatus, ChatPrefs, Decision,
-    FileChange, Guidance, HelpLevel, ItemKind, Mode, Phase, Plan, PlanStep, StepKind,
-    TakeoverScope,
+    FileChange, Guidance, HelpLevel, ItemKind, Mode, PermissionMode, Phase, Plan, PlanStep,
+    StepKind, TakeoverScope,
 };
 
 /// Lets `now_ms()` move on so update-time ordering is observable.
@@ -73,6 +73,7 @@ fn preferences_default_when_absent_and_survive_a_reopen() {
     prefs.model = "opus".into();
     prefs.effort = Some("high".into());
     prefs.use_my_setup = false;
+    prefs.permission_mode = PermissionMode::Bypass;
     prefs.help_levels.insert("rust".into(), HelpLevel::Expert);
     prefs
         .help_levels

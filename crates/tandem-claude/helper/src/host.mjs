@@ -3,6 +3,7 @@
 
 import path from 'node:path';
 import { PROTOCOL_VERSION } from './frames.mjs';
+import { PERMISSION_MODES } from './policy.mjs';
 import { codedError, createSession } from './session.mjs';
 
 const CLOSING_ANSWER = { ok: false, allow: false, text: 'Tandem is closing.' };
@@ -11,7 +12,7 @@ function logError(what, error) {
   process.stderr.write(`tandem-claude-helper: ${what}: ${String(error?.message ?? error)}\n`);
 }
 
-/** Exactly one of `session_id` and `resume` names the conversation. */
+/** Exactly one of `session_id` and `resume` names the conversation; a mode must be known. */
 function checkOpenFrame(frame) {
   const named = [frame.session_id, frame.resume].filter(
     (value) => typeof value === 'string' && value !== '',
@@ -21,6 +22,9 @@ function checkOpenFrame(frame) {
       'bad_request',
       'open_session needs an absolute cwd and exactly one of session_id and resume.',
     );
+  }
+  if (frame.permission_mode !== undefined && !PERMISSION_MODES.has(frame.permission_mode)) {
+    throw codedError('bad_request', `Unknown permission mode: ${String(frame.permission_mode)}`);
   }
 }
 

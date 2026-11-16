@@ -27,7 +27,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tandem_core::chat::{
     ActivityKind, ChatItem, ChatPrefs, ChatTask, DEFAULT_MODEL, ItemKind, Mode, NEW_TASK_TITLE,
-    Phase, Plan, TaskSummary,
+    PermissionMode, Phase, Plan, TaskSummary,
 };
 use tandem_core::{Project, Store, new_id, normalized_relative};
 
@@ -57,6 +57,8 @@ const STOPPED_NOTICE: &str = "Stopped.";
 const STALE_MODEL: &str = "The saved model is no longer available; using Default.";
 const MODEL_UNAVAILABLE: &str = "That model is not available.";
 const EFFORT_UNAVAILABLE: &str = "That effort is not available for this model.";
+const BYPASS_WHILE_WORKING: &str =
+    "Wait for Claude to finish, or press Stop, before switching to or from Bypass.";
 const PLAN_SHOWN: &str = "The plan is on screen with two choices: \"I'll write it\" and \"You do it\". Stop here and do not implement anything. Finish with one short sentence asking the user to review the plan.";
 const PLAN_LOCKED: &str = "The plan cannot change during Build. Adapt inside the current step, or tell the user to start a new task for a different plan.";
 const TOOL_UNAVAILABLE: &str = "This tool is not available right now.";
@@ -190,6 +192,7 @@ fn run(
                 recap: false,
                 permission: None,
                 waiting_permissions: VecDeque::new(),
+                turn_mode: PermissionMode::Ask,
                 closing: false,
                 progress: TurnProgress::default(),
             };
@@ -318,6 +321,8 @@ pub(crate) struct Controller {
     recap: bool,
     permission: Option<PendingPermission>,
     waiting_permissions: VecDeque<PermissionAsk>,
+    /// The permission mode the running turn was started with; Ask after a fallback.
+    turn_mode: PermissionMode,
     /// Set by Shutdown: new helper requests are refused instead of reaching the UI.
     pub(crate) closing: bool,
     /// What the running turn achieved so far.
@@ -378,6 +383,7 @@ impl Controller {
             Command::SetModel(value) => self.set_model(value),
             Command::SetEffort(value) => self.set_effort(value),
             Command::SetUseMySetup(value) => self.set_use_my_setup(value),
+            Command::SetPermissionMode(mode) => self.set_permission_mode(mode),
             Command::ChooseGuided => self.choose_guided(),
             Command::GuideStep => self.guide_step(),
             Command::CheckMyWork => self.check_my_work(),
@@ -506,6 +512,7 @@ impl Controller {
                 use_my_setup: state.prefs.use_my_setup,
                 model: state.prefs.model.clone(),
                 effort: state.prefs.effort.clone(),
+                permission_mode: state.prefs.permission_mode,
                 system_append: prompts::SYSTEM_APPEND.to_owned(),
             };
             match self.request(|id| Outgoing::OpenSession { id, open }, OPEN_TIMEOUT) {
@@ -746,6 +753,9 @@ impl Controller {
     fn event(&mut self, event: Event) {
         match event {
             Event::TurnStarted { .. } | Event::Unknown => {}
+            Event::PermissionModeFallback { wanted, reason } => {
+                self.permission_mode_fallback(wanted, &reason);
+            }
             Event::TextDelta { text } => self.update(|state| {
                 state
                     .streaming
@@ -911,6 +921,11 @@ impl Controller {
     // ----- Permissions -----
 
     fn permission_requested(&mut self, ask: PermissionAsk) {
+        if self.turn_mode == PermissionMode::Bypass {
+            // Bypass shows no card. The helper already allows these itself; this is the last
+            // gate before the UI.
+            return self.respond(&ask.request, ResponseBody::Permission { allow: true });
+        }
         if self.permission.is_some() {
             self.waiting_permissions.push_back(ask);
         } else {
@@ -1053,7 +1068,10 @@ impl Controller {
             // Claude paused a takeover of the remaining steps to ask something.
             return self.continue_takeover(text);
         }
-        let prompt = prompts::chat(&task, &state.items, text, self.recap);
+        let prompt = prompts::with_permissions(
+            prompts::chat(&task, &state.items, text, self.recap),
+            state.prefs.permission_mode,
+        );
         let policy = match task.phase {
             Phase::Discuss | Phase::Plan => Policy::Discuss,
             Phase::Build | Phase::Done => Policy::Guided,
@@ -1071,11 +1089,13 @@ impl Controller {
     /// Starts a turn; `false` when the helper refused it (the banner says why).
     pub(crate) fn start_turn(&mut self, kind: TurnKind, text: String, policy: Policy) -> bool {
         let prefs = self.snapshot().prefs.clone();
+        self.turn_mode = prefs.permission_mode;
         let turn = Turn {
             text,
             policy,
             model: prefs.model,
             effort: prefs.effort,
+            permission_mode: prefs.permission_mode,
         };
         match self.request(|id| Outgoing::Turn { id, turn }, COMMAND_TIMEOUT) {
             Ok(_) => {
@@ -1214,6 +1234,46 @@ impl Controller {
         self.save_prefs(&prefs);
         self.update(|state| state.prefs = prefs);
         self.reopen_session();
+    }
+
+    /// Saves the permission mode; it rides on the next turn. Claude Code accepts its bypass
+    /// mode only in a session launched for it, so crossing into or out of Bypass reopens
+    /// the session (resumed), which has to wait until Claude is idle.
+    fn set_permission_mode(&mut self, mode: PermissionMode) {
+        let state = self.snapshot();
+        let current = state.prefs.permission_mode;
+        if mode == current {
+            return;
+        }
+        let reopens = (mode == PermissionMode::Bypass) != (current == PermissionMode::Bypass);
+        if reopens && state.turn.is_some() {
+            return self.set_banner(BYPASS_WHILE_WORKING);
+        }
+        let mut prefs = state.prefs.clone();
+        prefs.permission_mode = mode;
+        self.save_prefs(&prefs);
+        self.update(|state| state.prefs = prefs);
+        if reopens {
+            self.reopen_session();
+        }
+    }
+
+    /// Claude Code refused `wanted`: the turn runs in Ask, and so do the next ones until the
+    /// user chooses again.
+    fn permission_mode_fallback(&mut self, wanted: PermissionMode, reason: &str) {
+        self.turn_mode = PermissionMode::Ask;
+        let mut prefs = self.snapshot().prefs.clone();
+        if prefs.permission_mode == wanted {
+            prefs.permission_mode = PermissionMode::Ask;
+            self.save_prefs(&prefs);
+            self.update(|state| state.prefs = prefs);
+        }
+        self.append_item(ItemKind::Notice {
+            text: format!(
+                "{} is not available, so Tandem is using Ask. Claude Code said: {reason}",
+                wanted.label()
+            ),
+        });
     }
 
     /// Interrupts a running turn (waiting up to 2 s for it to finish), then closes the

@@ -4,8 +4,8 @@
 use crate::protocol::ModelChoice;
 use crate::state::{ChatState, Connection, TurnKind};
 use tandem_core::chat::{
-    ActivityKind, ChangeKind, Decision, Guidance, HelpLevel, ItemKind, Phase, StepKind,
-    normalize_language,
+    ActivityKind, ChangeKind, Decision, Guidance, HelpLevel, ItemKind, PermissionMode, Phase,
+    StepKind, normalize_language,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +92,60 @@ pub fn effort_choices(state: &ChatState) -> Vec<String> {
 
 pub fn model_label(state: &ChatState) -> String {
     selected_model(state).map_or_else(|| "Default".to_owned(), |model| model.name.clone())
+}
+
+/// One entry of the Permissions menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermissionChoice {
+    pub mode: PermissionMode,
+    pub label: &'static str,
+    pub checked: bool,
+    /// False while Claude works for a choice that would reopen the session.
+    pub enabled: bool,
+}
+
+/// The Permissions button and its menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionPicker {
+    pub label: String,
+    /// Shown in the warning colour: Bypass is on.
+    pub warn: bool,
+    pub tooltip: &'static str,
+    pub choices: [PermissionChoice; 3],
+}
+
+/// The Permissions picker for the saved mode. Switching to or from Bypass reopens the
+/// session, so while Claude works only the choices on the same side of Bypass are enabled.
+pub fn permission_picker(state: &ChatState) -> PermissionPicker {
+    let saved = state.prefs.permission_mode;
+    let tooltip = match saved {
+        PermissionMode::Ask => {
+            "Claude asks before it runs a command that Tandem does not allow by itself."
+        }
+        PermissionMode::Auto => {
+            "Claude Code's safety check lets routine commands run and asks only about risky ones. A command that runs outside a takeover has no snapshot, so Undo cannot reverse what it changes."
+        }
+        PermissionMode::Bypass => {
+            "Nothing asks: every command runs, and Claude may edit project files in any turn. Outside a takeover there is no snapshot, so there is no Keep or Undo for what Claude changes."
+        }
+    };
+    let choices = PermissionMode::ALL.map(|mode| PermissionChoice {
+        mode,
+        label: match mode {
+            PermissionMode::Ask => "Ask · you approve commands",
+            PermissionMode::Auto => "Auto · asks only about risky actions",
+            PermissionMode::Bypass => "Bypass · never asks, may edit files",
+        },
+        checked: mode == saved,
+        enabled: state.turn.is_none()
+            || (mode == PermissionMode::Bypass) == (saved == PermissionMode::Bypass),
+    });
+    PermissionPicker {
+        label: format!("Permissions: {}", saved.label()),
+        warn: saved == PermissionMode::Bypass,
+        tooltip,
+        choices,
+    }
 }
 
 /// What the panel shows instead of the composer while Claude is not ready.
@@ -492,6 +546,85 @@ mod tests {
         assert_eq!(model_label(&state), "Opus");
         state.models.clear();
         assert_eq!(model_label(&state), "Default");
+    }
+
+    fn picker_for(mode: PermissionMode) -> PermissionPicker {
+        let mut state = state();
+        state.prefs.permission_mode = mode;
+        permission_picker(&state)
+    }
+
+    #[test]
+    fn the_permission_picker_names_the_saved_mode() {
+        let labels = [
+            (PermissionMode::Ask, "Permissions: Ask"),
+            (PermissionMode::Auto, "Permissions: Auto"),
+            (PermissionMode::Bypass, "Permissions: Bypass"),
+        ];
+        for (mode, label) in labels {
+            let picker = picker_for(mode);
+            assert_eq!(picker.label, label);
+            let checked: Vec<PermissionMode> = picker
+                .choices
+                .iter()
+                .filter(|choice| choice.checked)
+                .map(|choice| choice.mode)
+                .collect();
+            assert_eq!(checked, [mode]);
+            assert_eq!(
+                picker.choices.map(|choice| (choice.mode, choice.label)),
+                [
+                    (PermissionMode::Ask, "Ask · you approve commands"),
+                    (PermissionMode::Auto, "Auto · asks only about risky actions"),
+                    (
+                        PermissionMode::Bypass,
+                        "Bypass · never asks, may edit files"
+                    ),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn only_bypass_is_shown_as_a_warning() {
+        assert!(!picker_for(PermissionMode::Ask).warn);
+        assert!(!picker_for(PermissionMode::Auto).warn);
+        assert!(picker_for(PermissionMode::Bypass).warn);
+    }
+
+    #[test]
+    fn the_auto_and_bypass_tooltips_say_what_undo_cannot_reverse() {
+        assert_eq!(
+            picker_for(PermissionMode::Ask).tooltip,
+            "Claude asks before it runs a command that Tandem does not allow by itself."
+        );
+        let auto = picker_for(PermissionMode::Auto).tooltip;
+        assert!(auto.contains("has no snapshot, so Undo cannot reverse"));
+        let bypass = picker_for(PermissionMode::Bypass).tooltip;
+        assert!(bypass.contains("may edit project files in any turn"));
+        assert!(bypass.contains("no Keep or Undo"));
+    }
+
+    #[test]
+    fn bypass_cannot_be_switched_while_claude_works() {
+        let enabled = |state: &ChatState| {
+            permission_picker(state)
+                .choices
+                .map(|choice| choice.enabled)
+        };
+        let mut state = state();
+        for mode in PermissionMode::ALL {
+            state.prefs.permission_mode = mode;
+            assert_eq!(enabled(&state), [true, true, true], "{mode:?} while idle");
+        }
+
+        state.turn = Some(TurnKind::Chat);
+        state.prefs.permission_mode = PermissionMode::Ask;
+        assert_eq!(enabled(&state), [true, true, false]);
+        state.prefs.permission_mode = PermissionMode::Auto;
+        assert_eq!(enabled(&state), [true, true, false]);
+        state.prefs.permission_mode = PermissionMode::Bypass;
+        assert_eq!(enabled(&state), [false, false, true]);
     }
 
     #[test]

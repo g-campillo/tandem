@@ -5,6 +5,7 @@
 use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tandem_core::chat::PermissionMode;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Upper bound for one whole line, newline included.
@@ -19,6 +20,7 @@ pub struct OpenSession {
     pub use_my_setup: bool,
     pub model: String,
     pub effort: Option<String>,
+    pub permission_mode: PermissionMode,
     pub system_append: String,
 }
 
@@ -28,6 +30,7 @@ pub struct Turn {
     pub policy: Policy,
     pub model: String,
     pub effort: Option<String>,
+    pub permission_mode: PermissionMode,
 }
 
 /// Which tool permissions the helper applies during a turn.
@@ -142,6 +145,11 @@ pub enum Event {
         error: Option<String>,
     },
     SessionClosed {
+        reason: String,
+    },
+    /// Claude Code refused the turn's permission mode; the helper runs the turn in Ask.
+    PermissionModeFallback {
+        wanted: PermissionMode,
         reason: String,
     },
     #[serde(other)]
@@ -317,5 +325,61 @@ mod tests {
         };
         assert_eq!((id.as_str(), name.as_str()), ("r1", "show_step"));
         assert_eq!(input["step"], 2);
+    }
+
+    #[test]
+    fn turn_and_open_session_carry_the_permission_mode() {
+        for (mode, wire) in [
+            (PermissionMode::Ask, "ask"),
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::Bypass, "bypass"),
+        ] {
+            let turn = Outgoing::Turn {
+                id: 3,
+                turn: Turn {
+                    text: "hi".into(),
+                    policy: Policy::Discuss,
+                    model: "default".into(),
+                    effort: None,
+                    permission_mode: mode,
+                },
+            };
+            let open = Outgoing::OpenSession {
+                id: 2,
+                open: OpenSession {
+                    cwd: "/tmp/project".into(),
+                    session_id: Some("s".into()),
+                    resume: None,
+                    use_my_setup: false,
+                    model: "default".into(),
+                    effort: None,
+                    permission_mode: mode,
+                    system_append: "x".into(),
+                },
+            };
+            for frame in [turn, open] {
+                let line: Value = serde_json::from_slice(&encode(&frame).unwrap()).unwrap();
+                assert_eq!(line["permission_mode"], wire, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_permission_mode_fallback_event_decodes() {
+        for (wire, wanted) in [
+            ("auto", PermissionMode::Auto),
+            ("bypass", PermissionMode::Bypass),
+        ] {
+            let line = format!(
+                r#"{{"v":1,"type":"event","event":"permission_mode_fallback","wanted":"{wire}","reason":"x"}}"#
+            );
+            assert_eq!(
+                decode(line.as_bytes()).unwrap(),
+                Incoming::Event(Event::PermissionModeFallback {
+                    wanted,
+                    reason: "x".into(),
+                })
+            );
+        }
     }
 }
