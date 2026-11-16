@@ -16,7 +16,7 @@ use tandem_claude::{Connection, HelperInstall, view};
 
 const USE_MY_SETUP_NOTE: &str = "On: Claude loads your Claude Code settings, CLAUDE.md files, MCP servers, skills and plugins, and this project's .claude folder, exactly as running claude in this folder would. Turn it off for projects you do not trust.";
 const SUBSCRIPTION_NOTE: &str = "Tandem uses your Claude subscription through Claude Code. It never asks for or stores an API key.";
-const HELP_LEVEL_NOTE: &str = "Every level explains why. Beginner gives the full code and breaks down every part; Intermediate gives pseudocode and explains what is new; Expert gives a short description.";
+const HELP_LEVEL_NOTE: &str = "Every level explains why. Beginner gives the full code, explains each part when you point at it, and takes you to the line; Intermediate gives pseudocode and says where the change goes; Expert gives a short description and says where.";
 const LIMITS_NOTE: &str = "Local ad hoc macOS build. Not notarized; other Macs and Windows are untested. UTF-8 files ≤2 MiB; 32 open tabs. Buffer undo is per session.";
 
 #[derive(Default)]

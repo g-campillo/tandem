@@ -33,7 +33,7 @@ When Claude cannot be used, the chat says why and offers **Reconnect**: `Claude 
 
 - **Discuss.** Type in the composer at the bottom of the chat (⌘L focuses it; Enter sends, Shift+Enter adds a line). Claude reads your code and researches; short lines such as `↳ read src/cli.rs` show what it looked at. It does not change files.
 - **Plan.** Claude proposes a plan card with the goal, the "done when" criteria and small steps. Ask for changes in the chat, then choose **I'll write it** (you write the code, Claude guides) or **You do it** (Claude builds it).
-- **Guided build.** The active step is pinned above the composer. It shows what to do and why, the code (Beginner) or pseudocode (Intermediate), and a breakdown of the parts. **Copy** copies the code or command, **Open file** opens the step's file at the right line, and **Open Terminal** opens the terminal for a command step. Write the step, then press **Check my work** (⌥⌘C). A pass moves to the next step and Claude prepares its guidance; otherwise the verdict card lists what to fix, and why. Change the help level with `Help: <level> ▾` on the card or in Settings.
+- **Guided build.** The active step is pinned above the composer. It shows what to do and why, the code (Beginner) or pseudocode (Intermediate), and explanations of its parts, shown when you point at a part. **Copy** copies the code or command, **Open file** opens the step's file (at the Beginner level at the line of the change, with the lines to replace or remove selected), and **Open Terminal** opens the terminal for a command step. Write the step, then press **Check my work** (⌥⌘C). A pass moves to the next step and Claude prepares its guidance; otherwise the verdict card lists what to fix, and why. Change the help level with `Help: <level> ▾` on the card or in Settings.
 - **Takeover.** **Do it for me** lets Claude do the active step, and **Build the rest for me** every remaining step. Tandem first saves your unsaved files, because Claude edits the files on disk. While Claude works the editor is read-only and ⌘. stops it. Afterwards a card lists each file Claude created, modified or deleted, with **Keep** and **Undo** (and **Keep all**, **Undo all**). Undo cannot restore ignored files, such as anything in `target/` or `node_modules/`, or files over 2 MiB.
 - **Permission cards.** When Claude wants to run a command that Tandem does not allow by itself, the chat shows the command with **Allow** and **Deny**.
 - **Tasks.** The task button in the chat header lists the project's tasks and **New task** (also in the **Chat** menu). The **Model** and **Effort** buttons under the composer choose the Claude model and effort for the next message.
@@ -116,11 +116,13 @@ It prints the path of `.tandem-local/m5/Tandem.app`, an app named **Tandem M5** 
 
 ## Check the UI offline
 
-`chat_ui_seed` writes a small Rust project and a state folder with three tasks, so the chat panel can be checked by hand without Claude and without using your subscription:
+`chat_ui_seed` writes a small Rust project and a state folder with five tasks, so the chat panel can be checked by hand without Claude and without using your subscription:
 
 - `Add a --json flag to the CLI`: a conversation and a plan card in the Plan phase;
-- `Add a --json flag to the CLI (guided)`, selected at start: a guided build at step 1 of 4 with stored Beginner guidance;
-- `Add a --json flag to the CLI (Claude did step 1)`: a takeover's three changed files waiting for Keep or Undo.
+- `Add a --json flag to the CLI (guided)`, selected at start: a guided build at step 1 of 4 with stored guidance at all three help levels (the Beginner one inserts after a line);
+- `Add a --json flag to the CLI (Claude did step 1)`: a takeover's three changed files waiting for Keep or Undo;
+- `Reword the name help text (update a line)`: Beginner guidance that replaces one line, for checking the selection **Open file** makes;
+- `Run the tests (a command step)`: Beginner guidance for a command, for checking explanations on a command.
 
 ```sh
 ~/.cargo/bin/cargo build -p tandem

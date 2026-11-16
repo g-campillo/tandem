@@ -28,7 +28,7 @@ Tandem keeps its state (open tabs, drafts, chat tasks) in `~/Library/Application
 
 1. **Discuss.** Describe the feature in the chat. Claude reads your code, searches the web when it needs to, and asks questions. It does not change files.
 2. **Plan.** Claude proposes a plan card: the goal, the "done when" criteria, and small numbered steps, each one file to create, one edit, or one command. Ask for changes until it is right, then choose **I'll write it** or **You do it**.
-3. **Build.** The active step is pinned above the composer with guidance: what to do, why, and code or pseudocode you can copy. Write it, then press **Check my work** (⌥⌘C). A pass moves on to the next step.
+3. **Build.** The active step is pinned above the composer with guidance: what to do, why, where, and code or pseudocode you can copy. Point at a part of the code to see what it does. Write it, then press **Check my work** (⌥⌘C). A pass moves on to the next step.
 4. **Hand over when you want.** **Do it for me** lets Claude do the active step; **Build the rest for me** lets it do every remaining step.
 5. **Done.** After the last step, Claude checks the task against its "done when" criteria. When they are met, the task is complete.
 
@@ -36,11 +36,11 @@ Tandem keeps its state (open tabs, drafts, chat tasks) in `~/Library/Application
 
 Each language has its own help level, Beginner by default. Change it on the step card or in Settings.
 
-- **Beginner:** the complete code for the step, with every keyword, construct and function call explained.
-- **Intermediate:** a description and pseudocode; you write the code. Only what is new or unusual in the language is explained.
-- **Expert:** a short description.
+- **Beginner:** the complete code for the step, with every keyword, construct and function call explained when you point at it; **Open file** takes you to the line of the change.
+- **Intermediate:** a description, where the change goes, and pseudocode; you write the code. Only what is new or unusual in the language is explained.
+- **Expert:** a short description and where the change goes.
 
-Every level explains why.
+Every level explains why. Claude explains each language on its own terms, without comparing it to others.
 
 ## Takeover, Keep and Undo
 

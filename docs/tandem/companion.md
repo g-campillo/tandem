@@ -61,13 +61,16 @@ Once Build has started the plan is fixed. If Claude needs a different plan, it s
 The active step is pinned above the composer as a step card: `Step <n> of <total> · <Create|Edit|Run> <target>`, with a `Help: <level> ▾` button. Claude prepares the guidance for the step (`Preparing this step…`); the card then shows:
 
 - a one-line summary and `Why:`, the reason for the change;
+- `Where:`, the place of the change: at the beginner level the line it goes next to (for example ``Insert after `pub name: String,` ``), at the other levels a description in words (for example ``in `src/cli.rs`, inside `struct Args`, after the `name` field``);
 - the code (with **Copy**) at the beginner level, or pseudocode at the intermediate level;
 - for a command step, the exact command with **Copy** and **Open Terminal** (opens the terminal at the bottom of the window);
-- a breakdown that explains the parts of the code or command, one row per part.
+- explanations of the parts of the code or command: point at a part and a card shows what it does, and every place the part occurs is highlighted. Above the beginner level the explained parts are underlined. An explanation whose part is not in the code (possible with pseudocode, and in guidance saved by earlier versions) is listed under `More explanations`.
+
+Code on the step card, and fenced code in Claude's replies and check cards, has the editor's syntax colours in light and dark mode, for Rust, Go, TypeScript, JavaScript and JSX, Python, Java, shell, JSON, TOML, Markdown and diffs. Pseudocode and other languages are shown plain.
 
 The card's buttons:
 
-- **Open file** (file steps) opens the step's file, as a new buffer if it does not exist yet, with the cursor on the line where the code goes when Claude named one.
+- **Open file** (file steps) opens the step's file, as a new buffer if it does not exist yet. At the beginner level it takes you to the change: the cursor goes to the end of the line the new code follows (or the start of the line it precedes), the lines to replace or remove are selected, and the status bar says what to do. Claude names the line and its text, and Tandem checks both against the file as it is in the editor, unsaved changes included, before it shows the guidance. If the file changed since then, Tandem looks for the line's text again; if it is gone, the file opens at the top and the status bar says so. At the intermediate and expert levels the file opens without moving the cursor, because `Where:` says where to look.
 - **Check my work** (⌥⌘C) asks Claude to inspect your work on this step. Claude may run build, test and lint commands for this. Files with unsaved changes are named in the request, and Claude is told to read them from the editor; commands only see saved files. The verdict appears as a card: `Step <n> looks right`, or `Step <n> needs changes` with each finding as `<path>:<line>  <problem>`, its reason and a hint. A finding with a path opens the file at that line. A pass moves the plan to the next step, and Claude prepares its guidance without being asked.
 - **Do it for me** and **Build the rest for me** hand the work to Claude (see takeover below).
 - **Guide me through this step** appears when the card has no guidance (for example after a Stop) and asks Claude again.
@@ -115,11 +118,11 @@ Every guided step uses one of three help levels. The level is saved per language
 
 | Level | File step | Command step |
 | --- | --- | --- |
-| Beginner | The complete code, and a breakdown of every keyword, construct and function call in it | The exact command, and a breakdown of every token |
-| Intermediate | A description and pseudocode, not the finished code; the breakdown covers only what is new or unusual in that language | The exact command; the breakdown covers only the unusual parts |
-| Expert | A short description and the reason | The exact command, a short description and the reason |
+| Beginner | The complete code, an explanation of every keyword, construct and function call in it, and the exact line of the change | The exact command, and an explanation of every token |
+| Intermediate | A description, where the change goes in words, and pseudocode, not the finished code; the explanations cover only what is new or unusual in that language | The exact command; the explanations cover only the unusual parts |
+| Expert | A short description, where the change goes in words, and the reason | The exact command, a short description and the reason |
 
-At every level Claude must say why: guidance without a reason is refused and sent back to Claude. Tandem checks each level's shape too (for example, Intermediate guidance that contains finished code is refused), so Claude cannot quietly give more or less help than you asked for.
+At every level Claude must say why: guidance without a reason is refused and sent back to Claude. Tandem checks each level's shape too (for example, Intermediate guidance that contains finished code is refused, and so is a Beginner explanation of a part that is not in the code, or a Beginner location whose line does not match the file), so Claude cannot quietly give more or less help than you asked for. Claude explains each language on its own terms and does not compare it to other languages unless you ask.
 
 A step's language comes from its file's extension (`.rs` Rust, `.go` Go, `.ts`/`.tsx` TypeScript, `.js`/`.mjs` JavaScript, `.py` Python, `.java` Java, `.sh` Shell), or from the language Claude names for a command step. Settings lists those seven languages plus any other language that has a saved level. Guidance is stored per step and level: switching to a level you already had shows the stored guidance at once, and a new level asks Claude for new guidance.
 
@@ -196,7 +199,7 @@ Claude Code 2.1.325 (bundled with the SDK) → your Claude subscription
 | Tool | What it does |
 | --- | --- |
 | `propose_plan` | Shows the plan card (goal, "done when" criteria, steps) |
-| `show_step` | Shows guidance for the active step at the help level Tandem named |
+| `show_step` | Shows guidance for the active step at the help level Tandem named: the summary, the reason, where the change goes (`where` in words, or `location` with the line for a beginner edit), the code, pseudocode or command, and the explained parts |
 | `report_check` | Reports the verdict on one step or on the whole task |
 | `step_done` | Records a finished step during a takeover |
 | `read_editor_buffer` | Reads a file as it is in the editor, including unsaved changes |
@@ -212,11 +215,11 @@ Each tool call is forwarded to Rust and answered there, so validation lives in o
 
 The reference conversation in `crates/tandem-claude/helper/test/fixtures/contract.jsonl` is replayed against the helper by the Node tests and decoded by the Rust tests, so both ends agree.
 
-**`tandem-claude`** (Rust) finds Node (`PATH`, then nvm installs from the newest, then `/opt/homebrew/bin/node` and `/usr/local/bin/node`) and the helper, spawns the helper in its own process group with the scrubbed environment, and reads its frames (`install.rs`, `protocol.rs`, `client.rs`). The `Companion` controller (`companion.rs`, `guided.rs`, `takeover.rs`) runs on its own thread. It owns the helper and the task state, saves through the shared store, and publishes an immutable `ChatState` snapshot that the panel renders. The UI drives it only with commands (send, stop, choose guided, check my work, take over, keep, undo, and so on). `prompts.rs` holds the text Tandem adds to Claude Code's system prompt and each turn's message. `view.rs` holds the panel's decisions (which buttons show, the step card, the changes card) as pure functions, so they are tested without a GUI. Every controller test drives the scripted `tandem-fake-helper` binary instead of Node and Claude.
+**`tandem-claude`** (Rust) finds Node (`PATH`, then nvm installs from the newest, then `/opt/homebrew/bin/node` and `/usr/local/bin/node`) and the helper, spawns the helper in its own process group with the scrubbed environment, and reads its frames (`install.rs`, `protocol.rs`, `client.rs`). The `Companion` controller (`companion.rs`, `guided.rs`, `takeover.rs`) runs on its own thread. It owns the helper and the task state, saves through the shared store, and publishes an immutable `ChatState` snapshot that the panel renders. The UI drives it only with commands (send, stop, choose guided, check my work, take over, keep, undo, and so on). `prompts.rs` holds the text Tandem adds to Claude Code's system prompt and each turn's message. `view.rs` holds the panel's decisions (which buttons show, the step card, its code blocks with their explained parts, where Open file goes, the changes card) as pure functions, so they are tested without a GUI. Every controller test drives the scripted `tandem-fake-helper` binary instead of Node and Claude.
 
-**`tandem-core`** holds the domain and storage: `chat` (tasks, plans, guidance, checks, change sets, preferences, and the rules that validate plans and guidance), the chat store, and `takeover` (snapshot, diff, keep, undo).
+**`tandem-core`** holds the domain and storage: `chat` (tasks, plans, guidance, checks, change sets, preferences, and the rules that validate plans and guidance), `breakdown` (where explained parts occur in code), the chat store, and `takeover` (snapshot, diff, keep, undo).
 
-**Storage.** The state folder holds `workspace.sqlite` at schema 6. Next to the editor's tables (`workspace`, `draft`, `settings`, `project_tools`), schema 6 adds `chat_task` (one row per task with its phase, mode, plan, current step and session id), `chat_selection` (the selected task per project), `chat_item` (the transcript), `chat_guidance` (guidance per task, step and level) and `chat_change_set` (each takeover's files and decisions). Preferences are saved in `settings` under `chat_prefs`. Upgrading an older database first writes a backup next to it; tables from the earlier Codex-based design stay in an upgraded database untouched, and their tasks are not shown.
+**Storage.** The state folder holds `workspace.sqlite` at schema 6. Next to the editor's tables (`workspace`, `draft`, `settings`, `project_tools`), schema 6 adds `chat_task` (one row per task with its phase, mode, plan, current step and session id), `chat_selection` (the selected task per project), `chat_item` (the transcript), `chat_guidance` (guidance per task, step and level) and `chat_change_set` (each takeover's files and decisions). Guidance is stored as JSON; `where` and `location` are optional fields, so guidance saved by earlier versions still loads. Preferences are saved in `settings` under `chat_prefs`. Upgrading an older database first writes a backup next to it; tables from the earlier Codex-based design stay in an upgraded database untouched, and their tasks are not shown.
 
 ## Environment switches
 
@@ -236,4 +239,5 @@ The reference conversation in `crates/tandem-claude/helper/test/fixtures/contrac
 - Commands that Claude runs see saved files only; unsaved buffers reach Claude only through `read_editor_buffer`.
 - The text you have typed but not sent is not saved.
 - Tasks from the earlier Codex-based design are not shown.
+- Explanations on hover exist only on the step card; replies and check cards get syntax colours only, and only for lower-case fence tags.
 - macOS on Apple Silicon only. A packaged Tandem contains Anthropic's proprietary Claude Code binary, is for local use on your own Mac, and must not be redistributed; see [third-party-notices.md](third-party-notices.md).
