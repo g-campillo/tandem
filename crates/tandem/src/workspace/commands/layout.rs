@@ -36,6 +36,11 @@ impl Workspace {
 
     /// Turns wrapping of long lines on or off in every code editor (⌥Z).
     pub(super) fn toggle_word_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Without this guard the menu's key equivalent would take ⌥Z from the chat, the
+        // explorer and the terminal.
+        if self.focused_editor(window, cx).is_none() {
+            return;
+        }
         let wrap = !self.commands.word_wrap;
         self.commands.word_wrap = wrap;
         for tab in &self.tabs {
