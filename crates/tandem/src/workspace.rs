@@ -1,6 +1,7 @@
 mod chat;
 mod chat_logic;
 mod chat_view;
+mod code_view;
 mod panels;
 mod provider;
 mod settings;

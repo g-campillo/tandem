@@ -288,7 +288,6 @@ pub fn grammar_for_language(name: &str) -> Option<&'static str> {
         "rust" | "rs" => "rust",
         "go" | "golang" => "go",
         "typescript" | "ts" | "mts" | "cts" => "typescript",
-        "tsx" => "tsx",
         "javascript" | "js" | "jsx" | "mjs" | "cjs" | "node" => "javascript",
         "python" | "py" | "pyi" | "python3" => "python",
         "java" => "java",
@@ -1018,7 +1017,7 @@ mod tests {
             ("rust,ignore", Some("rust")),
             ("python title=x", Some("python")),
             ("ts", Some("typescript")),
-            ("tsx", Some("tsx")),
+            ("tsx", None),
             ("jsx", Some("javascript")),
             ("js{1,3}", Some("javascript")),
             ("shell", Some("bash")),
@@ -1045,7 +1044,7 @@ mod tests {
     fn grammar_for_path_reads_the_extension() {
         let cases = [
             ("src/main.rs", Some("rust")),
-            ("web/App.tsx", Some("tsx")),
+            ("web/App.tsx", None),
             ("web/app.mjs", Some("javascript")),
             ("run.sh", Some("bash")),
             ("Cargo.toml", Some("toml")),
@@ -1151,7 +1150,8 @@ mod tests {
     #[test]
     fn step_blocks_picks_the_grammar_from_the_path_then_the_language() {
         let cases = [
-            (Some("web/App.tsx"), "typescript", Some("tsx")),
+            (Some("web/app.mjs"), "typescript", Some("javascript")),
+            (Some("web/App.tsx"), "typescript", Some("typescript")),
             (Some("notes.txt"), "go", Some("go")),
             (None, "kotlin", None),
         ];

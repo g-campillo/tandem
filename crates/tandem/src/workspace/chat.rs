@@ -37,6 +37,7 @@ pub(super) struct ChatUi {
 
 impl ChatUi {
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
+        super::code_view::register_fence_aliases();
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .rows(3)

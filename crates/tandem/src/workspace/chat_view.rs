@@ -4,8 +4,7 @@ use super::chat_logic::{check_title, finding_label};
 use super::panels::code_note;
 use super::*;
 use crate::appearance::{
-    Palette, compact_button, palette, panel_code, panel_error, path_button, solid_section,
-    wrapping_button,
+    Palette, compact_button, palette, panel_error, path_button, solid_section, wrapping_button,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Textarea;
@@ -15,7 +14,8 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 use tandem_claude::prompts::kind_label;
 use tandem_claude::view::{
-    self, ChangeRow, ChangesCard, ComposerMode, ConnectionNotice, StepCard, TrailState,
+    self, BlockKind, ChangeRow, ChangesCard, ComposerMode, ConnectionNotice, StepBlock, StepCard,
+    TrailState,
 };
 use tandem_claude::{ChatState, Connection, TakeoverRequest};
 use tandem_core::chat::{
@@ -61,23 +61,6 @@ fn decide(keep: bool, change_set: &str, path: Option<String>) -> Command {
 fn copy_button(id: impl Into<ElementId>, text: String) -> Button {
     compact_button(Button::new(id), "Copy")
         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
-}
-
-/// Code shown exactly as given, one line per line, scrolling sideways when it is wide.
-fn code_block(id: impl Into<ElementId>, text: String, cx: &App) -> Stateful<Div> {
-    panel_code(div().id(id), cx)
-        .p_2()
-        .rounded(px(6.))
-        .h_flex()
-        .overflow_x_scroll()
-        .child(
-            div()
-                .flex_none()
-                .w_auto()
-                .min_w_full()
-                .whitespace_nowrap()
-                .child(text),
-        )
 }
 
 /// The text of an optional guidance field, when it has any.
@@ -828,7 +811,7 @@ impl Workspace {
             card.target
         );
         let body = match &card.guidance {
-            Some(guidance) => self.guidance_view(index, guidance, cx),
+            Some(guidance) => self.guidance_view(&card, guidance, cx),
             None => self.unguided_view(&card, cx),
         };
         solid_section(div().id(("chat-step-card", index)), cx)
@@ -903,7 +886,14 @@ impl Workspace {
 
     /// The step's guidance: summary, why, then code, pseudocode or the command, and the
     /// breakdown of its parts.
-    fn guidance_view(&self, index: usize, guidance: &Guidance, cx: &mut Context<Self>) -> Div {
+    fn guidance_view(&self, card: &StepCard, guidance: &Guidance, cx: &mut Context<Self>) -> Div {
+        let index = card.index;
+        let blocks = view::step_blocks(guidance, &card.language);
+        let blocks: Vec<AnyElement> = blocks
+            .blocks
+            .iter()
+            .map(|block| self.step_block(index, block, cx))
+            .collect();
         let p = palette(cx.theme().mode);
         let breakdown = guidance.breakdown.iter().map(|item| {
             div()
@@ -942,48 +932,50 @@ impl Workspace {
                 )
                 .selectable(true),
             )
-            .when_some(filled(&guidance.code), |d, code| {
-                d.child(code_block(("chat-step-code", index), code.clone(), cx))
-                    .child(
-                        div()
-                            .h_flex()
-                            .child(copy_button(("chat-step-copy-code", index), code)),
-                    )
-            })
-            .when_some(filled(&guidance.pseudocode), |d, pseudocode| {
-                d.child(
-                    div()
-                        .text_size(px(12.))
-                        .font_semibold()
-                        .text_color(p.secondary_foreground)
-                        .child("Pseudocode"),
-                )
-                .child(code_block(("chat-step-pseudocode", index), pseudocode, cx))
-            })
-            .when_some(filled(&guidance.command), |d, command| {
-                d.child(code_block(
-                    ("chat-step-command", index),
-                    command.clone(),
-                    cx,
-                ))
-                .child(
-                    div()
-                        .h_flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(copy_button(("chat-step-copy-command", index), command))
-                        .child(
-                            compact_button(
-                                Button::new(("chat-step-terminal", index)),
-                                "Open Terminal",
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.show_terminal(cx))),
-                        ),
-                )
-            })
+            .children(blocks)
             .when(!guidance.breakdown.is_empty(), |d| {
                 d.child(div().v_flex().min_w_0().gap_1().children(breakdown))
             })
+    }
+
+    /// One code block of the step's guidance with what goes with it: the Pseudocode label,
+    /// or the row of buttons under code and commands.
+    fn step_block(&self, index: usize, block: &StepBlock, cx: &mut Context<Self>) -> AnyElement {
+        let code = self.code_view(index, block, cx);
+        let column = div().v_flex().min_w_0().gap_2();
+        match block.kind {
+            BlockKind::Code => column.child(code).child(div().h_flex().child(copy_button(
+                ("chat-step-copy-code", index),
+                block.copy.clone(),
+            ))),
+            BlockKind::Pseudocode => {
+                let p = palette(cx.theme().mode);
+                column
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_semibold()
+                            .text_color(p.secondary_foreground)
+                            .child("Pseudocode"),
+                    )
+                    .child(code)
+            }
+            BlockKind::Command => column.child(code).child(
+                div()
+                    .h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(copy_button(
+                        ("chat-step-copy-command", index),
+                        block.copy.clone(),
+                    ))
+                    .child(
+                        compact_button(Button::new(("chat-step-terminal", index)), "Open Terminal")
+                            .on_click(cx.listener(|this, _, _, cx| this.show_terminal(cx))),
+                    ),
+            ),
+        }
+        .into_any_element()
     }
 
     /// The step before its guidance arrives: the plan's summary, and either a note that
