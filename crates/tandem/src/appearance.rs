@@ -1,6 +1,6 @@
 //! Application-owned semantic colors, reapplied after the toolkit loads a mode.
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_kit::component::{Selectable, Sizable, Theme, ThemeMode, ThemeTokens};
+use gpui_kit::component::{Icon, Selectable, Sizable, StyledExt, Theme, ThemeMode, ThemeTokens};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     App, Div, Hsla, IntoElement, ParentElement, SharedString, Subscription, Window, div, rgb,
@@ -73,6 +73,43 @@ pub fn path_button(button: Button, label: impl Into<SharedString>) -> Button {
                 .whitespace_normal()
                 .text_size(px(13.))
                 .child(label),
+        )
+}
+
+/// One row of the file tree: a single line that is cut off with an ellipsis, in the
+/// explorer's font, behind its icons.
+pub fn tree_button(
+    button: Button,
+    icons: Vec<Icon>,
+    label: impl Into<SharedString>,
+    family: SharedString,
+    size: f32,
+) -> Button {
+    let label = label.into();
+    button
+        .small()
+        .h(px((size * 1.7).round().max(22.)))
+        .w_full()
+        .min_w_0()
+        .justify_start()
+        .rounded(px(6.))
+        .accessibility_label(label.clone())
+        .child(
+            div()
+                .h_flex()
+                .items_center()
+                .gap_1()
+                .w_full()
+                .min_w_0()
+                .children(icons.into_iter().map(|icon| icon.xsmall()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(family)
+                        .text_size(px(size))
+                        .child(label),
+                ),
         )
 }
 

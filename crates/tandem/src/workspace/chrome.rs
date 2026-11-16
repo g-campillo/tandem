@@ -1,8 +1,11 @@
-//! The window's chrome around the panes: the title bar with its command center.
-use super::chrome_logic::tooltip;
+//! The window's chrome around the panes: the title bar with its command center, and the
+//! activity bar on the window's edge beside the file tree.
+use super::chrome_logic::{Activity, FileIcon, Shown, activity_selected, tooltip};
 use super::commands::shortcut;
+use super::pane_logic::ACTIVITY_BAR;
 use super::*;
 use crate::appearance::palette;
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
@@ -127,5 +130,101 @@ impl Workspace {
                     })
                     .child(switches),
             )
+    }
+
+    /// What the window shows, as far as the activity bar cares.
+    fn shown(&self) -> Shown {
+        Shown {
+            explorer: self.commands.explorer_visible,
+            searching: self.sidebar == Sidebar::Search,
+            chat: self.chat.visible,
+            bottom: self.bottom,
+            settings: self.settings.open,
+        }
+    }
+
+    /// Runs the activity bar's button for `activity`. Explorer and Search hide the pane when
+    /// it already shows their view; Chat, Problems, Terminal and Settings toggle.
+    fn activity_click(&mut self, activity: Activity, window: &mut Window, cx: &mut Context<Self>) {
+        match activity {
+            Activity::Explorer => {
+                if activity_selected(Activity::Explorer, self.shown()) {
+                    self.toggle_explorer(window, cx);
+                } else {
+                    self.set_sidebar(Sidebar::Files, window, cx);
+                }
+            }
+            Activity::Search => {
+                if activity_selected(Activity::Search, self.shown()) {
+                    self.toggle_explorer(window, cx);
+                } else {
+                    self.set_sidebar(Sidebar::Search, window, cx);
+                }
+            }
+            Activity::Chat => {
+                self.chat.visible = !self.chat.visible;
+                cx.notify();
+            }
+            Activity::Problems => {
+                self.bottom = next_bottom(self.bottom, BottomTab::Problems);
+                cx.notify();
+            }
+            Activity::Terminal => self.toggle_terminal(cx),
+            Activity::Settings => self.toggle_settings(cx),
+        }
+    }
+
+    /// The activity bar: Explorer, Search, Chat, Problems and Terminal at the top and
+    /// Settings at the bottom, each drawn as active while what it opens is on screen.
+    pub(super) fn activity_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let shown = self.shown();
+        let mut button = |activity: Activity| {
+            let (id, icon) = match activity {
+                Activity::Explorer => ("activity-explorer", Icon::new(Lucide::Files)),
+                Activity::Search => ("activity-search", Icon::new(IconName::Search)),
+                Activity::Chat => ("activity-chat", Icon::new(Lucide::MessageSquare)),
+                Activity::Problems => ("activity-problems", Icon::new(IconName::TriangleAlert)),
+                Activity::Terminal => ("activity-terminal", Icon::new(IconName::SquareTerminal)),
+                Activity::Settings => ("activity-settings", Icon::new(IconName::Settings)),
+            };
+            Button::new(id)
+                .icon(icon.size_5())
+                .ghost()
+                .selected(activity_selected(activity, shown))
+                .accessibility_label(activity.label())
+                .tooltip(tooltip(activity.label(), shortcut(activity.command())))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        this.activity_click(activity, window, cx)
+                    }),
+                )
+        };
+        div()
+            .id("activity-bar")
+            .v_flex()
+            .items_center()
+            .w(px(ACTIVITY_BAR))
+            .flex_shrink_0()
+            .min_h_0()
+            .py_1()
+            .gap_1()
+            .children(Activity::TOP.map(&mut button))
+            .child(div().flex_1())
+            .child(button(Activity::Settings))
+            .into_any_element()
+    }
+}
+
+/// The Lucide icon drawn for a file of kind `icon` in the file tree.
+pub(super) fn file_icon_image(icon: FileIcon) -> Lucide {
+    match icon {
+        FileIcon::Code => Lucide::FileCode,
+        FileIcon::Data => Lucide::FileBraces,
+        FileIcon::Config => Lucide::FileCog,
+        FileIcon::Text => Lucide::FileText,
+        FileIcon::Script => Lucide::FileTerminal,
+        FileIcon::Lock => Lucide::FileLock,
+        FileIcon::Image => Lucide::FileImage,
+        FileIcon::Plain => Lucide::File,
     }
 }

@@ -1,8 +1,9 @@
-use super::chrome_logic::tooltip;
+use super::chrome::file_icon_image;
+use super::chrome_logic::{file_icon, tooltip};
 use super::commands::shortcut;
-use super::pane_logic::{pane_geometry, terminal_columns};
+use super::pane_logic::{pane_geometry, row_width, terminal_columns};
 use super::*;
-use crate::appearance::{compact_button, navigation_button, palette, path_button};
+use crate::appearance::{compact_button, navigation_button, palette, path_button, tree_button};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, Input};
@@ -13,6 +14,7 @@ use tandem_core::layout::{Pane, PaneSide};
 impl Workspace {
     fn sidebar_view(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let face = self.look.fonts.explorer.clone();
         let rows = self.navigation(cx);
         let files = rows
             .into_iter()
@@ -22,22 +24,31 @@ impl Workspace {
                     .active
                     .and_then(|i| self.tabs.get(i))
                     .is_some_and(|t| t.document.path == path);
+                // A file's icon sits under the folder icon of the directory rows.
+                let (icons, indent) = if directory {
+                    let (chevron, folder) = if expanded {
+                        (IconName::ChevronDown, IconName::FolderOpen)
+                    } else {
+                        (IconName::ChevronRight, IconName::Folder)
+                    };
+                    (vec![Icon::new(chevron), Icon::new(folder)], depth * 12)
+                } else {
+                    (
+                        vec![Icon::new(file_icon_image(file_icon(&path)))],
+                        depth * 12 + 16,
+                    )
+                };
                 div()
                     .min_w_0()
-                    .pl(px((depth * 12) as f32))
+                    .pl(px(indent as f32))
                     .child(
                         navigation_button(
-                            path_button(
+                            tree_button(
                                 Button::new(SharedString::from(format!("nav:{path}"))),
-                                format!(
-                                    "{}{}",
-                                    if directory {
-                                        if expanded { "▾ " } else { "▸ " }
-                                    } else {
-                                        ""
-                                    },
-                                    label
-                                ),
+                                icons,
+                                label,
+                                face.family.clone(),
+                                face.size,
                             )
                             .tooltip(path.clone()),
                             selected,
@@ -87,35 +98,46 @@ impl Workspace {
             .min_h_0()
             .flex_shrink_0()
             .bg(p.chrome())
+            .font_family(face.family.clone())
             .child(
                 div()
                     .h_flex()
-                    .flex_wrap()
+                    .items_center()
                     .gap_1()
-                    .p_2()
+                    .h(px(32.))
+                    .px_2()
+                    .flex_shrink_0()
                     .child(
-                        navigation_button(
-                            compact_button(Button::new("files"), "Files"),
-                            self.sidebar == Sidebar::Files,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_sidebar(Sidebar::Files, window, cx)
-                        })),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .font_semibold()
+                            .text_color(p.secondary_foreground)
+                            .child(match self.sidebar {
+                                Sidebar::Files => "EXPLORER",
+                                Sidebar::Search => "SEARCH",
+                                Sidebar::New => "NEW FILE",
+                            }),
                     )
                     .child(
-                        navigation_button(
-                            compact_button(Button::new("search"), "Search"),
-                            self.sidebar == Sidebar::Search,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_sidebar(Sidebar::Search, window, cx)
-                        })),
-                    )
-                    .child(
-                        compact_button(Button::new("refresh-files"), "Refresh")
+                        Button::new("new-file")
+                            .icon(Lucide::FilePlus)
                             .ghost()
+                            .xsmall()
+                            .accessibility_label("New File")
+                            .tooltip(tooltip("New File", shortcut("New File")))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_sidebar(Sidebar::New, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("refresh-files")
+                            .icon(Lucide::RefreshCw)
+                            .ghost()
+                            .xsmall()
+                            .accessibility_label("Refresh Files")
+                            .tooltip("Refresh Files")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.disk_events.store(true, Ordering::Relaxed);
                                 this.message("Refreshing project files…", false, cx);
@@ -526,7 +548,7 @@ impl Render for Workspace {
         let p = palette(cx.theme().mode);
         let shown = self.shown_panes();
         let geometry = pane_geometry(
-            f32::from(window.viewport_size().width),
+            row_width(f32::from(window.viewport_size().width)),
             &self.panes.layout,
             shown,
         );
@@ -561,9 +583,11 @@ impl Render for Workspace {
             let chat = self.chat_panel(geometry.utility, cx);
             self.pane_frame(Pane::Chat, chat, cx)
         });
-        let (left, right) = match self.panes.layout.side(Pane::Files) {
-            PaneSide::Left => (files, chat),
-            PaneSide::Right => (chat, files),
+        // The activity bar sits on the window's edge beside the file tree.
+        let activity_bar = Some(self.activity_bar(cx));
+        let (bar_left, left, right, bar_right) = match self.panes.layout.side(Pane::Files) {
+            PaneSide::Left => (activity_bar, files, chat, None),
+            PaneSide::Right => (None, chat, files, activity_bar),
         };
         div()
             .id("workspace")
@@ -616,10 +640,20 @@ impl Render for Workspace {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .on_drag_move(cx.listener(Self::resize_pane))
-                    .children(left)
-                    .child(self.content_view(cx))
-                    .children(right),
+                    .children(bar_left)
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_stretch()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .on_drag_move(cx.listener(Self::resize_pane))
+                            .children(left)
+                            .child(self.content_view(cx))
+                            .children(right),
+                    )
+                    .children(bar_right),
             )
             .child(
                 div()
