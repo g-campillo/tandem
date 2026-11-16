@@ -435,8 +435,7 @@ impl ProjectSession {
             diagnostic_versions:BTreeMap::new(),version_counter:0,synced_sequence:u64::MAX,
         };
         let init = session.request("initialize", json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
-            "capabilities":{"general":{"positionEncodings":["utf-16"]},"workspace":{"configuration":true},
-                "textDocument":{"completion":{"completionItem":{"snippetSupport":false}},"definition":{"linkSupport":true},"publishDiagnostics":{"versionSupport":true},"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}},
+            "capabilities":client_capabilities(),
             "initializationOptions":{"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":config.cache},
                 "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":false}},"rustfmt":{"extraArgs":[]}}
         }), &AtomicBool::new(false), stopped)?;
@@ -670,6 +669,12 @@ impl Drop for ProjectSession {
     }
 }
 
+/// What Tandem tells a language server it supports. Hover text is asked for as Markdown,
+/// so that signatures arrive in fenced code blocks the editor can highlight.
+fn client_capabilities() -> Value {
+    json!({"general":{"positionEncodings":["utf-16"]},"workspace":{"configuration":true},
+        "textDocument":{"completion":{"completionItem":{"snippetSupport":false}},"definition":{"linkSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"publishDiagnostics":{"versionSupport":true},"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}})
+}
 pub fn file_uri(path: &Path) -> Result<String> {
     Ok(url::Url::from_file_path(path)
         .map_err(|_| anyhow!("Invalid local file URI"))?
@@ -754,6 +759,28 @@ pub fn apply_text_edits(text: &str, edits: &[TextEdit]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hover_is_requested_as_markdown_with_a_plain_text_fallback() {
+        let capabilities = client_capabilities();
+        assert_eq!(
+            capabilities.pointer("/textDocument/hover/contentFormat"),
+            Some(&json!(["markdown", "plaintext"]))
+        );
+        // The capabilities the other language features rely on are still declared.
+        assert_eq!(
+            capabilities.pointer("/general/positionEncodings"),
+            Some(&json!(["utf-16"]))
+        );
+        assert_eq!(
+            capabilities.pointer("/textDocument/definition/linkSupport"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            capabilities.pointer("/textDocument/completion/completionItem/snippetSupport"),
+            Some(&json!(false))
+        );
+    }
+
     #[test]
     fn formatting_rejects_invalid_unicode_ranges_and_overlap() {
         let text = "a🦀b\n";
