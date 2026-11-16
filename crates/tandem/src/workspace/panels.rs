@@ -32,6 +32,7 @@ impl Workspace {
                     Button::new("refresh-diagnostics"),
                     "Check Language Snapshot",
                 )
+                .icon(IconName::RefreshCw)
                 .disabled(self.dev.diagnostic_busy)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.language_action("textDocument/diagnostic", window, cx)

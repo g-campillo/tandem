@@ -640,6 +640,7 @@ impl Workspace {
                     .icon(IconName::Close)
                     .ghost()
                     .xsmall()
+                    .accessibility_label("Hide Panel")
                     .tooltip(tooltip("Hide Panel", shortcut("Toggle Panel")))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_bottom_panel(cx))),
             );

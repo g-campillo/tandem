@@ -4,7 +4,7 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::{Context as _, Result, ensure};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Sizable, StyledExt};
+use gpui_kit::component::{ActiveTheme, IconName, Sizable, StyledExt};
 use gpui_kit::*;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -421,36 +421,33 @@ impl Render for TerminalView {
                     .font_family(".SystemUIFont")
                     .child(
                         Button::new("terminal-interrupt")
+                            .icon(IconName::Square)
                             .small()
-                            .compact()
-                            .h(px(28.))
                             .ghost()
                             .accessibility_label("Interrupt")
-                            .child(div().text_size(px(13.)).child("Interrupt"))
+                            .tooltip("Interrupt  ⌃C")
                             .on_click(cx.listener(|this, _, _, _| {
                                 let _ = this.terminal.send(&[3]);
                             })),
                     )
                     .child(
                         Button::new("terminal-copy")
+                            .icon(IconName::Copy)
                             .small()
-                            .compact()
-                            .h(px(28.))
                             .ghost()
                             .accessibility_label("Copy Visible Output")
-                            .child(div().text_size(px(13.)).child("Copy Visible Output"))
+                            .tooltip("Copy Visible Output")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(this.text.clone()))
                             })),
                     )
                     .child(
                         Button::new("terminal-bottom")
+                            .icon(IconName::ArrowDown)
                             .small()
-                            .compact()
-                            .h(px(28.))
                             .ghost()
                             .accessibility_label("Latest Output")
-                            .child(div().text_size(px(13.)).child("Latest Output"))
+                            .tooltip("Latest Output")
                             .on_click(
                                 cx.listener(|this, _, _, _| this.terminal.scroll(Scroll::Bottom)),
                             ),

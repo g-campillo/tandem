@@ -1,13 +1,15 @@
 //! The Settings view shown in place of the editor: Claude, help levels, language tools,
 //! and app and recovery information.
 use super::chat_logic::help_languages;
-use super::chat_view::{help_level_menu, permission_menu};
+use super::chat_view::{copy_button, help_level_menu, permission_menu};
+use super::chrome_logic::tooltip;
+use super::commands::shortcut;
 use super::panels::{code_note, note};
 use super::*;
 use crate::appearance::{
     palette, panel_body, panel_error, panel_heading, panel_metadata, panel_warning, path_button,
 };
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
@@ -159,8 +161,12 @@ impl Workspace {
                             .gap_2()
                             .child(panel_heading(note("Settings")).flex_1())
                             .child(
-                                path_button(Button::new("close-settings"), "Close Settings")
-                                    .w_auto()
+                                Button::new("close-settings")
+                                    .icon(IconName::Close)
+                                    .ghost()
+                                    .small()
+                                    .accessibility_label("Close Settings")
+                                    .tooltip(tooltip("Close Settings", shortcut("Settings…")))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.settings.open = false;
                                         cx.notify();
@@ -209,16 +215,12 @@ impl Workspace {
             })
             .when_some(command, |d, command| {
                 let copied = command.clone();
-                d.child(code_note("settings-sign-in", command, cx)).child(
-                    path_button(Button::new("settings-copy-sign-in"), "Copy")
-                        .w_auto()
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
-                        }),
-                )
+                d.child(code_note("settings-sign-in", command, cx))
+                    .child(copy_button("settings-copy-sign-in", copied))
             })
             .child(
                 path_button(Button::new("settings-reconnect"), "Reconnect")
+                    .icon(IconName::RefreshCw)
                     .w_auto()
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -409,15 +411,19 @@ impl Workspace {
                 cx,
             ))
             .child(
-                path_button(Button::new("open-recovery"), "Open Recovery Folder").on_click(
-                    cx.listener(move |v, _, _, cx| v.show_local_folder(recovery.clone(), cx)),
-                ),
+                path_button(Button::new("open-recovery"), "Open Recovery Folder")
+                    .icon(IconName::FolderOpen)
+                    .on_click(
+                        cx.listener(move |v, _, _, cx| v.show_local_folder(recovery.clone(), cx)),
+                    ),
             )
             .when_some(notices, |d, path| {
                 d.child(
-                    path_button(Button::new("open-notices"), "Open Third-Party Notices").on_click(
-                        cx.listener(move |v, _, _, cx| v.show_local_folder(path.clone(), cx)),
-                    ),
+                    path_button(Button::new("open-notices"), "Open Third-Party Notices")
+                        .icon(IconName::ExternalLink)
+                        .on_click(
+                            cx.listener(move |v, _, _, cx| v.show_local_folder(path.clone(), cx)),
+                        ),
                 )
             })
             .child(

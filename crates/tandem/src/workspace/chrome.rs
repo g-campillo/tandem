@@ -80,6 +80,7 @@ impl Workspace {
                     .ghost()
                     .xsmall()
                     .selected(self.commands.explorer_visible)
+                    .accessibility_label("Toggle File Explorer")
                     .tooltip(tooltip(
                         "Toggle File Explorer",
                         shortcut("Toggle File Explorer"),
@@ -92,6 +93,7 @@ impl Workspace {
                     .ghost()
                     .xsmall()
                     .selected(self.bottom.is_some())
+                    .accessibility_label("Toggle Panel")
                     .tooltip(tooltip("Toggle Panel", shortcut("Toggle Panel")))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_bottom_panel(cx))),
             )
@@ -101,6 +103,7 @@ impl Workspace {
                     .ghost()
                     .xsmall()
                     .selected(self.chat.visible)
+                    .accessibility_label("Toggle Chat")
                     .tooltip(tooltip("Toggle Chat", shortcut("Toggle Chat")))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.chat.visible = !this.chat.visible;

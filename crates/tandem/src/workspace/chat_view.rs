@@ -1,11 +1,14 @@
 //! The chat panel beside the editor: header, connection notice, transcript, the card of the
 //! step being built, and composer.
 use super::chat_logic::{check_title, finding_label};
+use super::chrome_logic::tooltip;
+use super::commands::shortcut;
 use super::panels::code_note;
 use super::*;
 use crate::appearance::{
     Palette, compact_button, palette, panel_error, path_button, solid_section, wrapping_button,
 };
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -57,9 +60,14 @@ fn decide(keep: bool, change_set: &str, path: Option<String>) -> Command {
     }
 }
 
-/// A button that puts `text` on the clipboard.
-fn copy_button(id: impl Into<ElementId>, text: String) -> Button {
-    compact_button(Button::new(id), "Copy")
+/// An icon button that puts `text` on the clipboard.
+pub(super) fn copy_button(id: impl Into<ElementId>, text: String) -> Button {
+    Button::new(id)
+        .icon(IconName::Copy)
+        .ghost()
+        .small()
+        .accessibility_label("Copy")
+        .tooltip("Copy")
         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
 }
 
@@ -227,8 +235,12 @@ impl Workspace {
             .border_color(p.border)
             .child(
                 div()
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
                     .text_size(px(14.))
                     .font_semibold()
+                    .child(Icon::new(Lucide::MessageSquare).small())
                     .child("Chat · Claude"),
             )
             .children(task_menu)
@@ -240,7 +252,7 @@ impl Workspace {
                     .ghost()
                     .small()
                     .accessibility_label("Settings")
-                    .tooltip("Settings  ⌘,")
+                    .tooltip(tooltip("Settings", shortcut("Settings…")))
                     .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
             )
             .into_any_element()
@@ -375,17 +387,12 @@ impl Workspace {
                         .font_features(code.features.clone())
                         .text_size(px(code.size)),
                 )
-                .child(
-                    compact_button(Button::new("chat-copy-sign-in"), "Copy").on_click(
-                        move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
-                        },
-                    ),
-                )
+                .child(copy_button("chat-copy-sign-in", copied))
             })
             .when(can_retry, |d| {
                 d.child(
                     compact_button(Button::new("chat-reconnect"), "Reconnect")
+                        .icon(IconName::RefreshCw)
                         .disabled(busy)
                         .on_click(
                             cx.listener(|this, _, _, _| this.chat_command(Command::Reconnect)),
@@ -450,6 +457,7 @@ impl Workspace {
                                 .gap_2()
                                 .child(
                                     compact_button(Button::new(("chat-allow", id)), "Allow")
+                                        .icon(IconName::Check)
                                         .primary()
                                         .on_click(cx.listener(|this, _, _, _| {
                                             this.chat_command(Command::Permission { allow: true })
@@ -457,6 +465,7 @@ impl Workspace {
                                 )
                                 .child(
                                     compact_button(Button::new(("chat-deny", id)), "Deny")
+                                        .icon(IconName::Ban)
                                         .on_click(cx.listener(|this, _, _, _| {
                                             this.chat_command(Command::Permission { allow: false })
                                         })),
@@ -523,6 +532,7 @@ impl Workspace {
                                 Button::new(("chat-write-it", item_id as usize)),
                                 "I'll write it",
                             )
+                            .icon(Lucide::Pencil)
                             .primary()
                             .on_click(
                                 cx.listener(|this, _, _, _| {
@@ -535,6 +545,7 @@ impl Workspace {
                                 Button::new(("chat-you-do-it", item_id as usize)),
                                 "You do it",
                             )
+                            .icon(IconName::Bot)
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
                                     this.begin_takeover(TakeoverRequest::Rest, window, cx)
@@ -571,6 +582,11 @@ impl Workspace {
                 ))),
                 label,
             )
+            .icon(if keep {
+                IconName::Check
+            } else {
+                IconName::Undo2
+            })
             .disabled(!can_act)
             .on_click(cx.listener(move |this, _, _, _| this.chat_command(command.clone())))
         };
@@ -669,6 +685,7 @@ impl Workspace {
                     .gap_1()
                     .child(
                         compact_button(Button::new(id("keep")), "Keep")
+                            .icon(IconName::Check)
                             .disabled(!can_act)
                             .on_click(
                                 cx.listener(move |this, _, _, _| this.chat_command(keep.clone())),
@@ -676,6 +693,7 @@ impl Workspace {
                     )
                     .child(
                         compact_button(Button::new(id("undo")), "Undo")
+                            .icon(IconName::Undo2)
                             .disabled(!can_act || !row.undoable)
                             .when(!row.undoable, |button| {
                                 button.tooltip("Too large to restore")
@@ -894,6 +912,7 @@ impl Workspace {
                     .when(card.kind != StepKind::RunCommand, |d| {
                         d.child(
                             compact_button(Button::new(("chat-step-open", index)), "Open file")
+                                .icon(Lucide::FileCode)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_step_file(window, cx)
                                 })),
@@ -901,6 +920,7 @@ impl Workspace {
                     })
                     .child(
                         compact_button(Button::new(("chat-step-check", index)), "Check my work")
+                            .icon(IconName::Check)
                             .primary()
                             .disabled(!can_act)
                             .on_click(
@@ -911,6 +931,7 @@ impl Workspace {
                     )
                     .child(
                         compact_button(Button::new(("chat-step-do-it", index)), "Do it for me")
+                            .icon(Lucide::Play)
                             .disabled(!can_act)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.begin_takeover(TakeoverRequest::Step, window, cx)
@@ -921,6 +942,7 @@ impl Workspace {
                             Button::new(("chat-step-build-rest", index)),
                             "Build the rest for me",
                         )
+                        .icon(Lucide::ListChecks)
                         .disabled(!can_act)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.begin_takeover(TakeoverRequest::Rest, window, cx)
@@ -1046,6 +1068,7 @@ impl Workspace {
                     ))
                     .child(
                         compact_button(Button::new(("chat-step-terminal", index)), "Open Terminal")
+                            .icon(IconName::SquareTerminal)
                             .on_click(cx.listener(|this, _, _, cx| this.show_terminal(cx))),
                     ),
             ),
@@ -1078,6 +1101,7 @@ impl Workspace {
                     Button::new(("chat-step-guide", card.index)),
                     "Guide me through this step",
                 )
+                .icon(Lucide::Sparkles)
                 .disabled(!card.can_act)
                 .on_click(cx.listener(|this, _, _, _| this.chat_command(Command::GuideStep)))
                 .into_any_element()
@@ -1110,6 +1134,7 @@ impl Workspace {
                     .gap_2()
                     .child(
                         compact_button(Button::new("chat-check-again"), "Check again")
+                            .icon(IconName::Check)
                             .primary()
                             .disabled(!can_act)
                             .on_click(
@@ -1120,6 +1145,7 @@ impl Workspace {
                     )
                     .child(
                         compact_button(Button::new("chat-fix-it"), "Fix it for me")
+                            .icon(Lucide::Wrench)
                             .disabled(!can_act)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.begin_takeover(TakeoverRequest::Rest, window, cx)
@@ -1158,7 +1184,16 @@ impl Workspace {
                     .when(!efforts.is_empty(), |d| {
                         d.child(effort_menu(state, efforts, &weak))
                     })
-                    .child(permission_menu("chat-permissions", state, &weak))
+                    .child(permission_menu_with(
+                        |label| {
+                            compact_button(
+                                Button::new("chat-permissions").icon(Lucide::Shield),
+                                label,
+                            )
+                        },
+                        state,
+                        &weak,
+                    ))
                     .child(div().flex_1())
                     .child(self.composer_action(mode, cx)),
             )
@@ -1167,18 +1202,32 @@ impl Workspace {
 
     fn composer_action(&self, mode: ComposerMode, cx: &mut Context<Self>) -> AnyElement {
         match mode {
-            ComposerMode::Send => compact_button(Button::new("chat-send"), "Send")
+            ComposerMode::Send => Button::new("chat-send")
+                .icon(Lucide::ArrowUp)
                 .primary()
+                .small()
+                .accessibility_label("Send")
+                .tooltip(tooltip("Send", "↵"))
                 .on_click(cx.listener(|this, _, window, cx| this.chat_send(window, cx))),
-            ComposerMode::Stop => compact_button(Button::new("chat-stop"), "Stop")
+            ComposerMode::Stop => Button::new("chat-stop")
+                .icon(IconName::Square)
                 .danger()
+                .small()
+                .accessibility_label("Stop")
+                .tooltip(tooltip("Stop Claude", shortcut("Stop Claude")))
                 .on_click(cx.listener(|this, _, _, _| this.chat_command(Command::Stop))),
-            ComposerMode::Stopping => {
-                compact_button(Button::new("chat-stopping"), "Stopping…").disabled(true)
-            }
-            ComposerMode::Disabled(reason) => compact_button(Button::new("chat-send"), "Send")
-                .primary()
+            ComposerMode::Stopping => Button::new("chat-stopping")
+                .icon(IconName::LoaderCircle)
+                .small()
                 .disabled(true)
+                .accessibility_label("Stopping…")
+                .tooltip("Stopping…"),
+            ComposerMode::Disabled(reason) => Button::new("chat-send")
+                .icon(Lucide::ArrowUp)
+                .primary()
+                .small()
+                .disabled(true)
+                .accessibility_label("Send")
                 .tooltip(reason),
         }
         .into_any_element()
@@ -1201,6 +1250,7 @@ fn model_menu(state: &ChatState, weak: &WeakEntity<Workspace>) -> AnyElement {
             .collect();
     let weak = weak.clone();
     compact_button(Button::new("chat-model"), view::model_label(state))
+        .icon(Lucide::Cpu)
         .ghost()
         .dropdown_menu(move |menu, _, _| {
             choices.iter().fold(menu, |menu, (value, name)| {
@@ -1224,6 +1274,7 @@ fn effort_menu(
     let label = format!("Effort: {}", selected.as_deref().unwrap_or("Default"));
     let weak = weak.clone();
     compact_button(Button::new("chat-effort"), label)
+        .icon(Lucide::Gauge)
         .ghost()
         .dropdown_menu(move |menu, _, _| {
             let menu = menu.item(
