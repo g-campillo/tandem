@@ -711,6 +711,7 @@ impl Render for Workspace {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .on_drag_move(cx.listener(Self::resize_pane))
                     .children(left)
                     .child(self.content_view(cx))
                     .children(right),

@@ -292,6 +292,7 @@ impl Workspace {
                             view.checkpoint_async(cx);
                             view.development_tick(window, cx);
                             view.chat_tick(window, cx);
+                            view.pane_tick(cx);
                             let rescan = view.disk_events.swap(false, Ordering::Relaxed)
                                 || view.last_index.elapsed() > Duration::from_secs(30);
                             if !view.loading
@@ -391,6 +392,7 @@ impl Workspace {
             );
             return false;
         }
+        self.persist_layout(cx);
         match self.flush(cx) {
             Ok(()) => true,
             Err(error) => {

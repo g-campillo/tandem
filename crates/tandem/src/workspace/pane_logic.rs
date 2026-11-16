@@ -1,7 +1,7 @@
-//! Pure decisions behind the file tree and chat panes: how wide each is drawn. Kept free of
-//! GPUI so they are tested directly.
+//! Pure decisions behind the file tree and chat panes: how wide each is drawn and what a
+//! divider drag does. Kept free of GPUI so they are tested directly.
 use crate::appearance::WorkspaceGeometry;
-use tandem_core::layout::{Pane, PaneLayout};
+use tandem_core::layout::{Pane, PaneLayout, PaneSide};
 
 /// The narrowest and widest the user can make the file tree, in pixels.
 pub const FILES_WIDTH: (f32, f32) = (160., 600.);
@@ -67,6 +67,39 @@ pub fn pane_geometry(
         utility: chat,
         content: (window_width - files - chat).max(0.),
     }
+}
+
+/// The layout after the divider of `pane` is dragged to `pointer_x`, in a row of panes that
+/// spans `row_left..row_right` (window coordinates). The pane's new width is the distance
+/// from its outer edge to the pointer, rounded to a whole pixel and kept within the pane's
+/// limits and within what leaves the editor `EDITOR_MIN` beside the other pane as drawn.
+/// Nothing else in the layout changes.
+pub fn drag_pane(
+    layout: &PaneLayout,
+    pane: Pane,
+    pointer_x: f32,
+    row_left: f32,
+    row_right: f32,
+    shown: ShownPanes,
+) -> PaneLayout {
+    let requested = match layout.side(pane) {
+        PaneSide::Left => pointer_x - row_left,
+        PaneSide::Right => row_right - pointer_x,
+    };
+    if !requested.is_finite() {
+        return *layout;
+    }
+    let row_width = row_right - row_left;
+    let drawn = pane_geometry(row_width, layout, shown);
+    let other = match pane {
+        Pane::Files => drawn.utility,
+        Pane::Chat => drawn.sidebar,
+    };
+    let (narrowest, widest) = width_limits(pane);
+    let widest = widest.min(row_width - EDITOR_MIN - other).max(narrowest);
+    let mut next = *layout;
+    next.set_width(pane, Some(requested.clamp(narrowest, widest).round()));
+    next
 }
 
 #[cfg(test)]
@@ -225,6 +258,137 @@ mod tests {
                     "{case}"
                 );
                 assert!(geometry.terminal_available_width() >= 0., "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn drag_pane_measures_a_left_pane_from_the_rows_left_edge() {
+        let expected = layout(Some(300.), None);
+        assert_eq!(
+            drag_pane(&PaneLayout::default(), Pane::Files, 300., 0., 1280., BOTH),
+            expected
+        );
+        assert_eq!(
+            drag_pane(&PaneLayout::default(), Pane::Files, 310., 10., 1290., BOTH),
+            expected
+        );
+    }
+
+    #[test]
+    fn drag_pane_measures_a_right_pane_from_the_rows_right_edge() {
+        let next = drag_pane(&PaneLayout::default(), Pane::Chat, 800., 0., 1280., BOTH);
+        assert_eq!(next.chat_width, Some(480.));
+        assert_eq!(next.files_width, None);
+    }
+
+    #[test]
+    fn drag_pane_follows_the_panes_side_when_swapped() {
+        let swapped = PaneLayout {
+            swapped: true,
+            ..PaneLayout::default()
+        };
+        let files = drag_pane(&swapped, Pane::Files, 1000., 0., 1280., BOTH);
+        assert_eq!(files.files_width, Some(280.));
+        assert!(files.swapped);
+        let chat = drag_pane(&swapped, Pane::Chat, 420., 0., 1280., BOTH);
+        assert_eq!(chat.chat_width, Some(420.));
+        assert!(chat.swapped);
+    }
+
+    #[test]
+    fn drag_pane_changes_only_the_dragged_panes_width() {
+        let saved = PaneLayout {
+            swapped: true,
+            ..layout(Some(300.), Some(480.))
+        };
+        assert_eq!(
+            drag_pane(&saved, Pane::Chat, 400., 0., 1600., BOTH),
+            PaneLayout {
+                chat_width: Some(400.),
+                ..saved
+            }
+        );
+    }
+
+    #[test]
+    fn drag_pane_stops_at_the_narrowest_width() {
+        let default = PaneLayout::default();
+        assert_eq!(
+            drag_pane(&default, Pane::Files, 20., 0., 1280., BOTH).files_width,
+            Some(160.)
+        );
+        assert_eq!(
+            drag_pane(&default, Pane::Chat, 1270., 0., 1280., BOTH).chat_width,
+            Some(280.)
+        );
+        assert_eq!(
+            drag_pane(&default, Pane::Files, -50., 0., 1280., BOTH).files_width,
+            Some(160.)
+        );
+    }
+
+    #[test]
+    fn drag_pane_stops_at_the_widest_width() {
+        let default = PaneLayout::default();
+        assert_eq!(
+            drag_pane(&default, Pane::Files, 1000., 0., 2400., BOTH).files_width,
+            Some(600.)
+        );
+        assert_eq!(
+            drag_pane(&default, Pane::Chat, 100., 0., 2400., BOTH).chat_width,
+            Some(900.)
+        );
+    }
+
+    #[test]
+    fn drag_pane_stops_where_the_editor_would_get_too_narrow() {
+        let default = PaneLayout::default();
+        assert_eq!(
+            drag_pane(&default, Pane::Files, 700., 0., 1280., BOTH).files_width,
+            Some(530.)
+        );
+        assert_eq!(
+            drag_pane(&default, Pane::Files, 700., 0., 1280., FILES_ONLY).files_width,
+            Some(600.)
+        );
+        assert_eq!(
+            drag_pane(&layout(Some(400.), None), Pane::Chat, 100., 0., 1280., BOTH).chat_width,
+            Some(520.)
+        );
+    }
+
+    #[test]
+    fn drag_pane_keeps_the_narrowest_width_when_there_is_no_room_at_all() {
+        assert_eq!(
+            drag_pane(&PaneLayout::default(), Pane::Files, 400., 0., 700., BOTH).files_width,
+            Some(160.)
+        );
+    }
+
+    #[test]
+    fn drag_pane_rounds_to_a_whole_pixel() {
+        let default = PaneLayout::default();
+        assert_eq!(
+            drag_pane(&default, Pane::Files, 300.4, 0., 1280., BOTH).files_width,
+            Some(300.)
+        );
+        assert_eq!(
+            drag_pane(&default, Pane::Files, 300.6, 0., 1280., BOTH).files_width,
+            Some(301.)
+        );
+    }
+
+    #[test]
+    fn drag_pane_ignores_a_pointer_that_is_not_a_number() {
+        let saved = layout(Some(300.), Some(480.));
+        for pointer in [f32::NAN, f32::INFINITY] {
+            for pane in [Pane::Files, Pane::Chat] {
+                assert_eq!(
+                    drag_pane(&saved, pane, pointer, 0., 1280., BOTH),
+                    saved,
+                    "pointer {pointer}, {pane:?}"
+                );
             }
         }
     }
