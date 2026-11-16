@@ -40,7 +40,7 @@ const TOOLS = [
       breakdown: z
         .array(
           z.object({
-            part: z.string().min(1).max(300),
+            part: z.string().min(1).max(300).describe('Copied exactly from the code or command.'),
             explanation: z.string().min(1).max(2000),
           }),
         )

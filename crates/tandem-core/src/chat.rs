@@ -1,4 +1,5 @@
 //! The Claude chat: one task per feature, taken from discussion to plan to build.
+use crate::breakdown::part_spans;
 use crate::{new_id, normalized_relative, now_ms};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -304,6 +305,38 @@ impl Guidance {
                     "At the expert level, give only a short description and the reason."
                 ),
             },
+        }
+        ensure!(
+            self.breakdown
+                .iter()
+                .all(|item| !item.part.trim().is_empty() && !item.explanation.trim().is_empty()),
+            "Every breakdown entry needs a part and an explanation."
+        );
+        let block = match step.kind {
+            StepKind::RunCommand => self.command.as_deref().map(|text| (text, "command")),
+            _ if self.level == HelpLevel::Beginner => {
+                self.code.as_deref().map(|text| (text, "code"))
+            }
+            _ => None,
+        };
+        if let Some((text, name)) = block {
+            let parts: Vec<&str> = self
+                .breakdown
+                .iter()
+                .map(|item| item.part.as_str())
+                .collect();
+            let missing: Vec<String> = part_spans(text, &parts)
+                .iter()
+                .zip(&parts)
+                .filter(|(spans, _)| spans.is_empty())
+                .take(5)
+                .map(|(_, part)| format!("`{}`", part.trim()))
+                .collect();
+            ensure!(
+                missing.is_empty(),
+                "These breakdown parts are not in the {name}: {}. Copy each part exactly from the {name}, because Tandem shows a part's explanation when the user points at it in the {name}.",
+                missing.join(", ")
+            );
         }
         Ok(())
     }
@@ -750,11 +783,15 @@ mod tests {
         }
     }
 
+    fn entry(part: &str, explanation: &str) -> BreakdownItem {
+        BreakdownItem {
+            part: part.into(),
+            explanation: explanation.into(),
+        }
+    }
+
     fn breakdown() -> Vec<BreakdownItem> {
-        vec![BreakdownItem {
-            part: "#[arg(long)]".into(),
-            explanation: "makes the field a --flag".into(),
-        }]
+        vec![entry("#[arg(long)]", "makes the field a --flag")]
     }
 
     fn file_step() -> PlanStep {
@@ -841,7 +878,7 @@ mod tests {
             g.path = None;
             g.command = Some("cargo add serde".into());
             if level == HelpLevel::Beginner {
-                g.breakdown = breakdown();
+                g.breakdown = vec![entry("cargo", "Rust's build tool.")];
             }
             g.check(&command_step()).unwrap();
 
@@ -865,6 +902,68 @@ mod tests {
             message(g.check(&command_step())),
             "At the beginner level, explain every token of the command in breakdown."
         );
+    }
+
+    #[test]
+    fn beginner_parts_must_be_in_the_code() {
+        let mut g = guidance(HelpLevel::Beginner);
+        g.code = Some("#[arg(long)]\njson: bool,".into());
+        g.breakdown = vec![
+            entry("#[arg(long)]", "makes the field a --flag"),
+            entry("Vec<T>", "a growable list"),
+        ];
+        assert_eq!(
+            message(g.check(&file_step())),
+            "These breakdown parts are not in the code: `Vec<T>`. Copy each part exactly from the code, because Tandem shows a part's explanation when the user points at it in the code."
+        );
+        g.breakdown = breakdown();
+        g.check(&file_step()).unwrap();
+        g.breakdown = vec![entry(
+            "#[arg(long)]\n  json: bool,",
+            "a long flag named json",
+        )];
+        g.check(&file_step()).unwrap();
+    }
+
+    #[test]
+    fn command_parts_must_be_in_the_command_at_every_level() {
+        for level in HelpLevel::ALL {
+            let mut g = guidance(level);
+            g.path = None;
+            g.command = Some("cargo add serde".into());
+            g.breakdown = vec![entry("cargo", "Rust's build tool.")];
+            g.check(&command_step()).unwrap();
+            g.breakdown = vec![entry("npm", "Node's package manager.")];
+            let error = message(g.check(&command_step()));
+            assert!(
+                error.contains("not in the command: `npm`"),
+                "{level:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn intermediate_parts_need_not_be_in_the_pseudocode() {
+        let mut g = guidance(HelpLevel::Intermediate);
+        g.pseudocode = Some("add a bool field".into());
+        g.breakdown = breakdown();
+        g.check(&file_step()).unwrap();
+    }
+
+    #[test]
+    fn a_breakdown_entry_needs_a_part_and_an_explanation() {
+        let expected = "Every breakdown entry needs a part and an explanation.";
+        let mut beginner = guidance(HelpLevel::Beginner);
+        beginner.code = Some("#[arg(long)]\njson: bool,".into());
+        beginner.breakdown = vec![entry("  ", "makes the field a --flag")];
+        assert_eq!(message(beginner.check(&file_step())), expected);
+        beginner.breakdown = vec![entry("#[arg(long)]", " ")];
+        assert_eq!(message(beginner.check(&file_step())), expected);
+
+        let mut intermediate = guidance(HelpLevel::Intermediate);
+        intermediate.pseudocode = Some("add a bool field".into());
+        intermediate.breakdown = vec![entry("#[arg(long)]", "")];
+        assert_eq!(message(intermediate.check(&file_step())), expected);
     }
 
     #[test]

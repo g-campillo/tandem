@@ -15,7 +15,7 @@ Rules that always apply
 - Give the reason for everything. Write \"do X, because Y\", never only \"do X\".
 - Explain every language on its own terms. Never compare code to Python or any other programming language, and never explain a construct by what it would be in another language, unless the user asks for that comparison.
 - Follow the help level Tandem names for the step.
-  beginner: give the complete code for the step and explain every keyword, construct and function call in it; explain terminal commands token by token.
+  beginner: give the complete code for the step and explain every keyword, construct and function call in it; explain terminal commands token by token. Copy each explained part exactly from the code or command, because the user reads an explanation by pointing at that part.
   intermediate: describe the change, give pseudocode rather than the finished code, and explain the parts that are new or unusual in this language.
   expert: a short description and the reason.
 - Use Tandem's tools for plans, step guidance and verdicts. Use plain chat for conversation and questions.
@@ -52,12 +52,9 @@ pub fn chat(task: &ChatTask, items: &[ChatItem], text: &str, recap: bool) -> Str
 pub fn guidance(plan: &Plan, step: usize, level: HelpLevel) -> String {
     let active = &plan.steps[step];
     let rule = match (level, active.kind) {
-        (HelpLevel::Beginner, StepKind::RunCommand) => {
-            "Put the exact command in command and add a breakdown entry for every token of it."
-                .to_owned()
-        }
-        (HelpLevel::Beginner, _) => "Put the complete code for this step in code, set anchor to one exact existing line next to where it goes (leave it out for a new file), and add a breakdown entry for every keyword, construct and function call in that code.".to_owned(),
-        (HelpLevel::Intermediate, StepKind::RunCommand) => "Put the exact command in command and explain in breakdown only the parts that are new or unusual.".to_owned(),
+        (HelpLevel::Beginner, StepKind::RunCommand) => "Put the exact command in command and add a breakdown entry for every token of it, each part copied exactly from the command.".to_owned(),
+        (HelpLevel::Beginner, _) => "Put the complete code for this step in code, set anchor to one exact existing line next to where it goes (leave it out for a new file), and add a breakdown entry for every keyword, construct and function call in that code, each part copied exactly from the code.".to_owned(),
+        (HelpLevel::Intermediate, StepKind::RunCommand) => "Put the exact command in command and explain in breakdown only the parts that are new or unusual, each part copied exactly from the command.".to_owned(),
         (HelpLevel::Intermediate, _) => format!(
             "Describe the change, put pseudocode in pseudocode and leave code empty, and add breakdown entries only for what is new or unusual in {}.",
             active.language
@@ -324,6 +321,9 @@ mod tests {
         assert!(SYSTEM_APPEND.starts_with("You are the companion inside Tandem,"));
         assert!(SYSTEM_APPEND.contains("\n\nHow a task works\n1. Discuss."));
         assert!(SYSTEM_APPEND.ends_with("come from the editor, not from the user."));
+        assert!(
+            SYSTEM_APPEND.contains("Copy each explained part exactly from the code or command")
+        );
     }
 
     #[test]
@@ -467,7 +467,7 @@ mod tests {
              Step: Edit src/cli.rs\n\
              Summary: Add `json` to Args\n\
              Language: rust. Help level: beginner.\n\
-             Call show_step for exactly this step. Put the complete code for this step in code, set anchor to one exact existing line next to where it goes (leave it out for a new file), and add a breakdown entry for every keyword, construct and function call in that code. Explain the code on its own terms: do not compare it to Python or any other programming language unless the user asked for that. Do not edit files and do not move to another step. After the tool call, reply with one short sentence."
+             Call show_step for exactly this step. Put the complete code for this step in code, set anchor to one exact existing line next to where it goes (leave it out for a new file), and add a breakdown entry for every keyword, construct and function call in that code, each part copied exactly from the code. Explain the code on its own terms: do not compare it to Python or any other programming language unless the user asked for that. Do not edit files and do not move to another step. After the tool call, reply with one short sentence."
         );
     }
 
@@ -488,12 +488,12 @@ mod tests {
             (
                 1,
                 HelpLevel::Beginner,
-                "Put the exact command in command and add a breakdown entry for every token of it.",
+                "Put the exact command in command and add a breakdown entry for every token of it, each part copied exactly from the command.",
             ),
             (
                 1,
                 HelpLevel::Intermediate,
-                "Put the exact command in command and explain in breakdown only the parts that are new or unusual.",
+                "Put the exact command in command and explain in breakdown only the parts that are new or unusual, each part copied exactly from the command.",
             ),
             (
                 1,
