@@ -342,12 +342,20 @@ impl Workspace {
                 file: project.root.join(&tab.document.path),
                 instance: tab.instance.clone(),
             });
+            let hover = Rc::new(super::hover::HoverSource {
+                manager,
+                file: provider.file.clone(),
+                instance: tab.instance.clone(),
+                language: tab.document.language(),
+                editor: tab.editor.downgrade(),
+                tip: self.hover.downgrade(),
+            });
             let weak = weak.clone();
             let root = project.root.clone();
             tab.editor.update(cx, |editor, _| {
                 editor.lsp_mut().completion_provider = Some(provider.clone());
-                editor.lsp_mut().definition_provider = Some(provider.clone());
-                editor.lsp_mut().hover_provider = Some(provider);
+                editor.lsp_mut().definition_provider = Some(provider);
+                editor.lsp_mut().hover_provider = Some(hover);
                 editor.lsp_mut().show_document = Some(Rc::new(move |params, window, cx| {
                     let Ok(path) = tandem_lsp::uri_path(params.uri.as_str()) else {
                         return true;

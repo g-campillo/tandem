@@ -47,6 +47,8 @@ The panel below the editor has two tabs: **Terminal**, a basic interactive `/bin
 
 The file tree is on the left of the editor and the chat on the right. **View → Swap File Tree and Chat**, or the switch under Settings → **Layout**, puts the chat on the left and the file tree on the right; choose it again to swap back. Drag the divider between the editor and a pane to resize that pane, and double-click the divider to return the pane to its default width. The file tree can be 160 to 600 pixels wide and the chat 280 to 900, and the editor always keeps at least 360, so in a small window a pane can be narrower than you set it until the window grows again. Each pane keeps its width when the panes are swapped. The layout is the same for every project and is saved in the state folder, so it survives a restart.
 
+With language tools on, rest the pointer on a name in the editor to see a tooltip: its signature, highlighted like the code in the editor, above its documentation. An error or a warning shows in the same tooltip, in a block of its own colour, as soon as the pointer is on the underlined text. The tooltip opens only while the pointer is on that text itself, never from the empty space beside a line, and closes when the pointer leaves it. Move the pointer onto the tooltip to scroll it or to select and copy its text (⌘C); a click or a scroll outside it, or any other key, closes it.
+
 | Action | Shortcut |
 | --- | --- |
 | Open folder / quick open / new file | ⌘O / ⌘P / ⌘N |
