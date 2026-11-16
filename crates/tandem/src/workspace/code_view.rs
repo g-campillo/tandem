@@ -29,26 +29,100 @@ pub(super) fn register_fence_aliases() {
 
 /// The syntax colours of `code` in `grammar`: sorted byte ranges that do not overlap.
 /// Empty when the toolkit has no grammar of that name.
+///
+/// A step's code is often a piece of a file that is only valid inside its enclosing item,
+/// such as a struct field or a match arm. Such code is coloured inside the first of the
+/// grammar's `enclosures` in which it parses without an error, so it gets the colours the
+/// editor gives it in the file. Code that is valid alone, or in none of them, is coloured
+/// alone.
 pub(super) fn syntax_runs(
     code: &str,
     grammar: &str,
     theme: &HighlightTheme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    let has_grammar = LanguageRegistry::singleton()
+    let language = LanguageRegistry::singleton()
         .language(grammar)
-        .is_some_and(|config| config.has_grammar());
-    if code.is_empty() || !has_grammar {
+        .and_then(|config| config.language);
+    let Some(language) = language.filter(|_| !code.is_empty()) else {
         return Vec::new();
-    }
+    };
+    let (before, after) = std::iter::once(&("", ""))
+        .chain(enclosures(grammar))
+        .find(|(before, after)| parses_cleanly(&language, &enclosed(before, code, after)))
+        .copied()
+        .unwrap_or(("", ""));
     // A new highlighter each time: a reused one would need an exact edit of its old text.
-    let rope = Rope::from_str(code);
     let mut highlighter = SyntaxHighlighter::new(grammar);
-    highlighter.update(None, &rope, None);
+    highlighter.update(None, &Rope::from_str(&enclosed(before, code, after)), None);
+    let start = before.len();
     highlighter
-        .styles(&(0..code.len()), theme)
+        .styles(&(start..start + code.len()), theme)
         .into_iter()
         .filter(|(range, style)| !range.is_empty() && *style != HighlightStyle::default())
+        .map(|(range, style)| (range.start - start..range.end - start, style))
         .collect()
+}
+
+/// `code` between `before` and `after`, with a line break at the end because some grammars
+/// (Go) need one after the last statement.
+fn enclosed(before: &str, code: &str, after: &str) -> String {
+    format!("{before}{code}{after}\n")
+}
+
+/// Whether `text` parses in `language` without an error or a missing token. A bare parse,
+/// because a highlighter also compiles its queries, which takes far longer.
+fn parses_cleanly(language: &tree_sitter::Language, text: &str) -> bool {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(language).is_ok()
+        && parser
+            .parse(text, None)
+            .is_some_and(|tree| !tree.root_node().has_error())
+}
+
+/// The items a piece of code in `grammar` may sit in, as (text before, text after) it, in
+/// the order they are tried.
+fn enclosures(grammar: &str) -> &'static [(&'static str, &'static str)] {
+    match grammar {
+        "rust" => &[
+            // Fields of a struct, variants of an enum, arms of a match, fields of a struct
+            // literal.
+            ("struct S {\n", "\n}"),
+            ("enum E {\n", "\n}"),
+            ("fn f() {\nmatch x {\n", "\n}\n}"),
+            ("fn f() {\nS {\n", "\n};\n}"),
+        ],
+        "go" => &[
+            ("type s struct {\n", "\n}"),
+            ("type i interface {\n", "\n}"),
+            ("func f() {\nswitch {\n", "\n}\n}"),
+        ],
+        "typescript" => &[
+            ("interface I {\n", "\n}"),
+            ("class C {\n", "\n}"),
+            ("x = {\n", "\n};"),
+            ("switch (x) {\n", "\n}"),
+        ],
+        "javascript" => &[
+            ("class C {\n", "\n}"),
+            ("x = {\n", "\n};"),
+            ("switch (x) {\n", "\n}"),
+        ],
+        "java" => &[
+            ("class C {\n", "\n}"),
+            ("enum E {\n", "\n}"),
+            ("class C {\nvoid f() {\nswitch (x) {\n", "\n}\n}\n}"),
+        ],
+        // Cases of a match; other indented code parses alone.
+        "python" => &[("match x:\n", "")],
+        // Members of an object and elements of an array, the last one or one with more after it.
+        "json" => &[
+            ("{\n", "\n}"),
+            ("{\n", "\n\"\": 0\n}"),
+            ("[\n", "\n]"),
+            ("[\n", "\n0\n]"),
+        ],
+        _ => &[],
+    }
 }
 
 /// The runs to paint: the syntax colours, an underline on `marked` spans and
@@ -349,6 +423,120 @@ mod tests {
                     "{grammar}: {range:?} cuts a character"
                 );
             }
+        }
+    }
+
+    /// The runs of `file` inside `range`, cut to it and counted from its start.
+    fn runs_within(
+        file: &[(Range<usize>, HighlightStyle)],
+        range: Range<usize>,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        file.iter()
+            .filter(|(run, _)| run.start < range.end && range.start < run.end)
+            .map(|(run, style)| {
+                let start = run.start.max(range.start) - range.start;
+                let end = run.end.min(range.end) - range.start;
+                (start..end, *style)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_snippet_is_coloured_as_in_its_file() {
+        let theme = HighlightTheme::default_dark();
+        // (grammar, file, snippet): each snippet is only valid inside its enclosing item.
+        let rows = [
+            (
+                "rust",
+                "pub struct Args {\n    #[arg(long)]\n    json: bool,\n}\n",
+                "    #[arg(long)]\n    json: bool,",
+            ),
+            (
+                "rust",
+                "pub struct Args {\n    pub name: String,\n}\n",
+                "    pub name: String,",
+            ),
+            (
+                "rust",
+                "pub enum Mode {\n    Plan,\n    Build(u8),\n}\n",
+                "    Build(u8),",
+            ),
+            (
+                "rust",
+                "fn f(o: Option<i32>) -> i32 {\n    match o {\n        Some(x) => x + 1,\n        None => 0,\n    }\n}\n",
+                "        Some(x) => x + 1,",
+            ),
+            (
+                "rust",
+                "fn args() -> Args {\n    Args {\n        name: \"x\".into(),\n    }\n}\n",
+                "        name: \"x\".into(),",
+            ),
+            (
+                "go",
+                "package main\n\ntype Args struct {\n    Name string\n    JSON bool\n}\n",
+                "    JSON bool",
+            ),
+            (
+                "go",
+                "package main\n\ntype Closer interface {\n    Close() error\n}\n",
+                "    Close() error",
+            ),
+            (
+                "go",
+                "package main\n\nfunc main() {\n    switch {\n    case done:\n        return\n    }\n}\n",
+                "    case done:\n        return",
+            ),
+            (
+                "typescript",
+                "interface Args {\n  name?: string;\n}\n",
+                "  name?: string;",
+            ),
+            (
+                "typescript",
+                "class Counter {\n  private count: number = 0;\n}\n",
+                "  private count: number = 0;",
+            ),
+            (
+                "javascript",
+                "const args = {\n  json: true,\n};\n",
+                "  json: true,",
+            ),
+            (
+                "java",
+                "class Args {\n    int size(int n) {\n        switch (n) {\n        case 1:\n            return 0;\n        }\n        return n;\n    }\n}\n",
+                "        case 1:\n            return 0;",
+            ),
+            (
+                "java",
+                "enum Mode {\n    PLAN(\"plan\"),\n    BUILD(\"build\");\n    Mode(String name) {}\n}\n",
+                "    PLAN(\"plan\"),",
+            ),
+            (
+                "python",
+                "def size(n):\n    match n:\n        case 1:\n            return 0\n",
+                "        case 1:\n            return 0",
+            ),
+            (
+                "json",
+                "{\n  \"name\": \"x\",\n  \"version\": \"1.0.0\"\n}\n",
+                "  \"name\": \"x\",",
+            ),
+        ];
+        for (grammar, file, snippet) in rows {
+            let start = file.find(snippet).expect("the snippet is in the file");
+            let expected = runs_within(
+                &syntax_runs(file, grammar, &theme),
+                start..start + snippet.len(),
+            );
+            assert!(
+                expected.iter().any(|(_, style)| style.color.is_some()),
+                "{grammar}: {snippet:?} has no colour in its file"
+            );
+            assert_eq!(
+                syntax_runs(snippet, grammar, &theme),
+                expected,
+                "{grammar}: {snippet:?}"
+            );
         }
     }
 

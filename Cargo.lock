@@ -6363,6 +6363,7 @@ dependencies = [
  "tandem-lsp",
  "tandem-terminal",
  "tempfile",
+ "tree-sitter",
 ]
 
 [[package]]
