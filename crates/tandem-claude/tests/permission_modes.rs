@@ -490,3 +490,82 @@ fn a_refused_bypass_shows_cards_again() {
     assert_eq!(harness.sent_of("open_session").len(), 1);
     harness.finish();
 }
+
+#[test]
+fn a_bypass_chat_turn_says_when_claude_may_edit() {
+    let mut harness = Harness::new();
+    save_mode(&harness, PermissionMode::Bypass);
+    harness.start(
+        &[
+            hello(),
+            open_ok(json!({"permission_mode": "bypass"})),
+            turn_ok_with(json!({"permission_mode": "bypass"})),
+            vec![assistant("first"), turn_finished(3, "completed")],
+            turn_ok_with(json!({"permission_mode": "bypass"})),
+            vec![assistant("second"), turn_finished(4, "completed")],
+        ]
+        .concat(),
+    );
+    harness.wait_ready();
+    harness.send(Command::Send("hi".into()));
+    finished_with(&harness, "first");
+    harness.send(Command::Send("/review".into()));
+    finished_with(&harness, "second");
+
+    let turns = harness.sent_of("turn");
+    assert_eq!(
+        turns[0]["text"],
+        format!("hi\n\n{}", tandem_claude::prompts::BYPASS_EDITS)
+    );
+    assert_eq!(turns[1]["text"], "/review");
+    harness.finish();
+}
+
+#[test]
+fn ask_and_auto_chat_turns_are_unchanged() {
+    for (mode, wire) in [(PermissionMode::Ask, "ask"), (PermissionMode::Auto, "auto")] {
+        let mut harness = Harness::new();
+        save_mode(&harness, mode);
+        harness.start(
+            &[
+                hello(),
+                open_ok(json!({"permission_mode": wire})),
+                turn_ok_with(json!({"permission_mode": wire})),
+                vec![assistant("ok"), turn_finished(3, "completed")],
+            ]
+            .concat(),
+        );
+        harness.wait_ready();
+        harness.send(Command::Send("hi".into()));
+        finished_with(&harness, "ok");
+
+        assert_eq!(harness.sent_of("turn")[0]["text"], "hi", "{wire}");
+        harness.finish();
+    }
+}
+
+#[test]
+fn a_bypass_check_turn_still_forbids_edits() {
+    let mut harness = Harness::new();
+    save_mode(&harness, PermissionMode::Bypass);
+    store_task(&harness, Phase::Build, 0);
+    harness.start(
+        &[
+            hello(),
+            open_ok(json!({"permission_mode": "bypass"})),
+            turn_ok_with(json!({"policy": "check", "permission_mode": "bypass"})),
+            vec![assistant("checked"), turn_finished(3, "completed")],
+        ]
+        .concat(),
+    );
+    harness.wait_ready();
+    harness.send(Command::CheckMyWork);
+    finished_with(&harness, "checked");
+
+    let turn = &harness.sent_of("turn")[0];
+    let text = turn["text"].as_str().expect("turn text");
+    assert_eq!(turn["policy"], "check");
+    assert!(text.contains("Do not edit files."), "{text}");
+    assert!(!text.contains("Permissions are set to Bypass"), "{text}");
+    harness.finish();
+}

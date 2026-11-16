@@ -1068,7 +1068,10 @@ impl Controller {
             // Claude paused a takeover of the remaining steps to ask something.
             return self.continue_takeover(text);
         }
-        let prompt = prompts::chat(&task, &state.items, text, self.recap);
+        let prompt = prompts::with_permissions(
+            prompts::chat(&task, &state.items, text, self.recap),
+            state.prefs.permission_mode,
+        );
         let policy = match task.phase {
             Phase::Discuss | Phase::Plan => Policy::Discuss,
             Phase::Build | Phase::Done => Policy::Guided,
