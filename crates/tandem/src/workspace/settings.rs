@@ -1,7 +1,7 @@
 //! The Settings view shown in place of the editor: Claude, help levels, language tools,
 //! and app and recovery information.
 use super::chat_logic::help_languages;
-use super::chat_view::help_level_menu;
+use super::chat_view::{help_level_menu, permission_menu};
 use super::panels::{code_note, note};
 use super::*;
 use crate::appearance::{
@@ -15,6 +15,7 @@ use gpui_kit::prelude::FluentBuilder;
 use tandem_claude::{Connection, HelperInstall, view};
 
 const USE_MY_SETUP_NOTE: &str = "On: Claude loads your Claude Code settings, CLAUDE.md files, MCP servers, skills and plugins, and this project's .claude folder, exactly as running claude in this folder would. Turn it off for projects you do not trust.";
+const PERMISSIONS_NOTE: &str = "Ask: Claude asks before a command Tandem does not allow by itself. Auto: Claude Code's safety check decides and asks only about risky actions. Bypass: nothing asks, and Claude may also edit project files outside a takeover. Outside a takeover there is no snapshot, so Undo cannot reverse what a command changed or, in Bypass, what Claude edited. Switching to or from Bypass reopens the Claude session and waits until Claude is idle.";
 const SUBSCRIPTION_NOTE: &str = "Tandem uses your Claude subscription through Claude Code. It never asks for or stores an API key.";
 const HELP_LEVEL_NOTE: &str = "Every level explains why. Beginner gives the full code and breaks down every part; Intermediate gives pseudocode and explains what is new; Expert gives a short description.";
 const LIMITS_NOTE: &str = "Local ad hoc macOS build. Not notarized; other Macs and Windows are untested. UTF-8 files ≤2 MiB; 32 open tabs. Buffer undo is per session.";
@@ -195,6 +196,7 @@ impl Workspace {
         let command = notice.as_ref().and_then(|notice| notice.command.clone());
         let use_my_setup = state.prefs.use_my_setup;
         let weak = cx.entity().downgrade();
+        let menu_weak = weak.clone();
         section
             .when_some(connected, |d, line| d.child(note(line)))
             .when_some(notice, |d, notice| {
@@ -253,6 +255,17 @@ impl Workspace {
                     }),
             )
             .child(panel_metadata(note(USE_MY_SETUP_NOTE), cx))
+            .child(
+                div()
+                    .id("settings-permissions-row")
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(div().flex_1().min_w_0().child("Permissions"))
+                    .child(permission_menu("settings-permissions", &state, &menu_weak)),
+            )
+            .child(panel_metadata(note(PERMISSIONS_NOTE), cx))
             .child(note(SUBSCRIPTION_NOTE))
             .into_any_element()
     }
