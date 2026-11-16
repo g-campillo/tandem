@@ -16,6 +16,7 @@ function spawnHelper(extraEnv = {}) {
   const env = { ...process.env, ...extraEnv };
   delete env.MOCK_ACCOUNT;
   delete env.MOCK_INIT_KEY;
+  delete env.MOCK_AUTO;
   const child = spawn(process.execPath, ['main.mjs', '--sdk=test/support/mock-sdk.mjs'], {
     cwd: HELPER_DIR,
     env,

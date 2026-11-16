@@ -8,9 +8,11 @@ import {
   EDIT_TOOLS,
   GUIDED_EDIT_MESSAGE,
   OUTSIDE_PROJECT_MESSAGE,
+  PERMISSION_MODES,
   decide,
   hookOutput,
   insideProject,
+  mayEdit,
 } from './policy.mjs';
 import { TANDEM_TOOL_NAMES, createTandemServer } from './tools.mjs';
 
@@ -91,6 +93,17 @@ function deny(message) {
   return { behavior: 'deny', message, decisionClassification: 'user_reject' };
 }
 
+/** The Claude Code permission mode that carries out Tandem's `mode` in a turn with `policy`. */
+function sdkMode(mode, policy) {
+  if (mode === 'bypass') {
+    return 'bypassPermissions';
+  }
+  if (mode === 'auto') {
+    return 'auto';
+  }
+  return policy === 'takeover' ? 'acceptEdits' : 'default';
+}
+
 export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
   const cwd = openFrame.cwd;
   const queue = createInputQueue();
@@ -111,6 +124,7 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
       return hookOutput(
         decide({
           policy: current?.policy ?? 'discuss',
+          mode: current?.mode ?? 'ask',
           tool: input.tool_name,
           input: input.tool_input ?? {},
           cwd,
@@ -123,8 +137,10 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
 
   function canUseTool(toolName, input, options = {}) {
     const args = input ?? {};
+    const policy = current?.policy ?? 'discuss';
+    const mode = current?.mode ?? 'ask';
     if (EDIT_TOOLS.has(toolName)) {
-      if ((current?.policy ?? 'discuss') !== 'takeover') {
+      if (!mayEdit(policy, mode)) {
         return Promise.resolve(deny(GUIDED_EDIT_MESSAGE));
       }
       const target = args.file_path ?? args.notebook_path;
@@ -137,6 +153,14 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
       ) {
         return Promise.resolve(deny(OUTSIDE_PROJECT_MESSAGE));
       }
+    }
+    if (mode === 'bypass') {
+      // Bypass never shows a card: whatever Claude Code still asks about is allowed.
+      return Promise.resolve({
+        behavior: 'allow',
+        updatedInput: args,
+        decisionClassification: 'user_temporary',
+      });
     }
     const answer = askHost({
       request: 'permission',
@@ -199,6 +223,10 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
       ...(openFrame.use_my_setup ? { skills: 'all' } : { strictMcpConfig: true }),
       ...(openFrame.model && openFrame.model !== 'default' ? { model: openFrame.model } : {}),
       ...(openFrame.effort ? { effort: openFrame.effort } : {}),
+      // Claude Code accepts setPermissionMode('bypassPermissions') only in a session launched
+      // for it, so only a bypass session gets the flag; ask and auto sessions start exactly
+      // as before.
+      ...(openFrame.permission_mode === 'bypass' ? { allowDangerouslySkipPermissions: true } : {}),
       // Claude Code exits with an error when given both, so exactly one is passed.
       ...(openFrame.resume ? { resume: openFrame.resume } : { sessionId: openFrame.session_id }),
       stderr: (text) => process.stderr.write(text),
@@ -380,6 +408,9 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
     if (!POLICIES.has(turn.policy)) {
       throw codedError('bad_request', `Unknown policy: ${String(turn.policy)}`);
     }
+    if (turn.permission_mode !== undefined && !PERMISSION_MODES.has(turn.permission_mode)) {
+      throw codedError('bad_request', `Unknown permission mode: ${String(turn.permission_mode)}`);
+    }
     if (typeof turn.text !== 'string' || turn.text === '') {
       throw codedError('bad_request', 'A turn needs a non-empty text.');
     }
@@ -397,19 +428,39 @@ export function createSession({ sdk, emit, askHost, open: openFrame, env }) {
     }
   }
 
-  async function runTurn({ id, text, policy, model, effort }) {
-    const turn = { id, policy, interrupting: false, queued: false };
+  /**
+   * Puts Claude Code in the turn's permission mode. A mode Claude Code refuses (auto is not
+   * available for the account or model, bypass is switched off or the session was not
+   * opened for it) falls back to ask for this turn, and Tandem is told.
+   */
+  async function applyMode(turn) {
+    const target = sdkMode(turn.mode, turn.policy);
+    if (turn.mode !== 'ask' && applied.mode !== target) {
+      try {
+        await q.setPermissionMode(target);
+        applied.mode = target;
+        return;
+      } catch (error) {
+        emit({ event: 'permission_mode_fallback', wanted: turn.mode, reason: messageOf(error) });
+        turn.mode = 'ask';
+      }
+    }
+    const mode = sdkMode(turn.mode, turn.policy);
+    await apply('the permission mode', 'mode', mode, () => q.setPermissionMode(mode));
+  }
+
+  async function runTurn({ id, text, policy, model, effort, permission_mode: wanted = 'ask' }) {
+    const turn = { id, policy, mode: wanted, interrupting: false, queued: false };
     current = turn;
     const wantedModel = model ?? 'default';
     const wantedEffort = effort ?? null;
-    const wantedMode = policy === 'takeover' ? 'acceptEdits' : 'default';
     await apply('the model', 'model', wantedModel, () =>
       q.setModel(wantedModel === 'default' ? undefined : wantedModel),
     );
     await apply('the effort level', 'effort', wantedEffort, () =>
       q.applyFlagSettings({ effortLevel: wantedEffort }),
     );
-    await apply('the permission mode', 'mode', wantedMode, () => q.setPermissionMode(wantedMode));
+    await applyMode(turn);
     if (current !== turn) {
       // The session ended while the settings were applied; the turn is already finished.
       return;

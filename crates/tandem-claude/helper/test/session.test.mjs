@@ -91,8 +91,8 @@ function start(env = {}) {
   }
 
   /** Starts a `hold` turn and waits until it has started. */
-  async function holdTurn(policy) {
-    const id = turn('hold', policy);
+  async function holdTurn(policy, extra = {}) {
+    const id = turn('hold', policy, extra);
     await waitFor(isEvent('turn_started', { turn: id }));
     return id;
   }
@@ -150,15 +150,6 @@ test('the SDK environment has no API key, auth token or provider switch', async 
   const { reply, query } = await h.open();
   assert.equal(reply.ok, true);
   assert.deepEqual(query.options.env, { PATH: '/usr/bin', HOME: '/home/user' });
-});
-
-test('the session never bypasses permissions', async () => {
-  const h = start();
-  const { query } = await h.open({ use_my_setup: true });
-  assert.equal(query.options.permissionMode, 'default');
-  const reachable = everything(query.options);
-  assert.ok(!reachable.includes('allowDangerouslySkipPermissions'));
-  assert.ok(!reachable.includes('bypassPermissions'));
 });
 
 test('the session options follow the open_session frame', async () => {
@@ -526,6 +517,375 @@ test('a setting that cannot be applied becomes a notice and the turn still runs'
   const notice = h.frames.find(isEvent('notice'));
   assert.equal(notice.text, 'Could not apply the model: unknown model');
   query.query.setModel = original;
+});
+
+// --- permission modes ------------------------------------------------------------------
+
+const POLICY_ORDER = ['discuss', 'guided', 'check', 'takeover'];
+const DISALLOWED_TOOLS = [
+  'AskUserQuestion',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'EnterWorktree',
+  'ExitWorktree',
+];
+
+function bashInput(command) {
+  return { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } };
+}
+
+function hookDecision(permissionDecision, permissionDecisionReason) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision,
+      ...(permissionDecisionReason ? { permissionDecisionReason } : {}),
+    },
+  };
+}
+
+/** Runs each `[policy, extra]` of `turns` in order, waiting until it completes. */
+async function finishTurns(h, turns) {
+  for (const [policy, extra] of turns) {
+    const id = h.turn('hello', policy, extra);
+    await h.waitFor(isEvent('turn_finished', { turn: id, status: 'completed' }));
+  }
+}
+
+test('a session opened in ask or auto cannot bypass permissions', async () => {
+  const today = await start().open({ use_my_setup: true });
+  for (const overrides of [{}, { permission_mode: 'ask' }, { permission_mode: 'auto' }]) {
+    const { query } = await start().open({ use_my_setup: true, ...overrides });
+    assert.equal(query.options.permissionMode, 'default');
+    const reachable = everything(query.options);
+    assert.ok(!reachable.includes('allowDangerouslySkipPermissions'));
+    assert.ok(!reachable.includes('bypassPermissions'));
+    assert.deepEqual(Object.keys(query.options), Object.keys(today.query.options));
+  }
+});
+
+test('a session opened in bypass may switch to bypassPermissions', async () => {
+  const { query } = await start().open({ permission_mode: 'bypass' });
+  assert.equal(query.options.allowDangerouslySkipPermissions, true);
+  assert.equal(query.options.permissionMode, 'default');
+});
+
+test('every mode keeps AskUserQuestion, plan mode and worktree tools switched off', async () => {
+  for (const mode of ['ask', 'auto', 'bypass']) {
+    const { query } = await start().open({ permission_mode: mode });
+    assert.deepEqual(query.options.disallowedTools, DISALLOWED_TOOLS);
+  }
+});
+
+test('an unknown permission mode is a bad request', async () => {
+  const refused = await start().open({ permission_mode: 'yolo' });
+  assert.equal(refused.reply.ok, false);
+  assert.equal(refused.reply.error.code, 'bad_request');
+
+  const h = start();
+  const { query } = await h.open();
+  const id = h.turn('hello', 'discuss', { permission_mode: 'yolo' });
+  const reply = await h.waitFor(isReply(id));
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error.code, 'bad_request');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(settingCalls(query), []);
+  assert.ok(!h.frames.some(isEvent('turn_started')));
+});
+
+test('each mode sets its Claude Code permission mode', async () => {
+  const everyPolicyIn = (mode) => POLICY_ORDER.map((policy) => [policy, { permission_mode: mode }]);
+
+  const ask = start();
+  const askSession = await ask.open({ permission_mode: 'ask' });
+  await finishTurns(ask, everyPolicyIn('ask'));
+  assert.deepEqual(settingCalls(askSession.query), [['setPermissionMode', 'acceptEdits']]);
+
+  const auto = start();
+  const autoSession = await auto.open({ permission_mode: 'ask' });
+  await finishTurns(auto, everyPolicyIn('auto'));
+  assert.deepEqual(settingCalls(autoSession.query), [['setPermissionMode', 'auto']]);
+
+  const bypass = start();
+  const bypassSession = await bypass.open({ permission_mode: 'bypass' });
+  await finishTurns(bypass, everyPolicyIn('bypass'));
+  assert.deepEqual(settingCalls(bypassSession.query), [
+    ['setPermissionMode', 'bypassPermissions'],
+  ]);
+
+  const mixed = start();
+  const mixedSession = await mixed.open();
+  await finishTurns(mixed, [
+    ['discuss', { permission_mode: 'auto' }],
+    ['takeover', { permission_mode: 'ask' }],
+    ['discuss', { permission_mode: 'ask' }],
+    ['guided', { permission_mode: 'auto' }],
+  ]);
+  assert.deepEqual(settingCalls(mixedSession.query), [
+    ['setPermissionMode', 'auto'],
+    ['setPermissionMode', 'acceptEdits'],
+    ['setPermissionMode', 'default'],
+    ['setPermissionMode', 'auto'],
+  ]);
+  for (const h of [ask, auto, bypass, mixed]) {
+    assert.ok(!h.frames.some(isEvent('permission_mode_fallback')));
+  }
+});
+
+test('auto that Claude Code refuses falls back to ask and tells Tandem', async () => {
+  const h = start({ MOCK_AUTO: 'unavailable' });
+  const { query } = await h.open();
+  const from = h.frames.length;
+  const id = await h.holdTurn('discuss', { permission_mode: 'auto' });
+  assert.deepEqual(h.frames.slice(from), [
+    { type: 'reply', id, ok: true, data: {} },
+    {
+      type: 'event',
+      event: 'permission_mode_fallback',
+      wanted: 'auto',
+      reason: 'Cannot set permission mode to auto: auto mode unavailable for this model',
+    },
+    { type: 'event', event: 'turn_started', turn: id },
+  ]);
+  assert.ok(!h.frames.some(isEvent('notice')));
+
+  const hook = hookOf(query);
+  assert.deepEqual(await hook(bashInput('cargo test'), 'toolu_1', {}), hookDecision('ask'));
+  const pending = query.options.canUseTool(
+    'Bash',
+    { command: 'npm install left-pad' },
+    { signal: signal() },
+  );
+  const request = await h.waitFor(isRequest('permission'), from);
+  assert.equal(request.command, 'npm install left-pad');
+  h.send({ type: 'response', id: request.id, allow: false });
+  assert.equal((await pending).behavior, 'deny');
+  await h.interruptTurn(id);
+});
+
+test('bypass in a session that was not opened for it falls back to ask', async () => {
+  const h = start();
+  const { query } = await h.open();
+  const from = h.frames.length;
+  const id = await h.holdTurn('guided', { permission_mode: 'bypass' });
+  const fallback = h.frames.slice(from).find(isEvent('permission_mode_fallback'));
+  assert.equal(fallback.wanted, 'bypass');
+  assert.match(fallback.reason, /not launched with --dangerously-skip-permissions/);
+
+  const hook = hookOf(query);
+  assert.deepEqual(
+    await hook(writeInput('a.txt'), 'toolu_1', {}),
+    hookDecision('deny', GUIDED_EDIT_MESSAGE),
+  );
+  const pending = query.options.canUseTool(
+    'Bash',
+    { command: 'npm install left-pad' },
+    { signal: signal() },
+  );
+  const request = await h.waitFor(isRequest('permission'), from);
+  assert.equal(request.tool, 'Bash');
+  h.send({ type: 'response', id: request.id, allow: false });
+  assert.equal((await pending).behavior, 'deny');
+  await h.interruptTurn(id);
+});
+
+/** Every call of the end-to-end matrix, as the SDK would make it. */
+function matrixCalls() {
+  const inside = path.join(project, 'a.txt');
+  const outsideFile = path.join(outside, 'a.txt');
+  return [
+    { name: 'hook: Bash git status', via: 'hook', tool: 'Bash', input: { command: 'git status' } },
+    { name: 'hook: Bash cargo test', via: 'hook', tool: 'Bash', input: { command: 'cargo test' } },
+    {
+      name: 'hook: Bash npm install',
+      via: 'hook',
+      tool: 'Bash',
+      input: { command: 'npm install left-pad' },
+    },
+    { name: 'hook: Write inside', via: 'hook', tool: 'Write', input: { file_path: inside } },
+    { name: 'hook: Write outside', via: 'hook', tool: 'Write', input: { file_path: outsideFile } },
+    {
+      name: 'canUseTool: Write inside',
+      via: 'canUseTool',
+      tool: 'Write',
+      input: { file_path: inside },
+    },
+    {
+      name: 'canUseTool: Write outside',
+      via: 'canUseTool',
+      tool: 'Write',
+      input: { file_path: outsideFile },
+    },
+    {
+      name: 'canUseTool: Edit with a blocked path outside',
+      via: 'canUseTool',
+      tool: 'Edit',
+      input: { file_path: inside },
+      blockedPath: path.join(outside, 'b.txt'),
+    },
+    {
+      name: 'canUseTool: Bash npm install',
+      via: 'canUseTool',
+      tool: 'Bash',
+      input: { command: 'npm install left-pad' },
+    },
+    {
+      name: 'canUseTool: mcp__brain__search',
+      via: 'canUseTool',
+      tool: 'mcp__brain__search',
+      input: { query: 'x' },
+    },
+  ];
+}
+
+/** The hook result for an outcome of the header's hook table. */
+function expectedHook(outcome) {
+  switch (outcome) {
+    case 'pass':
+      return {};
+    case 'guided':
+      return hookDecision('deny', GUIDED_EDIT_MESSAGE);
+    case 'outside':
+      return hookDecision('deny', OUTSIDE_PROJECT_MESSAGE);
+    default:
+      return hookDecision(outcome);
+  }
+}
+
+/** The canUseTool result for an outcome; a card is answered with deny. */
+function expectedCanUseTool(outcome, input) {
+  switch (outcome) {
+    case 'allow':
+      return { behavior: 'allow', updatedInput: input, decisionClassification: 'user_temporary' };
+    case 'guided':
+      return refusal(GUIDED_EDIT_MESSAGE);
+    case 'outside':
+      return refusal(OUTSIDE_PROJECT_MESSAGE);
+    default:
+      return refusal('The user declined this in Tandem.');
+  }
+}
+
+function refusal(message) {
+  return { behavior: 'deny', message, decisionClassification: 'user_reject' };
+}
+
+/**
+ * Opens a session in `mode` and, in a held turn of each policy, makes every matrix call and
+ * compares its result with `expected[name][policy index]`. Returns the harness.
+ */
+async function checkMatrix(mode, expected) {
+  const h = start();
+  const { query } = await h.open({ permission_mode: mode });
+  const hook = hookOf(query);
+  for (const [index, policy] of POLICY_ORDER.entries()) {
+    const id = await h.holdTurn(policy, { permission_mode: mode });
+    for (const call of matrixCalls()) {
+      const outcome = expected[call.name][index];
+      const label = `${mode}, ${policy}, ${call.name}`;
+      if (call.via === 'hook') {
+        const input = {
+          hook_event_name: 'PreToolUse',
+          tool_name: call.tool,
+          tool_input: call.input,
+        };
+        assert.deepEqual(await hook(input, 'toolu_1', {}), expectedHook(outcome), label);
+        continue;
+      }
+      const from = h.frames.length;
+      const pending = query.options.canUseTool(call.tool, call.input, {
+        signal: signal(),
+        ...(call.blockedPath ? { blockedPath: call.blockedPath } : {}),
+      });
+      // A card is written as soon as canUseTool is called.
+      const card = h.frames.slice(from).find(isRequest('permission'));
+      if (outcome === 'card') {
+        assert.ok(card, `${label}: no permission request`);
+        assert.equal(card.tool, call.tool, label);
+        h.send({ type: 'response', id: card.id, allow: false });
+      } else {
+        assert.equal(card, undefined, `${label}: unexpected permission request`);
+      }
+      assert.deepEqual(await pending, expectedCanUseTool(outcome, call.input), label);
+    }
+    await h.interruptTurn(id);
+  }
+  assert.ok(!h.frames.some(isEvent('permission_mode_fallback')));
+  return h;
+}
+
+function four(outcome) {
+  return [outcome, outcome, outcome, outcome];
+}
+
+/** The same outcome in discuss, guided and check, and another in takeover. */
+function untilTakeover(outcome, takeover) {
+  return [outcome, outcome, outcome, takeover];
+}
+
+test('ask: cards and refusals are as before in every policy', async () => {
+  await checkMatrix('ask', {
+    'hook: Bash git status': four('allow'),
+    'hook: Bash cargo test': ['ask', 'ask', 'allow', 'allow'],
+    'hook: Bash npm install': untilTakeover('ask', 'pass'),
+    'hook: Write inside': untilTakeover('guided', 'pass'),
+    'hook: Write outside': untilTakeover('guided', 'outside'),
+    'canUseTool: Write inside': untilTakeover('guided', 'card'),
+    'canUseTool: Write outside': untilTakeover('guided', 'outside'),
+    'canUseTool: Edit with a blocked path outside': untilTakeover('guided', 'outside'),
+    'canUseTool: Bash npm install': four('card'),
+    'canUseTool: mcp__brain__search': four('card'),
+  });
+});
+
+test('auto: Tandem adds no card of its own', async () => {
+  await checkMatrix('auto', {
+    'hook: Bash git status': four('allow'),
+    'hook: Bash cargo test': four('allow'),
+    'hook: Bash npm install': four('pass'),
+    'hook: Write inside': untilTakeover('guided', 'pass'),
+    'hook: Write outside': untilTakeover('guided', 'outside'),
+    'canUseTool: Write inside': untilTakeover('guided', 'card'),
+    'canUseTool: Write outside': untilTakeover('guided', 'outside'),
+    'canUseTool: Edit with a blocked path outside': untilTakeover('guided', 'outside'),
+    'canUseTool: Bash npm install': four('card'),
+    'canUseTool: mcp__brain__search': four('card'),
+  });
+});
+
+test('bypass: nothing reaches Tandem as a permission request in any policy', async () => {
+  const h = await checkMatrix('bypass', {
+    'hook: Bash git status': four('allow'),
+    'hook: Bash cargo test': four('allow'),
+    'hook: Bash npm install': four('pass'),
+    'hook: Write inside': four('pass'),
+    'hook: Write outside': four('outside'),
+    'canUseTool: Write inside': four('allow'),
+    'canUseTool: Write outside': four('outside'),
+    'canUseTool: Edit with a blocked path outside': four('outside'),
+    'canUseTool: Bash npm install': four('allow'),
+    'canUseTool: mcp__brain__search': four('allow'),
+  });
+  assert.deepEqual(h.frames.filter(isRequest('permission')), []);
+});
+
+test('outside a turn the hook and canUseTool use ask, also in a bypass session', async () => {
+  const h = start();
+  const { query } = await h.open({ permission_mode: 'bypass' });
+  const hook = hookOf(query);
+  assert.deepEqual(
+    await hook(writeInput('a.txt'), 'toolu_1', {}),
+    hookDecision('deny', GUIDED_EDIT_MESSAGE),
+  );
+  const pending = query.options.canUseTool(
+    'Bash',
+    { command: 'npm install left-pad' },
+    { signal: signal() },
+  );
+  const request = await h.waitFor(isRequest('permission'));
+  assert.equal(request.tool, 'Bash');
+  h.send({ type: 'response', id: request.id, allow: false });
+  assert.equal((await pending).behavior, 'deny');
 });
 
 // --- events ----------------------------------------------------------------------------
