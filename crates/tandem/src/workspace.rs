@@ -4,6 +4,7 @@ mod chat_view;
 mod code_view;
 pub mod commands;
 mod hover;
+mod look;
 mod pane_logic;
 mod panels;
 mod panes;
@@ -13,6 +14,7 @@ mod tools;
 mod view;
 use chat::ChatUi;
 use chat_logic::{BottomTab, line_count_label, next_bottom};
+use look::LookUi;
 use panes::PaneUi;
 pub use panes::SwapPanes;
 use settings::SettingsUi;
@@ -189,6 +191,7 @@ pub struct Workspace {
     show_recent: bool,
     font_size: f32,
     panes: PaneUi,
+    look: LookUi,
     generation: u64,
     checkpointed: u64,
     checkpoint_inflight: bool,
@@ -248,6 +251,7 @@ impl Workspace {
             )
         };
         let panes = PaneUi::load(&store.lock().unwrap());
+        let look = LookUi::load(&store.lock().unwrap());
         let mut view = Self {
             chat: ChatUi::new(window, cx),
             settings: SettingsUi::default(),
@@ -270,6 +274,7 @@ impl Workspace {
             show_recent: false,
             font_size: 14.0,
             panes,
+            look,
             generation: sequence,
             checkpointed: sequence,
             checkpoint_inflight: false,
@@ -289,6 +294,7 @@ impl Workspace {
             close_pending: false,
             hover: cx.new(hover::HoverTip::new),
         };
+        view.apply_window_look(window);
         let weak = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
@@ -300,6 +306,7 @@ impl Workspace {
                             view.development_tick(window, cx);
                             view.chat_tick(window, cx);
                             view.pane_tick(cx);
+                            view.persist_look(cx);
                             let rescan = view.disk_events.swap(false, Ordering::Relaxed)
                                 || view.last_index.elapsed() > Duration::from_secs(30);
                             if !view.loading
@@ -401,6 +408,7 @@ impl Workspace {
             return false;
         }
         self.persist_layout(cx);
+        self.persist_look(cx);
         match self.flush(cx) {
             Ok(()) => true,
             Err(error) => {

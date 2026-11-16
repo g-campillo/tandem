@@ -1,4 +1,5 @@
 mod appearance;
+mod native_window;
 mod workspace;
 
 use anyhow::{Context as _, Result};
@@ -143,8 +144,8 @@ fn main() -> Result<()> {
             .detach();
             let handle = gpui_kit::open_window(
                 WindowOptions {
-                    #[cfg(target_os = "macos")]
-                    window_background: WindowBackgroundAppearance::Blurred,
+                    // The workspace sets the blur behind this transparent window.
+                    window_background: WindowBackgroundAppearance::Transparent,
                     window_min_size: Some(size(px(900.0), px(600.0))),
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                         None,

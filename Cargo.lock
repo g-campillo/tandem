@@ -6354,8 +6354,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "libc",
  "lsp-types",
  "notify",
+ "objc2 0.6.5",
+ "raw-window-handle",
  "serde_json",
  "smol",
  "tandem-claude",
