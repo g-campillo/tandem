@@ -321,7 +321,7 @@ pub fn locate(text: &str, location: &EditLocation) -> Option<LocatedLines> {
     let span = location.last_line() - location.line;
     Some(LocatedLines {
         first,
-        last: (first + span).min(lines.len()),
+        last: first.saturating_add(span).min(lines.len()),
         moved: first != location.line,
         matches: matching.len(),
     })
@@ -420,7 +420,7 @@ impl Guidance {
             found.matches
         );
         ensure!(
-            found.first + span <= count,
+            span <= count - found.first,
             "location.end_line is past the end of {path}, which has {count} lines."
         );
         located.line = found.first;
@@ -1193,6 +1193,8 @@ mod tests {
         assert_eq!(locate(CLI, &remove), lines(5, 7, true, 1));
         let clamped = location(EditAction::Remove, 6, Some(9), "pub name: String,");
         assert_eq!(locate(CLI, &clamped), lines(6, 7, false, 1));
+        let huge = location(EditAction::Update, 2, Some(usize::MAX), "pub struct Args {");
+        assert_eq!(locate(CLI, &huge), lines(4, 7, true, 1));
     }
 
     #[test]
@@ -1307,6 +1309,14 @@ mod tests {
 
         let error = refused(
             location(EditAction::Update, 6, Some(9), "pub name: String,"),
+            CLI,
+        );
+        assert!(
+            error.contains("past the end of src/cli.rs, which has 7 lines"),
+            "{error}"
+        );
+        let error = refused(
+            location(EditAction::Update, 2, Some(usize::MAX), "pub struct Args {"),
             CLI,
         );
         assert!(
