@@ -1,10 +1,22 @@
 //! Editor and workbench commands in the style of VS Code: their actions, shortcuts, menu entries and handlers.
+mod editing;
 mod palette;
 
 use super::*;
 use gpui_kit::component::command::CommandState;
+use tandem_core::edit::comment::LineComment;
 
-actions!(tandem, [ShowCommandPalette, ShowKeyboardShortcuts]);
+actions!(
+    tandem,
+    [
+        ShowCommandPalette,
+        ShowKeyboardShortcuts,
+        ToggleLineComment,
+        ToggleBlockComment,
+        AddLineComment,
+        RemoveLineComment
+    ]
+);
 
 /// The key context of a code editor that has focus.
 const EDITOR_CONTEXT: &str = "Input && mode == editor";
@@ -170,6 +182,23 @@ fn edit() -> Vec<CommandSpec> {
         spec::<ReplaceInFile>("Replace in File", Edit, "⌥⌘F", &[], Global).existing(),
         spec::<Indent>("Indent Line", Edit, "⌘]", &[], Editor).separated(),
         spec::<Outdent>("Outdent Line", Edit, "⌘[", &[], Editor),
+        spec::<ToggleLineComment>("Toggle Line Comment", Edit, "⌘/", &["cmd-/"], Editor)
+            .separated(),
+        spec::<ToggleBlockComment>(
+            "Toggle Block Comment",
+            Edit,
+            "⇧⌥A",
+            &["shift-alt-a"],
+            Editor,
+        ),
+        spec::<AddLineComment>("Add Line Comment", Edit, "⌘K ⌘C", &["cmd-k cmd-c"], Editor),
+        spec::<RemoveLineComment>(
+            "Remove Line Comment",
+            Edit,
+            "⌘K ⌘U",
+            &["cmd-k cmd-u"],
+            Editor,
+        ),
     ]
 }
 
@@ -321,6 +350,16 @@ pub fn extend_menus(mut menus: Vec<Menu>) -> Vec<Menu> {
 pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace>) {
     route::<ShowCommandPalette>(cx, window, &view, |v, w, c| v.open_palette(w, c));
     route::<ShowKeyboardShortcuts>(cx, window, &view, |v, w, c| v.open_palette(w, c));
+    route::<ToggleLineComment>(cx, window, &view, |v, w, c| {
+        v.comment_lines(LineComment::Toggle, w, c)
+    });
+    route::<AddLineComment>(cx, window, &view, |v, w, c| {
+        v.comment_lines(LineComment::Add, w, c)
+    });
+    route::<RemoveLineComment>(cx, window, &view, |v, w, c| {
+        v.comment_lines(LineComment::Remove, w, c)
+    });
+    route::<ToggleBlockComment>(cx, window, &view, |v, w, c| v.toggle_block_comment(w, c));
 }
 
 /// The pattern of `install_actions`: dispatch runs while GPUI has borrowed the window, so
@@ -529,6 +568,29 @@ mod tests {
             .unwrap();
         assert!(palette > 0);
         assert!(matches!(view.items[palette - 1], MenuItem::Separator));
+    }
+
+    #[test]
+    fn comment_commands_are_a_separate_group_in_edit() {
+        let menus = extend_menus(vec![Menu::new("Edit")]);
+        let edit = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Edit")
+            .unwrap();
+        let position = |title: &str| {
+            edit.items
+                .iter()
+                .position(
+                    |item| matches!(item, MenuItem::Action { name, .. } if name.as_ref() == title),
+                )
+                .unwrap_or_else(|| panic!("{title} is not in Edit"))
+        };
+        let toggle = position("Toggle Line Comment");
+        assert!(toggle > 0);
+        assert!(matches!(edit.items[toggle - 1], MenuItem::Separator));
+        assert_eq!(position("Toggle Block Comment"), toggle + 1);
+        assert_eq!(position("Add Line Comment"), toggle + 2);
+        assert_eq!(position("Remove Line Comment"), toggle + 3);
     }
 
     #[test]
