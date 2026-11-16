@@ -1,5 +1,7 @@
-//! The Settings view shown in place of the editor: Claude, language tools, and app and
-//! recovery information.
+//! The Settings view shown in place of the editor: Claude, help levels, language tools,
+//! and app and recovery information.
+use super::chat_logic::help_languages;
+use super::chat_view::help_level_menu;
 use super::panels::{code_note, note};
 use super::*;
 use crate::appearance::{
@@ -14,6 +16,7 @@ use tandem_claude::{Connection, HelperInstall, view};
 
 const USE_MY_SETUP_NOTE: &str = "On: Claude loads your Claude Code settings, CLAUDE.md files, MCP servers, skills and plugins, and this project's .claude folder, exactly as running claude in this folder would. Turn it off for projects you do not trust.";
 const SUBSCRIPTION_NOTE: &str = "Tandem uses your Claude subscription through Claude Code. It never asks for or stores an API key.";
+const HELP_LEVEL_NOTE: &str = "Every level explains why. Beginner gives the full code and breaks down every part; Intermediate gives pseudocode and explains what is new; Expert gives a short description.";
 const LIMITS_NOTE: &str = "Local ad hoc macOS build. Not notarized; other Macs and Windows are untested. UTF-8 files ≤2 MiB; 32 open tabs. Buffer undo is per session.";
 
 #[derive(Default)]
@@ -153,6 +156,7 @@ impl Workspace {
                             ),
                     )
                     .child(self.claude_settings(cx))
+                    .child(self.help_level_settings(cx))
                     .child(self.language_settings(cx))
                     .child(self.app_settings(cx)),
             )
@@ -240,6 +244,51 @@ impl Workspace {
             )
             .child(panel_metadata(note(USE_MY_SETUP_NOTE), cx))
             .child(note(SUBSCRIPTION_NOTE))
+            .into_any_element()
+    }
+
+    /// One row per language with its help level: the common languages, then any other
+    /// language that has a saved level.
+    fn help_level_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let section = panel_body(cx)
+            .mt_3()
+            .pt_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(panel_heading(note("Help level per language")));
+        let Some(state) = self.chat_state() else {
+            return section
+                .child(note(
+                    "Open a folder to choose a help level for each language.",
+                ))
+                .child(panel_metadata(note(HELP_LEVEL_NOTE), cx))
+                .into_any_element();
+        };
+        let weak = cx.entity().downgrade();
+        let rows = help_languages(state.prefs.help_levels.keys().map(String::as_str))
+            .into_iter()
+            .enumerate()
+            .map(|(index, (language, label))| {
+                let level = view::level_for(&state, &language);
+                div()
+                    .id(("settings-help-level-row", index))
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(div().flex_1().min_w_0().child(label))
+                    .child(help_level_menu(
+                        ("settings-help-level", index),
+                        format!("{} ▾", level.label()),
+                        language,
+                        level,
+                        true,
+                        &weak,
+                    ))
+            });
+        section
+            .children(rows)
+            .child(panel_metadata(note(HELP_LEVEL_NOTE), cx))
             .into_any_element()
     }
 

@@ -1,4 +1,5 @@
 //! The chat panel's state in the workspace and its link to the companion controller.
+use super::chat_logic::anchor_line;
 use super::*;
 use gpui_kit::component::input::TextareaState;
 use tandem_claude::view::{self, ComposerMode};
@@ -164,6 +165,46 @@ impl Workspace {
         cx.notify();
     }
 
+    /// "Open file" on the step card: opens the step's file (a new buffer when it does not
+    /// exist yet) with the cursor on the guidance's anchor line when one is found.
+    pub(super) fn open_step_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.chat_state().as_deref().and_then(view::step_card) else {
+            return;
+        };
+        let Some(project) = &self.project else {
+            return;
+        };
+        let guidance = card.guidance.as_ref();
+        let path = guidance
+            .and_then(|guidance| guidance.path.clone())
+            .unwrap_or(card.target);
+        let disk = project.root.join(&path);
+        let new = !disk.exists();
+        let line = guidance
+            .and_then(|guidance| guidance.anchor.as_deref())
+            .and_then(|anchor| {
+                let open = self.tabs.iter().find(|tab| tab.document.path == path);
+                match open {
+                    Some(tab) => anchor_line(&tab.editor.read(cx).text().to_string(), anchor),
+                    None => small_file_text(&disk).and_then(|text| anchor_line(&text, anchor)),
+                }
+            });
+        self.settings.open = false;
+        self.open_file(path, new, line, window, cx);
+    }
+
+    /// "Open Terminal" on the step card: shows the bottom panel on the Terminal tab,
+    /// starting the terminal when none runs.
+    pub(super) fn show_terminal(&mut self, cx: &mut Context<Self>) {
+        if self.bottom == Some(BottomTab::Terminal) {
+            if self.terminal.is_some() {
+                return;
+            }
+            self.bottom = None;
+        }
+        self.toggle_terminal(cx);
+    }
+
     pub(super) fn focus_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chat.visible = true;
         self.chat
@@ -171,4 +212,13 @@ impl Workspace {
             .update(cx, |composer, cx| composer.focus(window, cx));
         cx.notify();
     }
+}
+
+/// The text of a file on disk when it is at most `MAX_FILE_BYTES`, otherwise `None`.
+fn small_file_text(path: &std::path::Path) -> Option<String> {
+    let size = std::fs::metadata(path).ok()?.len();
+    if size > MAX_FILE_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }

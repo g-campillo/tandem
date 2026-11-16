@@ -1,8 +1,12 @@
 //! Offline seed for checking the chat panel by hand. It writes a small project and a state
-//! folder with one task in Plan, and starts no helper and uses no Claude subscription.
+//! folder with two tasks: one in Plan, and one in a guided Build with stored guidance for
+//! its first step (selected). It starts no helper and uses no Claude subscription.
 use anyhow::{Result, ensure};
 use std::{fs, path::PathBuf};
-use tandem_core::chat::{ActivityKind, ItemKind, Phase, Plan, PlanStep, StepKind};
+use tandem_core::chat::{
+    ActivityKind, BreakdownItem, Guidance, HelpLevel, ItemKind, Mode, Phase, Plan, PlanStep,
+    StepKind,
+};
 use tandem_core::{Project, Store, new_id};
 
 const CARGO_TOML: &str = "[package]\nname = \"seed-cli\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nclap = { version = \"4\", features = [\"derive\"] }\n";
@@ -15,6 +19,43 @@ fn step(kind: StepKind, target: &str, summary: &str) -> PlanStep {
         target: target.into(),
         summary: summary.into(),
         language: "rust".into(),
+    }
+}
+
+fn part(part: &str, explanation: &str) -> BreakdownItem {
+    BreakdownItem {
+        part: part.into(),
+        explanation: explanation.into(),
+    }
+}
+
+/// Beginner guidance for the first step: add the `json` field to `Args` in src/cli.rs.
+fn first_step_guidance() -> Guidance {
+    Guidance {
+        step: 0,
+        level: HelpLevel::Beginner,
+        summary: "Add a `json` flag field to the Args struct.".into(),
+        why: "clap turns each field of the struct into a command-line flag, so a bool field named json becomes --json.".into(),
+        code: Some("    #[arg(long)]\n    json: bool,".into()),
+        pseudocode: None,
+        command: None,
+        breakdown: vec![
+            part(
+                "#[arg(long)]",
+                "An attribute that tells clap to accept this field as a long flag, written --json.",
+            ),
+            part("json", "The field's name. clap uses it as the flag's name."),
+            part(
+                "bool",
+                "The field's type: false unless --json is given, then true.",
+            ),
+            part(
+                ",",
+                "Ends the field. Rust allows a comma after the last field of a struct too.",
+            ),
+        ],
+        path: Some("src/cli.rs".into()),
+        anchor: Some("pub struct Args {".into()),
     }
 }
 
@@ -75,12 +116,32 @@ fn main() -> Result<()> {
         ItemKind::User {
             text: "No, only results.".into(),
         },
-        ItemKind::Plan { plan },
+        ItemKind::Plan { plan: plan.clone() },
         ItemKind::Assistant {
             text: "Here is the plan. Review it and pick how you want to build it.".into(),
         },
     ] {
         store.append_chat_item(&task.id, &kind)?;
+    }
+
+    // Created last, so it is the selected task when Tandem opens the project.
+    let mut build = store.create_chat_task(project.key())?;
+    build.title = "Add a --json flag to the CLI (guided)".into();
+    build.phase = Phase::Build;
+    build.mode = Mode::Guided;
+    build.current_step = 0;
+    build.plan = Some(plan.clone());
+    store.save_chat_task(&build)?;
+    let guidance = first_step_guidance();
+    guidance.check(&plan.steps[0])?;
+    store.save_chat_guidance(&build.id, &guidance)?;
+    for kind in [
+        ItemKind::Plan { plan },
+        ItemKind::Notice {
+            text: "You are building this. Claude guides each step.".into(),
+        },
+    ] {
+        store.append_chat_item(&build.id, &kind)?;
     }
 
     println!("project={}", project_path.display());

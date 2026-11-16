@@ -1,8 +1,11 @@
-//! The chat panel on the right: header, connection notice, transcript and composer.
+//! The chat panel on the right: header, connection notice, transcript, the card of the
+//! step being built, and composer.
+use super::chat_logic::{check_title, finding_label};
 use super::panels::code_note;
 use super::*;
 use crate::appearance::{
-    Palette, compact_button, palette, panel_error, solid_section, wrapping_button,
+    Palette, compact_button, palette, panel_code, panel_error, path_button, solid_section,
+    wrapping_button,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Textarea;
@@ -10,9 +13,13 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
-use tandem_claude::ChatState;
-use tandem_claude::view::{self, ComposerMode, ConnectionNotice, TrailState};
-use tandem_core::chat::{ChatItem, DEFAULT_MODEL, ItemKind, Phase, Plan};
+use tandem_claude::prompts::kind_label;
+use tandem_claude::view::{self, ComposerMode, ConnectionNotice, StepCard, TrailState};
+use tandem_claude::{ChatState, Connection};
+use tandem_core::chat::{
+    ChatItem, CheckResult, DEFAULT_MODEL, Finding, Guidance, HelpLevel, ItemKind, Phase, Plan,
+    StepKind,
+};
 
 const NO_PROJECT: &str = "Open a folder to start a task with Claude.";
 
@@ -34,6 +41,70 @@ fn on_command(
     move |_, _, cx| {
         let _ = weak.update(cx, |view, _| view.chat_command(command.clone()));
     }
+}
+
+/// A button that puts `text` on the clipboard.
+fn copy_button(id: impl Into<ElementId>, text: String) -> Button {
+    compact_button(Button::new(id), "Copy")
+        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
+}
+
+/// Code shown exactly as given, one line per line, scrolling sideways when it is wide.
+fn code_block(id: impl Into<ElementId>, text: String, cx: &App) -> Stateful<Div> {
+    panel_code(div().id(id), cx)
+        .p_2()
+        .rounded(px(6.))
+        .h_flex()
+        .overflow_x_scroll()
+        .child(
+            div()
+                .flex_none()
+                .w_auto()
+                .min_w_full()
+                .whitespace_nowrap()
+                .child(text),
+        )
+}
+
+/// The text of an optional guidance field, when it has any.
+fn filled(text: &Option<String>) -> Option<String> {
+    text.clone().filter(|text| !text.trim().is_empty())
+}
+
+/// A button labelled `label` whose menu sets the help level for `language`. Disabled, it
+/// shows the label without a menu.
+pub(super) fn help_level_menu(
+    id: impl Into<ElementId>,
+    label: String,
+    language: String,
+    level: HelpLevel,
+    enabled: bool,
+    weak: &WeakEntity<Workspace>,
+) -> AnyElement {
+    let button = compact_button(Button::new(id), label)
+        .ghost()
+        .accessibility_label(format!("Help level for {language}: {}", level.label()));
+    if !enabled {
+        return button.disabled(true).into_any_element();
+    }
+    let weak = weak.clone();
+    button
+        .dropdown_menu(move |menu, _, _| {
+            HelpLevel::ALL.iter().fold(menu, |menu, choice| {
+                menu.item(
+                    PopupMenuItem::new(choice.label())
+                        .checked(*choice == level)
+                        .on_click(on_command(
+                            &weak,
+                            Command::SetHelpLevel {
+                                language: language.clone(),
+                                level: *choice,
+                            },
+                        )),
+                )
+            })
+        })
+        .into_any_element()
 }
 
 /// "You" or "Claude" above a message.
@@ -98,6 +169,7 @@ impl Workspace {
         match state {
             Some(state) => panel
                 .child(self.chat_body(&state, cx))
+                .children(self.build_card(&state, cx))
                 .child(self.chat_composer(&state, cx)),
             None => panel.child(
                 div()
@@ -360,7 +432,7 @@ impl Workspace {
                     });
                 row.child(card)
             }
-            ItemKind::Check { .. } => muted(row, "Check result".into()),
+            ItemKind::Check { result } => row.child(self.check_card(id, result, cx)),
             ItemKind::Changes { .. } => muted(row, "Changed files".into()),
         }
         .into_any_element()
@@ -410,6 +482,351 @@ impl Workspace {
                     ),
                 )
             })
+            .into_any_element()
+    }
+
+    /// Claude's verdict from "Check my work" or the final check, with each finding.
+    fn check_card(
+        &self,
+        item_id: usize,
+        result: &CheckResult,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx.theme().mode);
+        let (colour, surface) = if result.passed {
+            (p.success, p.success_surface)
+        } else {
+            (p.warning, p.warning_surface)
+        };
+        let findings: Vec<AnyElement> = result
+            .findings
+            .iter()
+            .enumerate()
+            .map(|(index, finding)| self.finding_row(item_id, index, finding, cx))
+            .collect();
+        solid_section(div(), cx)
+            .v_flex()
+            .min_w_0()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .border_color(colour)
+            .bg(surface)
+            .child(
+                div()
+                    .min_w_0()
+                    .font_semibold()
+                    .text_color(colour)
+                    .child(check_title(result)),
+            )
+            .when(!result.explanation.trim().is_empty(), |d| {
+                d.child(
+                    TextView::markdown(
+                        ("chat-check-text", item_id),
+                        view::display_markdown(&result.explanation),
+                    )
+                    .selectable(true),
+                )
+            })
+            .children(findings)
+            .into_any_element()
+    }
+
+    /// One finding of a check; a finding with a path opens that file at its line.
+    fn finding_row(
+        &self,
+        item_id: usize,
+        index: usize,
+        finding: &Finding,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx.theme().mode);
+        let label = finding_label(finding);
+        let head = match finding.path.clone() {
+            Some(path) => {
+                let line = finding.line.map(|line| line as usize);
+                path_button(
+                    Button::new(SharedString::from(format!(
+                        "chat-finding-{item_id}-{index}"
+                    ))),
+                    label,
+                )
+                .ghost()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.settings.open = false;
+                    this.open_file(path.clone(), false, line, window, cx)
+                }))
+                .into_any_element()
+            }
+            None => div().min_w_0().child(label).into_any_element(),
+        };
+        div()
+            .v_flex()
+            .min_w_0()
+            .gap_1()
+            .child(head)
+            .child(
+                div()
+                    .min_w_0()
+                    .pl_2()
+                    .text_size(px(12.))
+                    .child(format!("Why: {}", finding.why)),
+            )
+            .when_some(filled(&finding.hint), |d, hint| {
+                d.child(
+                    div()
+                        .min_w_0()
+                        .pl_2()
+                        .text_size(px(12.))
+                        .text_color(p.secondary_foreground)
+                        .child(format!("Hint: {hint}")),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The card pinned above the composer during Build: the open step, or the final check
+    /// once every step is finished.
+    fn build_card(&self, state: &ChatState, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let card = match view::step_card(state) {
+            Some(card) => self.step_card(card, cx),
+            None if view::final_card(state) => {
+                let can_act =
+                    matches!(state.connection, Connection::Ready { .. }) && state.turn.is_none();
+                self.final_card(can_act, cx)
+            }
+            None => return None,
+        };
+        let p = palette(cx.theme().mode);
+        Some(
+            div()
+                .v_flex()
+                .flex_shrink_0()
+                .min_w_0()
+                .min_h_0()
+                .max_h(relative(0.45))
+                .p_2()
+                .bg(p.surface)
+                .border_t_1()
+                .border_color(p.border)
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    fn step_card(&self, card: StepCard, cx: &mut Context<Self>) -> AnyElement {
+        let index = card.index;
+        let can_act = card.can_act;
+        let weak = cx.entity().downgrade();
+        let title = format!(
+            "Step {} of {} · {} {}",
+            index + 1,
+            card.total,
+            kind_label(card.kind),
+            card.target
+        );
+        let body = match &card.guidance {
+            Some(guidance) => self.guidance_view(index, guidance, cx),
+            None => self.unguided_view(&card, cx),
+        };
+        solid_section(div().id(("chat-step-card", index)), cx)
+            .v_flex()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .child(
+                div()
+                    .h_flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(div().flex_1().min_w_0().font_semibold().child(title))
+                    .child(help_level_menu(
+                        ("chat-step-help", index),
+                        format!("Help: {} ▾", card.level.label()),
+                        card.language.clone(),
+                        card.level,
+                        can_act,
+                        &weak,
+                    )),
+            )
+            .child(body)
+            .child(
+                div()
+                    .h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .when(card.kind != StepKind::RunCommand, |d| {
+                        d.child(
+                            compact_button(Button::new(("chat-step-open", index)), "Open file")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_step_file(window, cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        compact_button(Button::new(("chat-step-check", index)), "Check my work")
+                            .primary()
+                            .disabled(!can_act)
+                            .on_click(
+                                cx.listener(|this, _, _, _| {
+                                    this.chat_command(Command::CheckMyWork)
+                                }),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The step's guidance: summary, why, then code, pseudocode or the command, and the
+    /// breakdown of its parts.
+    fn guidance_view(&self, index: usize, guidance: &Guidance, cx: &mut Context<Self>) -> Div {
+        let p = palette(cx.theme().mode);
+        let breakdown = guidance.breakdown.iter().map(|item| {
+            div()
+                .h_flex()
+                .items_start()
+                .gap_2()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(relative(0.4))
+                        .px_1()
+                        .rounded(px(4.))
+                        .bg(p.content)
+                        .font_family("Menlo")
+                        .text_size(px(12.))
+                        .child(item.part.clone()),
+                )
+                .child(div().flex_1().min_w_0().child(item.explanation.clone()))
+        });
+        div()
+            .v_flex()
+            .min_w_0()
+            .gap_2()
+            .child(
+                TextView::markdown(
+                    ("chat-step-summary", index),
+                    view::display_markdown(&guidance.summary),
+                )
+                .selectable(true),
+            )
+            .child(
+                TextView::markdown(
+                    ("chat-step-why", index),
+                    view::display_markdown(&format!("Why: {}", guidance.why)),
+                )
+                .selectable(true),
+            )
+            .when_some(filled(&guidance.code), |d, code| {
+                d.child(code_block(("chat-step-code", index), code.clone(), cx))
+                    .child(
+                        div()
+                            .h_flex()
+                            .child(copy_button(("chat-step-copy-code", index), code)),
+                    )
+            })
+            .when_some(filled(&guidance.pseudocode), |d, pseudocode| {
+                d.child(
+                    div()
+                        .text_size(px(12.))
+                        .font_semibold()
+                        .text_color(p.secondary_foreground)
+                        .child("Pseudocode"),
+                )
+                .child(code_block(("chat-step-pseudocode", index), pseudocode, cx))
+            })
+            .when_some(filled(&guidance.command), |d, command| {
+                d.child(code_block(
+                    ("chat-step-command", index),
+                    command.clone(),
+                    cx,
+                ))
+                .child(
+                    div()
+                        .h_flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(copy_button(("chat-step-copy-command", index), command))
+                        .child(
+                            compact_button(
+                                Button::new(("chat-step-terminal", index)),
+                                "Open Terminal",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.show_terminal(cx))),
+                        ),
+                )
+            })
+            .when(!guidance.breakdown.is_empty(), |d| {
+                d.child(div().v_flex().min_w_0().gap_1().children(breakdown))
+            })
+    }
+
+    /// The step before its guidance arrives: the plan's summary, and either a note that
+    /// Claude is preparing it or a button to ask for it.
+    fn unguided_view(&self, card: &StepCard, cx: &mut Context<Self>) -> Div {
+        let p = palette(cx.theme().mode);
+        div()
+            .v_flex()
+            .min_w_0()
+            .gap_2()
+            .child(
+                TextView::markdown(
+                    ("chat-step-plan-summary", card.index),
+                    view::display_markdown(&card.summary),
+                )
+                .selectable(true),
+            )
+            .child(if card.preparing {
+                div()
+                    .text_size(px(12.))
+                    .text_color(p.secondary_foreground)
+                    .child("Preparing this step…")
+                    .into_any_element()
+            } else {
+                compact_button(
+                    Button::new(("chat-step-guide", card.index)),
+                    "Guide me through this step",
+                )
+                .disabled(!card.can_act)
+                .on_click(cx.listener(|this, _, _, _| this.chat_command(Command::GuideStep)))
+                .into_any_element()
+            })
+    }
+
+    /// Every step is finished: Claude checks the "done when" criteria.
+    fn final_card(&self, can_act: bool, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx.theme().mode);
+        solid_section(div().id("chat-final-card"), cx)
+            .v_flex()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .child(div().font_semibold().child("All steps are finished"))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(p.secondary_foreground)
+                    .child("Claude checks the \"done when\" criteria."),
+            )
+            .child(
+                div().h_flex().child(
+                    compact_button(Button::new("chat-check-again"), "Check again")
+                        .primary()
+                        .disabled(!can_act)
+                        .on_click(
+                            cx.listener(|this, _, _, _| this.chat_command(Command::CheckMyWork)),
+                        ),
+                ),
+            )
             .into_any_element()
     }
 

@@ -86,6 +86,7 @@ fn main() -> Result<()> {
                 // The toolkit binds ⌘. to code actions inside inputs, which Tandem does not
                 // offer; Stop must work from the editor and the composer too.
                 KeyBinding::new("cmd-.", StopClaude, Some("Input")),
+                KeyBinding::new("cmd-alt-c", CheckMyWork, None),
             ]);
             cx.set_menus([
                 Menu::new("Tandem").items([
@@ -129,6 +130,7 @@ fn main() -> Result<()> {
                     MenuItem::action("Focus Chat", FocusChat),
                     MenuItem::action("New Task", NewTask),
                     MenuItem::action("Stop Claude", StopClaude),
+                    MenuItem::action("Check My Work", CheckMyWork),
                 ]),
             ]);
             cx.on_window_closed(|cx, _| {

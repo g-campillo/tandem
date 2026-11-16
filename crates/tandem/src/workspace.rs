@@ -52,7 +52,8 @@ actions!(
         FocusChat,
         NewTask,
         StopClaude,
-        ShowProblems
+        ShowProblems,
+        CheckMyWork
     ]
 );
 
@@ -126,6 +127,9 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     });
     route::<StopClaude>(cx, window, view.clone(), |v, _, _| {
         v.chat_command(Command::Stop)
+    });
+    route::<CheckMyWork>(cx, window, view.clone(), |v, _, _| {
+        v.chat_command(Command::CheckMyWork)
     });
     route::<ShowProblems>(cx, window, view, |v, _, c| {
         v.bottom = Some(BottomTab::Problems);
