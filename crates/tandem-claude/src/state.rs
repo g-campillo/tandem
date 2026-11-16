@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use tandem_core::Store;
-use tandem_core::chat::{ChatItem, ChatPrefs, ChatTask, TaskSummary};
+use tandem_core::chat::{ChatItem, ChatPrefs, ChatTask, Guidance, HelpLevel, TaskSummary};
 
 /// How far Tandem got in reaching Claude.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,10 +44,21 @@ pub struct InstallInfo {
     pub bundled: bool,
 }
 
-/// What the running turn was started for.
+/// What the running turn was started for. Step numbers are indexes into the plan's steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnKind {
     Chat,
+    /// Claude prepares guidance for `step` at `level`.
+    Guidance {
+        step: usize,
+        level: HelpLevel,
+    },
+    /// Claude checks the user's work on `step`.
+    Check {
+        step: usize,
+    },
+    /// Claude checks the whole task against its "done when" criteria.
+    FinalCheck,
 }
 
 /// An immutable snapshot of everything the chat panel shows.
@@ -69,6 +80,8 @@ pub struct ChatState {
     pub pending_permission: Option<i64>,
     /// The latest problem, shown above the composer.
     pub banner: Option<String>,
+    /// Guidance for the active step at the current help level, if any.
+    pub guidance: Option<Guidance>,
 }
 
 impl ChatState {
@@ -87,6 +100,7 @@ impl ChatState {
             stopping: false,
             pending_permission: None,
             banner: None,
+            guidance: None,
         }
     }
 }
@@ -98,10 +112,21 @@ pub enum Command {
     SelectTask(String),
     Send(String),
     Stop,
-    Permission { allow: bool },
+    Permission {
+        allow: bool,
+    },
     SetModel(String),
     SetEffort(Option<String>),
     SetUseMySetup(bool),
+    /// "I'll write it" on the plan card: start the guided build.
+    ChooseGuided,
+    /// Ask Claude again for guidance on the active step.
+    GuideStep,
+    CheckMyWork,
+    SetHelpLevel {
+        language: String,
+        level: HelpLevel,
+    },
     Reconnect,
     Shutdown,
 }

@@ -3,6 +3,7 @@
 
 pub mod client;
 pub mod companion;
+mod guided;
 pub mod install;
 pub mod prompts;
 pub mod protocol;

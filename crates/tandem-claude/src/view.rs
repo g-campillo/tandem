@@ -2,8 +2,10 @@
 //! without a UI.
 
 use crate::protocol::ModelChoice;
-use crate::state::{ChatState, Connection};
-use tandem_core::chat::{ActivityKind, ItemKind, Phase};
+use crate::state::{ChatState, Connection, TurnKind};
+use tandem_core::chat::{
+    ActivityKind, Guidance, HelpLevel, ItemKind, Phase, StepKind, normalize_language,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposerMode {
@@ -158,6 +160,66 @@ pub fn plan_actions_visible(state: &ChatState, item_id: i64) -> bool {
         && matches!(state.connection, Connection::Ready { .. })
 }
 
+/// The card pinned above the composer while a step of the build is open.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepCard {
+    /// The step's index in the plan; the card shows `index + 1`.
+    pub index: usize,
+    pub total: usize,
+    pub kind: StepKind,
+    pub target: String,
+    pub summary: String,
+    pub language: String,
+    pub level: HelpLevel,
+    pub guidance: Option<Guidance>,
+    /// A Guidance turn for this step is running.
+    pub preparing: bool,
+    /// Claude is connected and no turn runs.
+    pub can_act: bool,
+}
+
+/// The active step's card: `Some` in Build while a step is still open.
+pub fn step_card(state: &ChatState) -> Option<StepCard> {
+    let task = state
+        .task
+        .as_ref()
+        .filter(|task| task.phase == Phase::Build)?;
+    let steps = &task.plan.as_ref()?.steps;
+    let index = task.current_step;
+    let step = steps.get(index)?;
+    Some(StepCard {
+        index,
+        total: steps.len(),
+        kind: step.kind,
+        target: step.target.clone(),
+        summary: step.summary.clone(),
+        language: step.language.clone(),
+        level: level_for(state, &step.language),
+        guidance: state
+            .guidance
+            .clone()
+            .filter(|guidance| guidance.step == index),
+        preparing: matches!(state.turn, Some(TurnKind::Guidance { step, .. }) if step == index),
+        can_act: matches!(state.connection, Connection::Ready { .. }) && state.turn.is_none(),
+    })
+}
+
+/// Whether the "All steps are finished" card shows: Build with every step finished.
+pub fn final_card(state: &ChatState) -> bool {
+    state.task.as_ref().is_some_and(|task| {
+        task.phase == Phase::Build
+            && task
+                .plan
+                .as_ref()
+                .is_some_and(|plan| task.current_step >= plan.steps.len())
+    })
+}
+
+/// The saved help level for `language`, Beginner when none was chosen.
+pub fn level_for(state: &ChatState, language: &str) -> HelpLevel {
+    state.prefs.help_level(&normalize_language(language))
+}
+
 /// Model text ready for the Markdown renderer, with every image turned into text so that
 /// nothing remote is ever loaded. `![alt](url)` becomes `alt (url)`, any other `![` becomes
 /// `!\[`, and the `<` of an `<img` or `<image` tag becomes `&lt;`. This applies everywhere,
@@ -244,7 +306,7 @@ fn inline_image(text: &str) -> Option<(&str, &str, usize)> {
 mod tests {
     use super::*;
     use crate::state::TurnKind;
-    use tandem_core::chat::{ChatItem, ChatTask, ItemKind, Plan, PlanStep, StepKind};
+    use tandem_core::chat::{ChatItem, ChatTask, ItemKind, Plan, PlanStep};
 
     fn ready() -> Connection {
         Connection::Ready {
@@ -463,6 +525,131 @@ mod tests {
         assert!(!plan_actions_visible(&state, 3));
         state.task = None;
         assert!(!plan_actions_visible(&state, 3));
+    }
+
+    fn guided_state(current_step: usize) -> ChatState {
+        let mut state = state();
+        let mut task = ChatTask::new("/project");
+        task.phase = Phase::Build;
+        task.current_step = current_step;
+        task.plan = Some(Plan {
+            goal: "g".into(),
+            done_when: vec!["d".into()],
+            steps: vec![
+                PlanStep {
+                    kind: StepKind::EditFile,
+                    target: "src/a.rs".into(),
+                    summary: "Edit a".into(),
+                    language: "rust".into(),
+                },
+                PlanStep {
+                    kind: StepKind::RunCommand,
+                    target: "go test ./...".into(),
+                    summary: "Run the tests".into(),
+                    language: "go".into(),
+                },
+            ],
+        });
+        state.task = Some(task);
+        state
+    }
+
+    fn guidance(step: usize) -> Guidance {
+        Guidance {
+            step,
+            level: HelpLevel::Expert,
+            summary: "Add a field.".into(),
+            why: "Because.".into(),
+            code: None,
+            pseudocode: None,
+            command: None,
+            breakdown: Vec::new(),
+            path: Some("src/a.rs".into()),
+            anchor: None,
+        }
+    }
+
+    #[test]
+    fn step_card_shows_the_open_step_with_its_level_and_guidance() {
+        let mut state = guided_state(0);
+        state
+            .prefs
+            .help_levels
+            .insert("rust".into(), HelpLevel::Expert);
+        state.guidance = Some(guidance(0));
+        assert_eq!(
+            step_card(&state),
+            Some(StepCard {
+                index: 0,
+                total: 2,
+                kind: StepKind::EditFile,
+                target: "src/a.rs".into(),
+                summary: "Edit a".into(),
+                language: "rust".into(),
+                level: HelpLevel::Expert,
+                guidance: Some(guidance(0)),
+                preparing: false,
+                can_act: true,
+            })
+        );
+
+        let mut state = guided_state(1);
+        state.guidance = Some(guidance(0));
+        state.turn = Some(TurnKind::Guidance {
+            step: 1,
+            level: HelpLevel::Beginner,
+        });
+        let card = step_card(&state).expect("a card");
+        assert_eq!((card.index, card.kind), (1, StepKind::RunCommand));
+        assert_eq!(card.level, HelpLevel::Beginner);
+        assert_eq!(
+            card.guidance, None,
+            "guidance for another step is not shown"
+        );
+        assert!(card.preparing);
+        assert!(!card.can_act);
+
+        state.turn = Some(TurnKind::Check { step: 1 });
+        let card = step_card(&state).unwrap();
+        assert!(!card.preparing);
+        assert!(!card.can_act);
+        state.turn = None;
+        state.connection = Connection::Starting;
+        assert!(!step_card(&state).unwrap().can_act);
+    }
+
+    #[test]
+    fn step_card_and_final_card_follow_the_phase_and_the_step() {
+        let mut state = guided_state(2);
+        assert_eq!(step_card(&state), None);
+        assert!(final_card(&state));
+
+        state.task.as_mut().unwrap().current_step = 1;
+        assert!(step_card(&state).is_some());
+        assert!(!final_card(&state));
+
+        for phase in [Phase::Discuss, Phase::Plan, Phase::Done] {
+            state.task.as_mut().unwrap().phase = phase;
+            assert_eq!(step_card(&state), None, "{phase:?}");
+            state.task.as_mut().unwrap().current_step = 2;
+            assert!(!final_card(&state), "{phase:?}");
+            state.task.as_mut().unwrap().current_step = 1;
+        }
+        state.task = None;
+        assert_eq!(step_card(&state), None);
+        assert!(!final_card(&state));
+    }
+
+    #[test]
+    fn level_for_reads_the_saved_level_by_normalized_language() {
+        let mut state = state();
+        assert_eq!(level_for(&state, "rust"), HelpLevel::Beginner);
+        state
+            .prefs
+            .help_levels
+            .insert("typescript".into(), HelpLevel::Intermediate);
+        assert_eq!(level_for(&state, "typescript"), HelpLevel::Intermediate);
+        assert_eq!(level_for(&state, " TS "), HelpLevel::Intermediate);
     }
 
     #[test]

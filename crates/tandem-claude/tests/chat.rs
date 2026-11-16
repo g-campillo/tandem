@@ -343,7 +343,7 @@ fn an_unknown_tool_is_not_available() {
             preamble(),
             turn_ok(),
             vec![
-                tool_request("r1", "show_step", json!({"step": 1})),
+                tool_request("r1", "no_such_tool", json!({})),
                 expect(json!({"type": "response", "id": "r1", "ok": false,
                     "text": "This tool is not available right now."})),
                 assistant("ok"),

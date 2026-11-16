@@ -1,0 +1,444 @@
+//! The guided build: guidance for each step at the user's help level, "Check my work" and
+//! the final check against the plan's "done when" criteria. These are methods of the
+//! companion controller; `companion.rs` routes the commands, the `show_step` and
+//! `report_check` tools and every finished turn here.
+
+use crate::companion::Controller;
+use crate::prompts;
+use crate::protocol::{Policy, TurnStatus};
+use crate::state::{ChatState, Connection, HostAnswer, HostQuestion, TurnKind};
+use anyhow::Result;
+use serde::Deserialize;
+use serde_json::Value;
+use tandem_core::Store;
+use tandem_core::chat::{
+    BreakdownItem, ChatPrefs, ChatTask, CheckResult, Finding, Guidance, HelpLevel, ItemKind, Mode,
+    Phase, PlanStep, StepKind, normalize_language,
+};
+
+const BUILDING: &str = "You are building this. Claude guides each step.";
+const GUIDANCE_LOCKED: &str = "Step guidance can only be shown during a guided build.";
+const GUIDANCE_SHOWN: &str = "Guidance is on screen. Reply with one short sentence.";
+const NO_CHECK: &str = "No check is running.";
+const ALREADY_REPORTED: &str = "A verdict was already reported for this turn.";
+const NO_EXPLANATION: &str = "Explain the verdict in explanation.";
+const VERDICT_SHOWN: &str = "The verdict is on screen. Finish with one short sentence.";
+const TASK_COMPLETE: &str = "Task complete.";
+const NO_GUIDANCE: &str =
+    "Claude did not show guidance for this step. Use \"Guide me through this step\" to try again.";
+const NO_VERDICT: &str = "Claude did not give a verdict. Use \"Check my work\" again.";
+
+/// What the running turn achieved, and the turn Tandem starts by itself when it completes.
+#[derive(Default)]
+pub(crate) struct TurnProgress {
+    guidance_shown: bool,
+    verdict_reported: bool,
+    follow_up: Option<FollowUp>,
+}
+
+enum FollowUp {
+    /// A step passed and another one is open.
+    NextGuidance,
+    /// The last step passed.
+    FinalCheck,
+}
+
+/// The `show_step` tool input; `step` is 1-based.
+#[derive(Deserialize)]
+struct ShowStepInput {
+    step: usize,
+    summary: String,
+    why: String,
+    code: Option<String>,
+    pseudocode: Option<String>,
+    command: Option<String>,
+    #[serde(default)]
+    breakdown: Vec<BreakdownItem>,
+    path: Option<String>,
+    anchor: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckScope {
+    Step,
+    Task,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Verdict {
+    Pass,
+    NeedsChanges,
+}
+
+/// The `report_check` tool input; `step` is 1-based.
+#[derive(Deserialize)]
+struct ReportCheckInput {
+    scope: CheckScope,
+    step: Option<usize>,
+    verdict: Verdict,
+    explanation: String,
+    #[serde(default)]
+    findings: Vec<Finding>,
+}
+
+/// The active step of a guided build, while one is still open.
+fn guided_step(task: &ChatTask) -> Option<&PlanStep> {
+    if task.phase != Phase::Build || task.mode != Mode::Guided {
+        return None;
+    }
+    task.plan.as_ref()?.steps.get(task.current_step)
+}
+
+/// The stored guidance for the active step of a guided build at the current help level.
+pub(crate) fn stored_guidance(
+    store: &Store,
+    task: &ChatTask,
+    prefs: &ChatPrefs,
+) -> Result<Option<Guidance>> {
+    match guided_step(task) {
+        Some(step) => store.chat_guidance(
+            &task.id,
+            task.current_step,
+            prefs.help_level(&step.language),
+        ),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn guidance_load_error(error: &anyhow::Error) -> String {
+    format!("Could not load the step guidance: {error:#}")
+}
+
+fn idle_and_ready(state: &ChatState) -> bool {
+    state.turn.is_none() && matches!(state.connection, Connection::Ready { .. })
+}
+
+/// `None` for a missing or blank text.
+fn non_blank(text: Option<String>) -> Option<String> {
+    text.filter(|text| !text.trim().is_empty())
+}
+
+impl Controller {
+    /// Publishes the stored guidance for the active step at the current help level.
+    pub(crate) fn refresh_guidance(&self) {
+        let state = self.snapshot();
+        let guidance = match &state.task {
+            Some(task) => self.with_store(|store| stored_guidance(store, task, &state.prefs)),
+            None => Ok(None),
+        };
+        self.update(|state| match guidance {
+            Ok(guidance) => state.guidance = guidance,
+            Err(error) => {
+                state.guidance = None;
+                state.banner = Some(guidance_load_error(&error));
+            }
+        });
+    }
+
+    /// Shows the stored guidance for the active step at its help level, or asks Claude for
+    /// it.
+    fn start_guidance(&mut self) {
+        let state = self.snapshot();
+        let Some(task) = &state.task else {
+            return;
+        };
+        match self.with_store(|store| stored_guidance(store, task, &state.prefs)) {
+            Ok(Some(guidance)) => self.update(|state| state.guidance = Some(guidance)),
+            // Guidance that cannot be read is asked for again.
+            Ok(None) | Err(_) => self.start_guidance_turn(),
+        }
+    }
+
+    /// Asks Claude for guidance on the active step at the current help level.
+    fn start_guidance_turn(&mut self) {
+        let state = self.snapshot();
+        let Some(task) = &state.task else {
+            return;
+        };
+        let (Some(plan), Some(step)) = (&task.plan, guided_step(task)) else {
+            return;
+        };
+        let index = task.current_step;
+        let level = state.prefs.help_level(&step.language);
+        self.update(|state| state.guidance = None);
+        self.start_turn(
+            TurnKind::Guidance { step: index, level },
+            prompts::guidance(plan, index, level),
+            Policy::Guided,
+        );
+    }
+
+    /// "I'll write it": starts the guided build at step 1.
+    pub(crate) fn choose_guided(&mut self) {
+        let state = self.snapshot();
+        let Some(task) = state.task.as_ref().filter(|task| {
+            task.phase == Phase::Plan && task.plan.is_some() && idle_and_ready(&state)
+        }) else {
+            return;
+        };
+        let mut task = task.clone();
+        task.phase = Phase::Build;
+        task.mode = Mode::Guided;
+        task.current_step = 0;
+        self.save_task(task);
+        self.append_item(ItemKind::Notice {
+            text: BUILDING.into(),
+        });
+        self.start_guidance();
+    }
+
+    /// "Guide me through this step": forgets the stored guidance and asks again.
+    pub(crate) fn guide_step(&mut self) {
+        let state = self.snapshot();
+        let Some(task) = state.task.as_ref().filter(|_| idle_and_ready(&state)) else {
+            return;
+        };
+        let Some(step) = guided_step(task) else {
+            return;
+        };
+        let level = state.prefs.help_level(&step.language);
+        if let Err(error) =
+            self.with_store(|store| store.delete_chat_guidance(&task.id, task.current_step, level))
+        {
+            self.set_banner(format!("Could not forget the old guidance: {error:#}"));
+        }
+        self.start_guidance_turn();
+    }
+
+    /// Saves the level for `language`; when that is the active step's language, shows the
+    /// guidance for the new level (asking Claude only when none is stored).
+    pub(crate) fn set_help_level(&mut self, language: &str, level: HelpLevel) {
+        let language = normalize_language(language);
+        let state = self.snapshot();
+        let mut prefs = state.prefs.clone();
+        prefs.help_levels.insert(language.clone(), level);
+        self.save_prefs(&prefs);
+        self.update(|state| state.prefs = prefs);
+        let active_language = state
+            .task
+            .as_ref()
+            .and_then(guided_step)
+            .is_some_and(|step| step.language == language);
+        if !active_language {
+            return;
+        }
+        if idle_and_ready(&state) {
+            self.start_guidance();
+        } else {
+            self.refresh_guidance();
+        }
+    }
+
+    /// "Check my work": checks the active step, or the whole task once every step is done.
+    pub(crate) fn check_my_work(&mut self) {
+        let state = self.snapshot();
+        let Some(task) = state.task.as_ref().filter(|task| {
+            task.phase == Phase::Build && task.mode == Mode::Guided && idle_and_ready(&state)
+        }) else {
+            return;
+        };
+        let Some(plan) = &task.plan else {
+            return;
+        };
+        let index = task.current_step;
+        let Some(step) = plan.steps.get(index) else {
+            return self.start_final_check();
+        };
+        let level = state.prefs.help_level(&step.language);
+        let unsaved = match self.ask_host(HostQuestion::DirtyPaths) {
+            Some(HostAnswer::DirtyPaths(paths)) => paths,
+            _ => Vec::new(),
+        };
+        self.start_turn(
+            TurnKind::Check { step: index },
+            prompts::check(plan, index, level, &unsaved),
+            Policy::Check,
+        );
+    }
+
+    fn start_final_check(&mut self) {
+        let Some(plan) = self
+            .snapshot()
+            .task
+            .as_ref()
+            .and_then(|task| task.plan.clone())
+        else {
+            return;
+        };
+        self.start_turn(
+            TurnKind::FinalCheck,
+            prompts::final_check(&plan),
+            Policy::Check,
+        );
+    }
+
+    /// The `show_step` tool: guidance for the active step of a guided build, during a
+    /// Guidance turn (at its level) or a chat turn (at the current level).
+    pub(crate) fn show_step(&mut self, input: Value) -> (bool, String) {
+        let state = self.snapshot();
+        let turn_level = match state.turn {
+            Some(TurnKind::Guidance { level, .. }) => Some(level),
+            Some(TurnKind::Chat) => None,
+            _ => return (false, GUIDANCE_LOCKED.into()),
+        };
+        let Some(task) = &state.task else {
+            return (false, GUIDANCE_LOCKED.into());
+        };
+        let Some(step) = guided_step(task) else {
+            return (false, GUIDANCE_LOCKED.into());
+        };
+        let input = match serde_json::from_value::<ShowStepInput>(input) {
+            Ok(input) => input,
+            Err(error) => {
+                return (
+                    false,
+                    format!("The guidance does not have the expected fields: {error}."),
+                );
+            }
+        };
+        let active = task.current_step + 1;
+        if input.step != active {
+            return (
+                false,
+                format!("Step {active} is active. Show guidance for that step only."),
+            );
+        }
+        let level = turn_level.unwrap_or_else(|| state.prefs.help_level(&step.language));
+        let path = match non_blank(input.path) {
+            Some(path) => Some(path.trim().to_owned()),
+            None if step.kind != StepKind::RunCommand => Some(step.target.clone()),
+            None => None,
+        };
+        let guidance = Guidance {
+            step: task.current_step,
+            level,
+            summary: input.summary.trim().to_owned(),
+            why: input.why.trim().to_owned(),
+            code: non_blank(input.code),
+            pseudocode: non_blank(input.pseudocode),
+            command: non_blank(input.command).map(|command| command.trim().to_owned()),
+            breakdown: input.breakdown,
+            path,
+            anchor: non_blank(input.anchor),
+        };
+        if let Err(error) = guidance.check(step) {
+            return (false, format!("{error:#}"));
+        }
+        if let Err(error) = self.with_store(|store| store.save_chat_guidance(&task.id, &guidance)) {
+            self.set_banner(format!("Could not save the step guidance: {error:#}"));
+        }
+        self.progress.guidance_shown = true;
+        // The level may have changed while Claude worked; the card shows the current one.
+        if self.snapshot().prefs.help_level(&step.language) == level {
+            self.update(|state| state.guidance = Some(guidance));
+        }
+        (true, GUIDANCE_SHOWN.into())
+    }
+
+    /// The `report_check` tool: one verdict per Check or FinalCheck turn.
+    pub(crate) fn report_check(&mut self, input: Value) -> (bool, String) {
+        let state = self.snapshot();
+        if !matches!(
+            state.turn,
+            Some(TurnKind::Check { .. } | TurnKind::FinalCheck)
+        ) {
+            return (false, NO_CHECK.into());
+        }
+        if self.progress.verdict_reported {
+            return (false, ALREADY_REPORTED.into());
+        }
+        let input = match serde_json::from_value::<ReportCheckInput>(input) {
+            Ok(input) => input,
+            Err(error) => {
+                return (
+                    false,
+                    format!("The verdict does not have the expected fields: {error}."),
+                );
+            }
+        };
+        let step = match (input.scope, state.turn) {
+            (CheckScope::Step, Some(TurnKind::Check { step })) => {
+                if input.step.is_some_and(|number| number != step + 1) {
+                    return (
+                        false,
+                        format!(
+                            "This check is for step {}. Report the verdict for that step only.",
+                            step + 1
+                        ),
+                    );
+                }
+                Some(step)
+            }
+            (CheckScope::Task, Some(TurnKind::FinalCheck)) => None,
+            _ => return (false, NO_CHECK.into()),
+        };
+        let explanation = input.explanation.trim().to_owned();
+        if explanation.is_empty() {
+            return (false, NO_EXPLANATION.into());
+        }
+        let Some(mut task) = state.task.clone() else {
+            return (false, NO_CHECK.into());
+        };
+        let passed = input.verdict == Verdict::Pass;
+        self.progress.verdict_reported = true;
+        self.append_item(ItemKind::Check {
+            result: CheckResult {
+                step,
+                passed,
+                explanation,
+                findings: input.findings,
+            },
+        });
+        match (passed, step) {
+            (true, Some(step)) => {
+                let steps = task.plan.as_ref().map_or(0, |plan| plan.steps.len());
+                task.current_step = step + 1;
+                self.update(|state| state.guidance = None);
+                self.save_task(task);
+                self.progress.follow_up = Some(if step + 1 < steps {
+                    FollowUp::NextGuidance
+                } else {
+                    FollowUp::FinalCheck
+                });
+            }
+            (true, None) => {
+                task.phase = Phase::Done;
+                self.save_task(task);
+                self.append_item(ItemKind::Notice {
+                    text: TASK_COMPLETE.into(),
+                });
+            }
+            (false, _) => {}
+        }
+        (true, VERDICT_SHOWN.into())
+    }
+
+    /// Runs after every turn: notes a Guidance or Check turn that completed without its
+    /// result, and starts the remembered follow-up when the turn completed.
+    pub(crate) fn after_turn(&mut self, kind: TurnKind, status: TurnStatus) {
+        let progress = std::mem::take(&mut self.progress);
+        if status != TurnStatus::Completed || self.closing {
+            return;
+        }
+        let missing = match kind {
+            TurnKind::Guidance { .. } if !progress.guidance_shown => Some(NO_GUIDANCE),
+            TurnKind::Check { .. } | TurnKind::FinalCheck if !progress.verdict_reported => {
+                Some(NO_VERDICT)
+            }
+            _ => None,
+        };
+        if let Some(text) = missing {
+            self.append_item(ItemKind::Notice { text: text.into() });
+        }
+        if !idle_and_ready(&self.snapshot()) {
+            return;
+        }
+        match progress.follow_up {
+            Some(FollowUp::NextGuidance) => self.start_guidance(),
+            Some(FollowUp::FinalCheck) => self.start_final_check(),
+            None => {}
+        }
+    }
+}

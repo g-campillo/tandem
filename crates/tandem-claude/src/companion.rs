@@ -4,6 +4,7 @@
 //! drive it; questions about the editor go to the UI as `Signal::Host`.
 
 use crate::client::{HelperClient, Received};
+use crate::guided::{self, TurnProgress};
 use crate::install::{Launch, sign_in_hint};
 use crate::prompts::{self, cut};
 use crate::protocol::{
@@ -188,6 +189,7 @@ fn run(
                 permission: None,
                 waiting_permissions: VecDeque::new(),
                 closing: false,
+                progress: TurnProgress::default(),
             };
             controller.connect();
             controller.serve();
@@ -234,8 +236,13 @@ fn load(config: &CompanionConfig) -> Result<(Project, ChatState)> {
     };
     let items = store.chat_items(&task.id)?;
     let tasks = store.chat_tasks(&key)?;
+    let guidance = guided::stored_guidance(&store, &task, &prefs);
     drop(store);
     let mut state = ChatState::starting();
+    match guidance {
+        Ok(guidance) => state.guidance = guidance,
+        Err(error) => state.banner = Some(guided::guidance_load_error(&error)),
+    }
     state.prefs = prefs;
     state.tasks = tasks;
     state.task = Some(task);
@@ -282,7 +289,9 @@ struct PermissionAsk {
     command: Option<String>,
 }
 
-struct Controller {
+/// The controller's state on its own thread. The guided build's methods live in
+/// `guided.rs`.
+pub(crate) struct Controller {
     config: CompanionConfig,
     project: Project,
     publisher: Publisher,
@@ -301,24 +310,26 @@ struct Controller {
     permission: Option<PendingPermission>,
     waiting_permissions: VecDeque<PermissionAsk>,
     /// Set by Shutdown: new helper requests are refused instead of reaching the UI.
-    closing: bool,
+    pub(crate) closing: bool,
+    /// What the running turn achieved so far.
+    pub(crate) progress: TurnProgress,
 }
 
 impl Controller {
-    fn snapshot(&self) -> Arc<ChatState> {
+    pub(crate) fn snapshot(&self) -> Arc<ChatState> {
         self.publisher.snapshot()
     }
 
-    fn update(&self, change: impl FnOnce(&mut ChatState)) {
+    pub(crate) fn update(&self, change: impl FnOnce(&mut ChatState)) {
         self.publisher.update(change);
     }
 
-    fn set_banner(&self, text: impl Into<String>) {
+    pub(crate) fn set_banner(&self, text: impl Into<String>) {
         let text = text.into();
         self.update(|state| state.banner = Some(text));
     }
 
-    fn with_store<T>(&self, work: impl FnOnce(&mut Store) -> Result<T>) -> Result<T> {
+    pub(crate) fn with_store<T>(&self, work: impl FnOnce(&mut Store) -> Result<T>) -> Result<T> {
         work(&mut lock(&self.config.store))
     }
 
@@ -358,6 +369,10 @@ impl Controller {
             Command::SetModel(value) => self.set_model(value),
             Command::SetEffort(value) => self.set_effort(value),
             Command::SetUseMySetup(value) => self.set_use_my_setup(value),
+            Command::ChooseGuided => self.choose_guided(),
+            Command::GuideStep => self.guide_step(),
+            Command::CheckMyWork => self.check_my_work(),
+            Command::SetHelpLevel { language, level } => self.set_help_level(&language, level),
             Command::Reconnect => {
                 if self.snapshot().turn.is_none() {
                     self.connect();
@@ -692,6 +707,8 @@ impl Controller {
                     let (ok, text) = match name.as_str() {
                         "propose_plan" => self.propose_plan(input),
                         "read_editor_buffer" => self.read_editor_buffer(&input),
+                        "show_step" => self.show_step(input),
+                        "report_check" => self.report_check(input),
                         _ => (false, TOOL_UNAVAILABLE.to_owned()),
                     };
                     self.respond(&id, ResponseBody::Tool { ok, text });
@@ -735,20 +752,25 @@ impl Controller {
             }),
             Event::Notice { text } => self.append_item(ItemKind::Notice { text }),
             Event::AuthRefused { detail, .. } => {
+                let turn = self.snapshot().turn;
                 self.end_turn(None);
+                if let Some(kind) = turn {
+                    self.after_turn(kind, TurnStatus::Error);
+                }
                 self.drop_client();
                 self.update(|state| state.connection = Connection::Refused { reason: detail });
             }
             Event::PermissionCancelled { id } => self.permission_cancelled(&id),
             Event::TurnFinished { status, error, .. } => {
-                if self.snapshot().turn.is_none() {
+                let Some(kind) = self.snapshot().turn else {
                     return;
-                }
+                };
                 match status {
                     TurnStatus::Completed => self.end_turn(None),
                     TurnStatus::Interrupted => self.end_turn(Some(STOPPED_NOTICE.into())),
                     TurnStatus::Error => self.end_turn_with_error(error),
                 }
+                self.after_turn(kind, status);
             }
             Event::SessionClosed { reason } => {
                 let tail = self
@@ -784,8 +806,9 @@ impl Controller {
 
     /// The helper exited, or its Claude session ended on its own.
     fn helper_stopped(&mut self, stderr_tail: &str, error: Option<String>) {
-        if self.snapshot().turn.is_some() {
+        if let Some(kind) = self.snapshot().turn {
             self.end_turn_with_error(None);
+            self.after_turn(kind, TurnStatus::Error);
         }
         let detail = stderr_tail
             .lines()
@@ -858,7 +881,7 @@ impl Controller {
     }
 
     /// Asks the UI thread and waits up to 5 s; no answer counts as "nothing open".
-    fn ask_host(&self, question: HostQuestion) -> Option<HostAnswer> {
+    pub(crate) fn ask_host(&self, question: HostQuestion) -> Option<HostAnswer> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.publisher
             .signals
@@ -1023,7 +1046,7 @@ impl Controller {
         self.start_turn(TurnKind::Chat, prompt, policy);
     }
 
-    fn start_turn(&mut self, kind: TurnKind, text: String, policy: Policy) {
+    pub(crate) fn start_turn(&mut self, kind: TurnKind, text: String, policy: Policy) {
         let prefs = self.snapshot().prefs.clone();
         let turn = Turn {
             text,
@@ -1034,6 +1057,7 @@ impl Controller {
         match self.request(|id| Outgoing::Turn { id, turn }, COMMAND_TIMEOUT) {
             Ok(_) => {
                 self.recap = false;
+                self.progress = TurnProgress::default();
                 self.update(|state| {
                     state.turn = Some(kind);
                     state.banner = None;
@@ -1107,7 +1131,9 @@ impl Controller {
             state.streaming = None;
             state.pending_permission = None;
             state.banner = None;
+            state.guidance = None;
         });
+        self.refresh_guidance();
         self.reopen_session();
     }
 
@@ -1206,7 +1232,7 @@ impl Controller {
     // ----- Persistence -----
 
     /// Saves the task and publishes it with the refreshed task list.
-    fn save_task(&mut self, task: ChatTask) {
+    pub(crate) fn save_task(&mut self, task: ChatTask) {
         let key = self.project.key().to_owned();
         let saved = self.with_store(|store| {
             store.save_chat_task(&task)?;
@@ -1221,7 +1247,7 @@ impl Controller {
         });
     }
 
-    fn save_prefs(&self, prefs: &ChatPrefs) {
+    pub(crate) fn save_prefs(&self, prefs: &ChatPrefs) {
         if let Err(error) = self.with_store(|store| store.save_chat_prefs(prefs)) {
             self.set_banner(format!("Could not save the preferences: {error:#}"));
         }
@@ -1239,7 +1265,7 @@ impl Controller {
         }
     }
 
-    fn append_item(&self, kind: ItemKind) {
+    pub(crate) fn append_item(&self, kind: ItemKind) {
         if let Some(item) = self.store_item(kind) {
             self.update(|state| state.items.push(item));
         }
