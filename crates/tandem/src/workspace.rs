@@ -8,9 +8,6 @@ mod chrome;
 mod chrome_logic;
 mod code_view;
 pub mod commands;
-// The terminal, chat and explorer fonts are read from Tasks 5, 6 and 8 on, the
-// substitutions from Task 9 on; Task 9 removes this attribute.
-#[allow(dead_code)]
 mod fonts;
 mod hover;
 mod look;
@@ -24,7 +21,8 @@ mod tools;
 mod view;
 use chat::ChatUi;
 use chat_logic::{BottomTab, line_count_label, next_bottom};
-use look::LookUi;
+use fonts::FontPane;
+use look::{FontChange, LookUi};
 use panes::PaneUi;
 pub use panes::SwapPanes;
 use settings::SettingsUi;
@@ -126,8 +124,8 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     });
     route::<Changes>(cx, window, view.clone(), |v, w, c| v.show_diff(w, c));
     route::<ToggleTerminal>(cx, window, view.clone(), |v, _, c| v.toggle_terminal(c));
-    route::<ZoomIn>(cx, window, view.clone(), |v, _, c| v.zoom(1.0, c));
-    route::<ZoomOut>(cx, window, view.clone(), |v, _, c| v.zoom(-1.0, c));
+    route::<ZoomIn>(cx, window, view.clone(), |v, w, c| v.zoom(1.0, w, c));
+    route::<ZoomOut>(cx, window, view.clone(), |v, w, c| v.zoom(-1.0, w, c));
     route::<ToggleChat>(cx, window, view.clone(), |v, _, c| {
         v.chat.visible = !v.chat.visible;
         c.notify();
@@ -261,7 +259,8 @@ impl Workspace {
         let panes = PaneUi::load(&store.lock().unwrap());
         let installed = cx.text_system().all_font_names();
         let look = LookUi::load(&store.lock().unwrap(), installed);
-        let look_controls = settings_look::LookControls::new(&look.prefs, window, cx);
+        let look_controls =
+            settings_look::LookControls::new(&look.prefs, &look.installed, window, cx);
         let mut view = Self {
             chat: ChatUi::new(window, cx),
             settings: SettingsUi::default(),
@@ -1216,10 +1215,9 @@ impl Workspace {
         cx.notify();
     }
     /// ⌘= and ⌘−: the editor's font size, for every project.
-    fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let size = &mut self.look.prefs.fonts.editor.size;
-        *size = tandem_core::appearance::zoomed(*size, delta);
-        self.apply_fonts(cx);
+    fn zoom(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let size = tandem_core::appearance::zoomed(self.look.prefs.fonts.editor.size, delta);
+        self.change_font(FontChange::Size(FontPane::Editor, size), window, cx);
     }
     fn navigation(&self, cx: &App) -> Vec<(String, String, usize, bool)> {
         let query = self.query.read(cx).text().to_string().to_lowercase();

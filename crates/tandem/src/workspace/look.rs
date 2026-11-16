@@ -1,6 +1,6 @@
 //! How the window looks: the saved appearance, and applying its opacity and blur to the
 //! native window.
-use super::fonts::{self, pane_fonts};
+use super::fonts::{self, FontPane, pane_fonts};
 use super::*;
 use crate::native_window;
 use tandem_core::appearance::{AppearancePrefs, BLUR_MAX, OPACITY, blur_radius, window_alpha};
@@ -51,6 +51,72 @@ pub(super) fn window_background(backend: BlurBackend, blur: u8) -> WindowBackgro
         BlurBackend::BuiltIn if blur > 0 => WindowBackgroundAppearance::Blurred,
         _ => WindowBackgroundAppearance::Transparent,
     }
+}
+
+/// A change to one pane's font made in Settings.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum FontChange {
+    Family(FontPane, String),
+    /// The chat has one size: `ChatText` and `ChatCode` both set it.
+    Size(FontPane, f32),
+    /// Only code fonts have ligatures; for `ChatText` and `Explorer` nothing changes.
+    Ligatures(FontPane, bool),
+}
+
+/// `prefs` after `change`, normalized.
+pub(super) fn with_font_change(prefs: &AppearancePrefs, change: FontChange) -> AppearancePrefs {
+    let mut changed = prefs.clone();
+    let fonts = &mut changed.fonts;
+    match change {
+        FontChange::Family(pane, family) => match pane {
+            FontPane::Editor => fonts.editor.family = family,
+            FontPane::Terminal => fonts.terminal.family = family,
+            FontPane::ChatText => fonts.chat.family = family,
+            FontPane::ChatCode => fonts.chat.code_family = family,
+            FontPane::Explorer => fonts.explorer.family = family,
+        },
+        FontChange::Size(pane, size) => match pane {
+            FontPane::Editor => fonts.editor.size = size,
+            FontPane::Terminal => fonts.terminal.size = size,
+            FontPane::ChatText | FontPane::ChatCode => fonts.chat.size = size,
+            FontPane::Explorer => fonts.explorer.size = size,
+        },
+        FontChange::Ligatures(pane, ligatures) => match pane {
+            FontPane::Editor => fonts.editor.ligatures = ligatures,
+            FontPane::Terminal => fonts.terminal.ligatures = ligatures,
+            FontPane::ChatCode => fonts.chat.code_ligatures = ligatures,
+            FontPane::ChatText | FontPane::Explorer => {}
+        },
+    }
+    changed.normalized()
+}
+
+/// The saved family of `pane`: the family `FontChange::Family(pane, …)` sets.
+pub(super) fn pane_family(prefs: &AppearancePrefs, pane: FontPane) -> &str {
+    let fonts = &prefs.fonts;
+    match pane {
+        FontPane::Editor => &fonts.editor.family,
+        FontPane::Terminal => &fonts.terminal.family,
+        FontPane::ChatText => &fonts.chat.family,
+        FontPane::ChatCode => &fonts.chat.code_family,
+        FontPane::Explorer => &fonts.explorer.family,
+    }
+}
+
+/// The saved size of `pane`: the size `FontChange::Size(pane, …)` sets.
+pub(super) fn pane_size(prefs: &AppearancePrefs, pane: FontPane) -> f32 {
+    let fonts = &prefs.fonts;
+    match pane {
+        FontPane::Editor => fonts.editor.size,
+        FontPane::Terminal => fonts.terminal.size,
+        FontPane::ChatText | FontPane::ChatCode => fonts.chat.size,
+        FontPane::Explorer => fonts.explorer.size,
+    }
+}
+
+/// A font size as Settings shows it: `14 px`.
+pub(super) fn font_size_label(size: f32) -> String {
+    format!("{size:.0} px")
 }
 
 /// The opacity as Settings shows it: `80%`.
@@ -126,6 +192,23 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Applies a font change made in Settings or with ⌘= and ⌘−, and moves Settings'
+    /// sliders to it. Saving is left to `persist_look`.
+    pub(super) fn change_font(
+        &mut self,
+        change: FontChange,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefs = with_font_change(&self.look.prefs, change);
+        if prefs == self.look.prefs {
+            return;
+        }
+        self.look.prefs = prefs;
+        self.apply_fonts(cx);
+        self.look_controls.sync(&self.look.prefs, window, cx);
+    }
+
     /// The terminal's font as the terminal view takes it.
     pub(super) fn terminal_font(&self) -> tandem_terminal::TerminalFont {
         let face = &self.look.fonts.terminal;
@@ -160,8 +243,152 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlurBackend, blur_label, opacity_label, window_background};
+    use super::{
+        BlurBackend, FontChange, blur_label, font_size_label, opacity_label, pane_family,
+        pane_size, window_background, with_font_change,
+    };
+    use crate::workspace::fonts::FontPane;
     use gpui_kit::WindowBackgroundAppearance;
+    use tandem_core::appearance::{AppearancePrefs, SYSTEM_FONT};
+
+    #[test]
+    fn a_family_change_sets_exactly_the_named_panes_family() {
+        let prefs = AppearancePrefs::default();
+        let family = |pane| with_font_change(&prefs, FontChange::Family(pane, "Menlo".into()));
+
+        let mut expected = prefs.clone();
+        expected.fonts.editor.family = "Menlo".into();
+        assert_eq!(family(FontPane::Editor), expected);
+
+        let mut expected = prefs.clone();
+        expected.fonts.terminal.family = "Menlo".into();
+        assert_eq!(family(FontPane::Terminal), expected);
+
+        let mut expected = prefs.clone();
+        expected.fonts.chat.family = "Menlo".into();
+        assert_eq!(family(FontPane::ChatText), expected);
+
+        let mut expected = prefs.clone();
+        expected.fonts.chat.code_family = "Menlo".into();
+        assert_eq!(family(FontPane::ChatCode), expected);
+
+        let mut expected = prefs.clone();
+        expected.fonts.explorer.family = "Menlo".into();
+        assert_eq!(family(FontPane::Explorer), expected);
+    }
+
+    #[test]
+    fn a_blank_family_becomes_that_panes_default() {
+        let mut prefs = AppearancePrefs::default();
+        prefs.fonts.terminal.family = "Menlo".into();
+        prefs.fonts.chat.code_family = "Menlo".into();
+        let changed = with_font_change(&prefs, FontChange::Family(FontPane::Terminal, " ".into()));
+        assert_eq!(changed.fonts.terminal.family, "FiraCode Nerd Font Mono");
+        let changed = with_font_change(
+            &prefs,
+            FontChange::Family(FontPane::ChatCode, String::new()),
+        );
+        assert_eq!(changed.fonts.chat.code_family, "FiraCode Nerd Font");
+        assert_eq!(changed.fonts.terminal.family, "Menlo");
+    }
+
+    #[test]
+    fn a_size_change_sets_the_panes_size_rounded_and_clamped() {
+        let prefs = AppearancePrefs::default();
+        let changed = with_font_change(&prefs, FontChange::Size(FontPane::Editor, 99.));
+        let mut expected = prefs.clone();
+        expected.fonts.editor.size = 30.;
+        assert_eq!(changed, expected);
+
+        let changed = with_font_change(&prefs, FontChange::Size(FontPane::Terminal, 13.6));
+        let mut expected = prefs.clone();
+        expected.fonts.terminal.size = 14.;
+        assert_eq!(changed, expected);
+
+        let changed = with_font_change(&prefs, FontChange::Size(FontPane::Explorer, 2.));
+        assert_eq!(changed.fonts.explorer.size, 10.);
+    }
+
+    #[test]
+    fn both_chat_panes_set_the_chats_one_size() {
+        let prefs = AppearancePrefs::default();
+        let mut expected = prefs.clone();
+        expected.fonts.chat.size = 16.;
+        assert_eq!(
+            with_font_change(&prefs, FontChange::Size(FontPane::ChatCode, 16.)),
+            expected
+        );
+        assert_eq!(
+            with_font_change(&prefs, FontChange::Size(FontPane::ChatText, 16.)),
+            expected
+        );
+    }
+
+    #[test]
+    fn ligatures_change_only_the_code_fonts() {
+        let prefs = AppearancePrefs::default();
+        let off = |pane| with_font_change(&prefs, FontChange::Ligatures(pane, false));
+
+        let mut expected = prefs.clone();
+        expected.fonts.editor.ligatures = false;
+        assert_eq!(off(FontPane::Editor), expected);
+
+        let mut expected = prefs.clone();
+        expected.fonts.terminal.ligatures = false;
+        assert_eq!(off(FontPane::Terminal), expected);
+
+        let mut expected = prefs.clone();
+        expected.fonts.chat.code_ligatures = false;
+        assert_eq!(off(FontPane::ChatCode), expected);
+
+        assert_eq!(off(FontPane::ChatText), prefs);
+        assert_eq!(off(FontPane::Explorer), prefs);
+    }
+
+    #[test]
+    fn each_panes_family_and_size_read_back_what_a_change_set() {
+        let prefs = AppearancePrefs::default();
+        for pane in [
+            FontPane::Editor,
+            FontPane::Terminal,
+            FontPane::ChatText,
+            FontPane::ChatCode,
+            FontPane::Explorer,
+        ] {
+            let changed = with_font_change(&prefs, FontChange::Family(pane, "Menlo".into()));
+            assert_eq!(pane_family(&changed, pane), "Menlo", "{pane:?}");
+            let changed = with_font_change(&prefs, FontChange::Size(pane, 21.));
+            assert_eq!(pane_size(&changed, pane), 21., "{pane:?}");
+        }
+        assert_eq!(pane_family(&prefs, FontPane::ChatText), SYSTEM_FONT);
+        assert_eq!(
+            pane_family(&prefs, FontPane::ChatCode),
+            "FiraCode Nerd Font"
+        );
+        assert_eq!(pane_size(&prefs, FontPane::ChatCode), 13.);
+    }
+
+    #[test]
+    fn a_font_size_shows_in_whole_pixels() {
+        assert_eq!(font_size_label(14.), "14 px");
+        assert_eq!(font_size_label(10.), "10 px");
+        assert_eq!(font_size_label(30.), "30 px");
+    }
+
+    #[test]
+    fn a_change_to_the_current_value_changes_nothing() {
+        let mut prefs = AppearancePrefs::default();
+        prefs.fonts.explorer.family = "Helvetica".into();
+        prefs.fonts.terminal.size = 15.;
+        for change in [
+            FontChange::Family(FontPane::Explorer, "Helvetica".into()),
+            FontChange::Size(FontPane::Terminal, 15.),
+            FontChange::Size(FontPane::ChatCode, 13.),
+            FontChange::Ligatures(FontPane::Editor, true),
+        ] {
+            assert_eq!(with_font_change(&prefs, change), prefs);
+        }
+    }
 
     #[test]
     fn opacity_shows_as_a_percentage() {
