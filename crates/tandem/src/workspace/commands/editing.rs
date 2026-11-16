@@ -1,6 +1,7 @@
 //! Commands that change the text of the focused code editor.
 use super::*;
 use std::ops::Range;
+use tandem_core::edit::lines;
 use tandem_core::edit::{self, Edit, comment::comment_tokens};
 
 impl Workspace {
@@ -107,6 +108,113 @@ impl Workspace {
         };
         self.apply_edit(window, cx, |text, selection, _| {
             edit::comment::toggle_block_comment(text, selection, open, close)
+        });
+    }
+
+    /// Copies the selected lines above or below them (⇧⌥↑, ⇧⌥↓).
+    pub(super) fn duplicate_lines(
+        &mut self,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_edit(window, cx, |text, selection, _| {
+            lines::duplicate_lines(text, selection, direction)
+        });
+    }
+
+    /// Swaps the selected lines with the line above or below them (⌥↑, ⌥↓).
+    pub(super) fn move_lines(
+        &mut self,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_edit(window, cx, |text, selection, _| {
+            lines::move_lines(text, selection, direction)
+        });
+    }
+
+    /// Deletes the selected lines (⇧⌘K).
+    pub(super) fn delete_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_edit(window, cx, |text, selection, _| {
+            lines::delete_lines(text, selection)
+        });
+    }
+
+    /// Opens an empty line below or above the cursor's line without splitting it (⌘↵,
+    /// ⇧⌘↵). The new line comes from the editor's own Enter, so it gets its smart
+    /// indentation.
+    pub(super) fn insert_line(&mut self, above: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((editor, _)) = self.editable_editor(window, cx) else {
+            return;
+        };
+        let (text, cursor) = {
+            let editor = editor.read(cx);
+            (editor.text().to_string(), editor.cursor())
+        };
+        let start = edit::line_start(&text, cursor);
+        if above && start == 0 {
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(0..0, cx);
+                editor.replace("\n", window, cx);
+                editor.set_selected_range(0..0, cx);
+            });
+            return;
+        }
+        let at = if above {
+            edit::line_end(&text, start - 1)
+        } else {
+            edit::line_end(&text, cursor)
+        };
+        editor.update(cx, |editor, cx| editor.set_selected_range(at..at, cx));
+        // Runs the editor's Enter handler synchronously.
+        let focus = editor.read(cx).focus_handle(cx);
+        focus.dispatch_action(
+            &gpui_kit::component::input::Enter {
+                secondary: false,
+                shift: false,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Joins the selected lines, or the cursor's line with the next one (⌃J).
+    pub(super) fn join_lines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_edit(window, cx, |text, selection, _| {
+            lines::join_lines(text, selection)
+        });
+    }
+
+    /// Removes the spaces and tabs at the end of every line of the file (⌘K ⌘X).
+    pub(super) fn trim_trailing_whitespace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_edit(window, cx, |text, selection, _| {
+            lines::trim_trailing_whitespace(text, selection)
+        });
+    }
+
+    /// Sorts the selected lines, or the whole file when one line is selected.
+    pub(super) fn sort_lines(
+        &mut self,
+        descending: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_edit(window, cx, |text, selection, _| {
+            lines::sort_lines(text, selection, descending)
+        });
+    }
+
+    /// Upper- or lower-cases the selection, or the word under the cursor.
+    pub(super) fn transform_case(
+        &mut self,
+        upper: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_edit(window, cx, |text, selection, _| {
+            lines::transform_case(text, selection, upper)
         });
     }
 }

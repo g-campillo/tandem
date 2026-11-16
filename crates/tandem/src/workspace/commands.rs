@@ -5,6 +5,7 @@ mod palette;
 use super::*;
 use gpui_kit::component::command::CommandState;
 use tandem_core::edit::comment::LineComment;
+use tandem_core::edit::lines::Direction;
 
 actions!(
     tandem,
@@ -14,7 +15,20 @@ actions!(
         ToggleLineComment,
         ToggleBlockComment,
         AddLineComment,
-        RemoveLineComment
+        RemoveLineComment,
+        DeleteLine,
+        InsertLineBelow,
+        InsertLineAbove,
+        JoinLines,
+        TrimTrailingWhitespace,
+        SortLinesAscending,
+        SortLinesDescending,
+        TransformToUppercase,
+        TransformToLowercase,
+        CopyLineUp,
+        CopyLineDown,
+        MoveLineUp,
+        MoveLineDown
     ]
 );
 
@@ -199,6 +213,27 @@ fn edit() -> Vec<CommandSpec> {
             &["cmd-k cmd-u"],
             Editor,
         ),
+        spec::<DeleteLine>("Delete Line", Edit, "⇧⌘K", &["cmd-shift-k"], Editor).separated(),
+        spec::<InsertLineBelow>("Insert Line Below", Edit, "⌘↵", &["cmd-enter"], Editor),
+        spec::<InsertLineAbove>(
+            "Insert Line Above",
+            Edit,
+            "⇧⌘↵",
+            &["cmd-shift-enter"],
+            Editor,
+        ),
+        spec::<JoinLines>("Join Lines", Edit, "⌃J", &["ctrl-j"], Editor),
+        spec::<TrimTrailingWhitespace>(
+            "Trim Trailing Whitespace",
+            Edit,
+            "⌘K ⌘X",
+            &["cmd-k cmd-x"],
+            Editor,
+        ),
+        spec::<SortLinesAscending>("Sort Lines Ascending", Edit, "", &[], Editor).separated(),
+        spec::<SortLinesDescending>("Sort Lines Descending", Edit, "", &[], Editor),
+        spec::<TransformToUppercase>("Transform to Uppercase", Edit, "", &[], Editor),
+        spec::<TransformToLowercase>("Transform to Lowercase", Edit, "", &[], Editor),
     ]
 }
 
@@ -209,6 +244,16 @@ fn selection() -> Vec<CommandSpec> {
     use gpui_kit::component::input::SelectAll;
     vec![
         spec::<SelectAll>("Select All", Selection, "⌘A", &[], Editor),
+        spec::<CopyLineUp>("Copy Line Up", Selection, "⇧⌥↑", &["shift-alt-up"], Editor).separated(),
+        spec::<CopyLineDown>(
+            "Copy Line Down",
+            Selection,
+            "⇧⌥↓",
+            &["shift-alt-down"],
+            Editor,
+        ),
+        spec::<MoveLineUp>("Move Line Up", Selection, "⌥↑", &["alt-up"], Editor),
+        spec::<MoveLineDown>("Move Line Down", Selection, "⌥↓", &["alt-down"], Editor),
         spec::<AddCursorAbove>("Add Cursor Above", Selection, "⌥⌘↑", &[], Editor).separated(),
         spec::<AddCursorBelow>("Add Cursor Below", Selection, "⌥⌘↓", &[], Editor),
     ]
@@ -360,6 +405,29 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace
         v.comment_lines(LineComment::Remove, w, c)
     });
     route::<ToggleBlockComment>(cx, window, &view, |v, w, c| v.toggle_block_comment(w, c));
+    route::<CopyLineUp>(cx, window, &view, |v, w, c| {
+        v.duplicate_lines(Direction::Up, w, c)
+    });
+    route::<CopyLineDown>(cx, window, &view, |v, w, c| {
+        v.duplicate_lines(Direction::Down, w, c)
+    });
+    route::<MoveLineUp>(cx, window, &view, |v, w, c| {
+        v.move_lines(Direction::Up, w, c)
+    });
+    route::<MoveLineDown>(cx, window, &view, |v, w, c| {
+        v.move_lines(Direction::Down, w, c)
+    });
+    route::<DeleteLine>(cx, window, &view, |v, w, c| v.delete_line(w, c));
+    route::<InsertLineBelow>(cx, window, &view, |v, w, c| v.insert_line(false, w, c));
+    route::<InsertLineAbove>(cx, window, &view, |v, w, c| v.insert_line(true, w, c));
+    route::<JoinLines>(cx, window, &view, |v, w, c| v.join_lines(w, c));
+    route::<TrimTrailingWhitespace>(cx, window, &view, |v, w, c| {
+        v.trim_trailing_whitespace(w, c)
+    });
+    route::<SortLinesAscending>(cx, window, &view, |v, w, c| v.sort_lines(false, w, c));
+    route::<SortLinesDescending>(cx, window, &view, |v, w, c| v.sort_lines(true, w, c));
+    route::<TransformToUppercase>(cx, window, &view, |v, w, c| v.transform_case(true, w, c));
+    route::<TransformToLowercase>(cx, window, &view, |v, w, c| v.transform_case(false, w, c));
 }
 
 /// The pattern of `install_actions`: dispatch runs while GPUI has borrowed the window, so
@@ -591,6 +659,47 @@ mod tests {
         assert_eq!(position("Toggle Block Comment"), toggle + 1);
         assert_eq!(position("Add Line Comment"), toggle + 2);
         assert_eq!(position("Remove Line Comment"), toggle + 3);
+    }
+
+    #[test]
+    fn line_commands_are_in_edit_and_selection() {
+        let menus = extend_menus(Vec::new());
+        let items = |title: &str| {
+            let menu = menus
+                .iter()
+                .find(|menu| menu.name.as_ref() == title)
+                .unwrap_or_else(|| panic!("there is no {title} menu"));
+            action_names(&menu.items)
+        };
+        assert_eq!(
+            items("Selection"),
+            [
+                "Select All",
+                "Copy Line Up",
+                "Copy Line Down",
+                "Move Line Up",
+                "Move Line Down",
+                "Add Cursor Above",
+                "Add Cursor Below"
+            ]
+        );
+        let edit = items("Edit");
+        for title in [
+            "Delete Line",
+            "Insert Line Below",
+            "Insert Line Above",
+            "Join Lines",
+            "Trim Trailing Whitespace",
+            "Sort Lines Ascending",
+            "Sort Lines Descending",
+            "Transform to Uppercase",
+            "Transform to Lowercase",
+        ] {
+            assert!(
+                edit.iter().any(|name| name == title),
+                "{title} is not in Edit"
+            );
+        }
     }
 
     #[test]
