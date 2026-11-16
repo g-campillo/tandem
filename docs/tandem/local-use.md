@@ -49,16 +49,42 @@ The file tree is on the left of the editor and the chat on the right. **View →
 
 With language tools on, rest the pointer on a name in the editor to see a tooltip: its signature, highlighted like the code in the editor, above its documentation. An error or a warning shows in the same tooltip, in a block of its own colour, as soon as the pointer is on the underlined text. The tooltip opens only while the pointer is on that text itself, never from the empty space beside a line, and closes when the pointer leaves it. Move the pointer onto the tooltip to scroll it or to select and copy its text (⌘C); a click or a scroll outside it, or any other key, closes it.
 
+Tandem follows VS Code's macOS shortcuts. The command palette (⇧⌘P or F1) lists every command with its shortcut; type to filter and press Enter to run one. The same commands are in the File, Edit, Selection, View and Go menus. ⌘/ comments with the marker of the file's language, placed before the first character of the line; with several lines selected it uses their smallest indentation, and it uncomments when every line is already commented. Sort Lines, Transform to Uppercase/Lowercase and Select Line have no shortcut and are run from the palette or the menus. Four keys differ from VS Code because Tandem already used them: ⌘L focuses the chat, ⌘. stops Claude, ⌥⌘C is Check my work and ⇧⌘D compares with disk. With several cursors, the line commands (comment, move, copy, delete) act on the first cursor only. Fold regions with the arrows in the gutter; ⌥⌘] and ⌘K ⌘J unfold.
+
 | Action | Shortcut |
 | --- | --- |
-| Open folder / quick open / new file | ⌘O / ⌘P / ⌘N |
+| Command palette / keyboard shortcuts | ⇧⌘P or F1 / ⌘K ⌘S |
+| Open folder / recent projects / quick open / new file | ⌘O / ⌃R / ⌘P / ⌘N |
 | Save / save all / save copy | ⌘S / ⌥⌘S / ⇧⌘S |
-| Find / replace / search the project | ⌘F / ⌥⌘F / ⇧⌘F |
-| Compare with disk / close file | ⇧⌘D / ⌘W |
-| Terminal / Problems | ⌃` / ⇧⌘M |
+| Close file / close all / reopen closed file | ⌘W / ⌘K ⌘W / ⇧⌘T |
+| Copy path / copy relative path / reveal in Finder | ⌘K P / ⇧⌥⌘C / ⌘K R |
+| Find / replace / find next / find previous | ⌘F / ⌥⌘F / ⌘G / ⇧⌘G |
+| Search the project | ⇧⌘F |
+| Toggle line comment / block comment | ⌘/ / ⇧⌥A |
+| Add / remove line comment | ⌘K ⌘C / ⌘K ⌘U |
+| Move line up / down | ⌥↑ / ⌥↓ |
+| Copy line up / down | ⇧⌥↑ / ⇧⌥↓ |
+| Delete line | ⇧⌘K |
+| Insert line below / above | ⌘↵ / ⇧⌘↵ |
+| Indent / outdent line | ⌘] / ⌘[ |
+| Join lines / trim trailing whitespace | ⌃J / ⌘K ⌘X |
+| Add next occurrence / select all occurrences | ⌘D / ⇧⌘L |
+| Add cursor above / below / at line ends | ⌥⌘↑ / ⌥⌘↓ / ⇧⌥I |
+| Expand / shrink selection | ⌃⇧→ / ⌃⇧← (also with ⌘) |
+| Go to line / definition / matching bracket | ⌃G / F12 / ⇧⌘\ |
+| Back / forward | ⌃- / ⌃⇧- |
+| Next / previous tab | ⌃Tab / ⌃⇧Tab (also ⌥⌘→ / ⌥⌘←, ⇧⌘] / ⇧⌘[) |
+| Go to tab 1–9 | ⌘1 – ⌘9 |
+| Next / previous problem | F8 / ⇧F8 |
+| Trigger suggestions | ⌃Space |
+| Show or hide the file explorer / show the explorer | ⌘B / ⇧⌘E |
+| Show or hide the chat / focus the chat | ⌥⌘B / ⌘L |
+| Show or hide the bottom panel / Terminal / Problems | ⌘J / ⌃` / ⇧⌘M |
+| Word wrap / full screen | ⌥Z / ⌃⌘F |
+| Unfold / unfold all | ⌥⌘] / ⌘K ⌘J |
+| Compare with disk | ⇧⌘D |
 | Text size | ⌘= / ⌘− |
 | Format buffer / references / document symbols | ⇧⌥F / ⇧F12 / ⇧⌘O |
-| Focus the chat / show or hide the chat | ⌘L / ⇧⌘L |
 | Check my work | ⌥⌘C |
 | Stop Claude | ⌘. |
 | Settings | ⌘, |

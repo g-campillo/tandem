@@ -32,6 +32,10 @@ Tandem keeps its state (open tabs, drafts, chat tasks) in `~/Library/Application
 4. **Hand over when you want.** **Do it for me** lets Claude do the active step; **Build the rest for me** lets it do every remaining step.
 5. **Done.** After the last step, Claude checks the task against its "done when" criteria. When they are met, the task is complete.
 
+## Editor commands
+
+The editor uses VS Code's macOS shortcuts: ⌘/ comments a line, ⌥↑/⌥↓ move it, ⌘D adds the next occurrence to the selection, ⌃G goes to a line, ⌘B and ⌥⌘B hide the file explorer and the chat. ⇧⌘P opens the command palette, which lists every command with its shortcut. The full table is in [docs/tandem/local-use.md](docs/tandem/local-use.md).
+
 ## Help levels
 
 Each language has its own help level, Beginner by default. Change it on the step card or in Settings.

@@ -42,8 +42,8 @@ impl Workspace {
     /// widths and the row of panes follow.
     pub(super) fn shown_panes(&self) -> ShownPanes {
         ShownPanes {
-            // The file tree has no command that hides it.
-            files: true,
+            // ⌘B hides and shows the file tree.
+            files: self.commands.explorer_visible,
             chat: self.chat.visible,
         }
     }

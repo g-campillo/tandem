@@ -1,6 +1,7 @@
 mod chat;
 mod chat_logic;
 mod chat_view;
+pub mod commands;
 mod hover;
 mod pane_logic;
 mod panels;
@@ -209,6 +210,7 @@ pub struct Workspace {
     dev: Development,
     chat: ChatUi,
     settings: SettingsUi,
+    commands: commands::CommandsUi,
 }
 
 impl Workspace {
@@ -248,6 +250,7 @@ impl Workspace {
         let mut view = Self {
             chat: ChatUi::new(window, cx),
             settings: SettingsUi::default(),
+            commands: commands::CommandsUi::default(),
             dev: Development::new(window, cx),
             store,
             project: None,
@@ -572,10 +575,12 @@ impl Workspace {
             self.select_tab(index, window, cx);
             return;
         }
+        let word_wrap = self.commands.word_wrap;
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(document.language())
                 .default_value(document.text.clone())
+                .soft_wrap(word_wrap)
         });
         let changes = cx.subscribe(&editor, |view, entity, event: &InputEditsEvent, cx| {
             if let Some((_, text)) = event.edits().last()
@@ -616,6 +621,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_jump(cx);
         if self.loading {
             self.message(
                 "Wait for the selected project to finish opening.",
@@ -685,6 +691,7 @@ impl Workspace {
         }
     }
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.record_jump(cx);
         self.active = Some(index);
         self.settings.open = false;
         self.invalidate_language(cx);
@@ -860,6 +867,7 @@ impl Workspace {
             self.message(format!("Could not preserve draft: {error:#}"), true, cx);
             return;
         }
+        self.note_closed(self.tabs[index].document.path.clone());
         self.tabs.remove(index);
         self.invalidate_language(cx);
         self.active =
@@ -1087,6 +1095,7 @@ impl Workspace {
     }
 
     fn set_sidebar(&mut self, sidebar: Sidebar, window: &mut Window, cx: &mut Context<Self>) {
+        self.commands.explorer_visible = true;
         self.sidebar = sidebar;
         self.query.update(cx, |query, cx| {
             query.set_value("", window, cx);

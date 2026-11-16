@@ -650,6 +650,8 @@ impl Render for Workspace {
         if self.bottom == Some(BottomTab::Terminal)
             && let Some(terminal) = &self.terminal
         {
+            // A hidden file tree has width 0 in `geometry`, so the editor column already
+            // includes its space.
             let columns = (geometry.terminal_available_width() / 7.3).max(40.0) as u16;
             terminal.update(cx, |terminal, _| terminal.resize_columns(columns));
         }

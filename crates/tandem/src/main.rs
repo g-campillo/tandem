@@ -76,7 +76,7 @@ fn main() -> Result<()> {
                 KeyBinding::new("cmd--", ZoomOut, None),
                 KeyBinding::new("ctrl-`", ToggleTerminal, None),
                 KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-shift-l", ToggleChat, None),
+                KeyBinding::new("cmd-alt-b", ToggleChat, None),
                 KeyBinding::new("cmd-l", FocusChat, None),
                 KeyBinding::new("cmd-shift-m", ShowProblems, None),
                 KeyBinding::new("alt-shift-f", FormatFile, None),
@@ -88,7 +88,8 @@ fn main() -> Result<()> {
                 KeyBinding::new("cmd-.", StopClaude, Some("Input")),
                 KeyBinding::new("cmd-alt-c", CheckMyWork, None),
             ]);
-            cx.set_menus([
+            cx.bind_keys(commands::key_bindings());
+            cx.set_menus(commands::extend_menus(vec![
                 Menu::new("Tandem").items([
                     MenuItem::action("Settings…", Settings),
                     MenuItem::action("Quit Tandem", Quit),
@@ -133,7 +134,7 @@ fn main() -> Result<()> {
                     MenuItem::action("Stop Claude", StopClaude),
                     MenuItem::action("Check My Work", CheckMyWork),
                 ]),
-            ]);
+            ]));
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -179,6 +180,7 @@ fn main() -> Result<()> {
                 })
                 .expect("set Tandem root material");
             install_actions(cx, handle.0, handle.1.downgrade());
+            commands::install(cx, handle.0, handle.1.downgrade());
             let quitting = handle.1.downgrade();
             cx.on_action(move |_: &Quit, cx| {
                 if quitting
