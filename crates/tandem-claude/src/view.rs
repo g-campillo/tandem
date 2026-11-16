@@ -1,11 +1,15 @@
 //! Pure decisions the chat panel makes from a `ChatState`, kept here so they are tested
 //! without a UI.
 
+use std::ops::Range;
+use std::path::Path;
+
 use crate::protocol::ModelChoice;
 use crate::state::{ChatState, Connection, TurnKind};
+use tandem_core::breakdown::part_spans;
 use tandem_core::chat::{
-    ActivityKind, ChangeKind, Decision, Guidance, HelpLevel, ItemKind, Phase, StepKind,
-    normalize_language,
+    ActivityKind, BreakdownItem, ChangeKind, Decision, Guidance, HelpLevel, ItemKind, Phase,
+    StepKind, normalize_language,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,6 +275,201 @@ pub fn level_for(state: &ChatState, language: &str) -> HelpLevel {
     state.prefs.help_level(&normalize_language(language))
 }
 
+/// The syntax grammar for a language name or a fence tag such as "rs", "TypeScript" or
+/// "rust,ignore"; `None` shows the code plain.
+pub fn grammar_for_language(name: &str) -> Option<&'static str> {
+    let tag = name
+        .trim()
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '{' | ':'))
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Some(match tag.as_str() {
+        "rust" | "rs" => "rust",
+        "go" | "golang" => "go",
+        "typescript" | "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "node" => "javascript",
+        "python" | "py" | "pyi" | "python3" => "python",
+        "java" => "java",
+        "shell" | "bash" | "sh" | "zsh" | "console" | "shellscript" | "terminal" => "bash",
+        "json" | "jsonc" => "json",
+        "toml" => "toml",
+        "markdown" | "md" => "markdown",
+        "diff" | "patch" => "diff",
+        _ => return None,
+    })
+}
+
+/// The grammar for a file, from its extension.
+pub fn grammar_for_path(path: &str) -> Option<&'static str> {
+    grammar_for_language(Path::new(path).extension()?.to_str()?)
+}
+
+/// Fence tags Claude uses that the toolkit does not resolve by itself, as (tag, grammar).
+pub const FENCE_ALIASES: [(&str, &str); 15] = [
+    ("golang", "go"),
+    ("mts", "typescript"),
+    ("cts", "typescript"),
+    ("jsx", "javascript"),
+    ("mjs", "javascript"),
+    ("cjs", "javascript"),
+    ("node", "javascript"),
+    ("pyi", "python"),
+    ("python3", "python"),
+    ("shell", "bash"),
+    ("zsh", "bash"),
+    ("console", "bash"),
+    ("shellscript", "bash"),
+    ("terminal", "bash"),
+    ("patch", "diff"),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    Code,
+    Pseudocode,
+    Command,
+}
+
+/// A breakdown part that occurs in a block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockPart {
+    pub part: String,
+    pub explanation: String,
+    /// Byte ranges of the block's `text`.
+    pub spans: Vec<Range<usize>>,
+}
+
+/// One code block of the step card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepBlock {
+    pub kind: BlockKind,
+    /// What the card shows: Claude's text with `\r\n` as `\n` and each tab as four spaces.
+    pub text: String,
+    /// What Copy puts on the clipboard: Claude's text unchanged.
+    pub copy: String,
+    pub grammar: Option<&'static str>,
+    /// Underline the explained parts: true above the beginner level, where few parts are.
+    pub mark_parts: bool,
+    /// The breakdown parts found in `text`, in breakdown order.
+    pub parts: Vec<BlockPart>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepBlocks {
+    /// Code, pseudocode, command: the ones the guidance has, in that order.
+    pub blocks: Vec<StepBlock>,
+    /// Breakdown entries whose part is in no block.
+    pub unmatched: Vec<BreakdownItem>,
+}
+
+/// The code blocks of `guidance` for a step in `language`, with each breakdown part
+/// mapped to where it occurs.
+pub fn step_blocks(guidance: &Guidance, language: &str) -> StepBlocks {
+    let shown = |text: &str| text.replace("\r\n", "\n").replace('\t', "    ");
+    let parts: Vec<String> = guidance
+        .breakdown
+        .iter()
+        .map(|item| shown(&item.part))
+        .collect();
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let fields = [
+        (BlockKind::Code, &guidance.code),
+        (BlockKind::Pseudocode, &guidance.pseudocode),
+        (BlockKind::Command, &guidance.command),
+    ];
+    let mut matched = vec![false; guidance.breakdown.len()];
+    let mut blocks = Vec::new();
+    for (kind, field) in fields {
+        let Some(field) = field.as_ref().filter(|field| !field.trim().is_empty()) else {
+            continue;
+        };
+        let text = shown(field);
+        let spans = part_spans(&text, &parts);
+        let mut block_parts = Vec::new();
+        for ((item, spans), matched) in guidance.breakdown.iter().zip(spans).zip(&mut matched) {
+            if spans.is_empty() {
+                continue;
+            }
+            *matched = true;
+            block_parts.push(BlockPart {
+                part: item.part.trim().to_owned(),
+                explanation: item.explanation.trim().to_owned(),
+                spans,
+            });
+        }
+        let grammar = match kind {
+            BlockKind::Code => guidance
+                .path
+                .as_deref()
+                .and_then(grammar_for_path)
+                .or_else(|| grammar_for_language(language)),
+            BlockKind::Pseudocode => None,
+            BlockKind::Command => Some("bash"),
+        };
+        blocks.push(StepBlock {
+            kind,
+            text,
+            copy: field.clone(),
+            grammar,
+            mark_parts: guidance.level != HelpLevel::Beginner,
+            parts: block_parts,
+        });
+    }
+    let unmatched = guidance
+        .breakdown
+        .iter()
+        .zip(matched)
+        .filter(|(_, matched)| !matched)
+        .map(|(item, _)| item.clone())
+        .collect();
+    StepBlocks { blocks, unmatched }
+}
+
+/// The index in `parts` of the part under byte `index`: the shortest span wins, then the
+/// earlier part.
+pub fn part_at(parts: &[BlockPart], index: usize) -> Option<usize> {
+    let spans: Vec<Vec<Range<usize>>> = parts.iter().map(|part| part.spans.clone()).collect();
+    tandem_core::breakdown::part_at(&spans, index)
+}
+
+/// `text` without its backtick pairs, and the byte ranges (of the returned text) that
+/// were between a pair.
+pub fn inline_code(text: &str) -> (String, Vec<Range<usize>>) {
+    let mut shown = String::with_capacity(text.len());
+    let mut code = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('`') {
+        let Some(length) = rest[open + 1..].find('`') else {
+            break;
+        };
+        shown.push_str(&rest[..open]);
+        let start = shown.len();
+        shown.push_str(&rest[open + 1..open + 1 + length]);
+        if shown.len() > start {
+            code.push(start..shown.len());
+        }
+        rest = &rest[open + length + 2..];
+    }
+    shown.push_str(rest);
+    (shown, code)
+}
+
+/// A part as the title of its explanation: its first line that is not blank, cut to 60
+/// characters, with "…" when something was left out.
+pub fn part_label(part: &str) -> String {
+    const MAX: usize = 60;
+    let mut lines = part.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let more = lines.next().is_some();
+    match first.char_indices().nth(MAX) {
+        Some((end, _)) => format!("{}…", &first[..end]),
+        None if more => format!("{first}…"),
+        None => first.to_owned(),
+    }
+}
+
 /// Model text ready for the Markdown renderer, with every image turned into text so that
 /// nothing remote is ever loaded. `![alt](url)` becomes `alt (url)`, any other `![` becomes
 /// `!\[`, and the `<` of an `<img` or `<image` tag becomes `&lt;`. This applies everywhere,
@@ -354,6 +553,8 @@ fn inline_image(text: &str) -> Option<(&str, &str, usize)> {
 }
 
 #[cfg(test)]
+// A part found once has a list of one span, so `vec![4..16]` is the intended value.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
     use crate::state::TurnKind;
@@ -806,6 +1007,217 @@ mod tests {
             .insert("typescript".into(), HelpLevel::Intermediate);
         assert_eq!(level_for(&state, "typescript"), HelpLevel::Intermediate);
         assert_eq!(level_for(&state, " TS "), HelpLevel::Intermediate);
+    }
+
+    #[test]
+    fn grammar_for_language_reads_names_and_fence_tags() {
+        let cases = [
+            ("rust", Some("rust")),
+            ("RS", Some("rust")),
+            (" go ", Some("go")),
+            ("rust,ignore", Some("rust")),
+            ("python title=x", Some("python")),
+            ("ts", Some("typescript")),
+            ("tsx", Some("tsx")),
+            ("jsx", Some("javascript")),
+            ("js{1,3}", Some("javascript")),
+            ("shell", Some("bash")),
+            ("zsh", Some("bash")),
+            ("console", Some("bash")),
+            ("java", Some("java")),
+            ("md", Some("markdown")),
+            ("", None),
+            ("kotlin", None),
+        ];
+        for (name, grammar) in cases {
+            assert_eq!(grammar_for_language(name), grammar, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn fence_aliases_agree_with_grammar_for_language() {
+        for (tag, grammar) in FENCE_ALIASES {
+            assert_eq!(grammar_for_language(tag), Some(grammar), "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn grammar_for_path_reads_the_extension() {
+        let cases = [
+            ("src/main.rs", Some("rust")),
+            ("web/App.tsx", Some("tsx")),
+            ("web/app.mjs", Some("javascript")),
+            ("run.sh", Some("bash")),
+            ("Cargo.toml", Some("toml")),
+            ("Makefile", None),
+            ("notes.txt", None),
+        ];
+        for (path, grammar) in cases {
+            assert_eq!(grammar_for_path(path), grammar, "{path:?}");
+        }
+    }
+
+    fn explained(part: &str, explanation: &str) -> BreakdownItem {
+        BreakdownItem {
+            part: part.into(),
+            explanation: explanation.into(),
+        }
+    }
+
+    fn block_part(part: &str, explanation: &str, spans: Vec<Range<usize>>) -> BlockPart {
+        BlockPart {
+            part: part.into(),
+            explanation: explanation.into(),
+            spans,
+        }
+    }
+
+    #[test]
+    fn step_blocks_maps_beginner_parts_to_the_code() {
+        let code = "    #[arg(long)]\n    json: bool,";
+        let mut guidance = guidance(0);
+        guidance.level = HelpLevel::Beginner;
+        guidance.code = Some(code.into());
+        guidance.path = Some("src/cli.rs".into());
+        guidance.breakdown = vec![
+            explained("#[arg(long)]", "Makes it a --json flag."),
+            explained(" bool ", " True or false. "),
+        ];
+        assert_eq!(
+            step_blocks(&guidance, "rust"),
+            StepBlocks {
+                blocks: vec![StepBlock {
+                    kind: BlockKind::Code,
+                    text: code.into(),
+                    copy: code.into(),
+                    grammar: Some("rust"),
+                    mark_parts: false,
+                    parts: vec![
+                        block_part("#[arg(long)]", "Makes it a --json flag.", vec![4..16]),
+                        block_part("bool", "True or false.", vec![27..31]),
+                    ],
+                }],
+                unmatched: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn step_blocks_shows_tabs_as_spaces_and_copies_the_original() {
+        let mut guidance = guidance(0);
+        guidance.code = Some("\tjson: bool,\r\n".into());
+        guidance.breakdown = vec![explained("json", "The flag's name.")];
+        let blocks = step_blocks(&guidance, "rust");
+        let block = &blocks.blocks[0];
+        assert_eq!(block.text, "    json: bool,\n");
+        assert_eq!(block.copy, "\tjson: bool,\r\n");
+        assert_eq!(
+            block.parts,
+            [block_part("json", "The flag's name.", vec![4..8])]
+        );
+    }
+
+    #[test]
+    fn step_blocks_lists_parts_that_are_in_no_block() {
+        let mut guidance = guidance(0);
+        guidance.level = HelpLevel::Intermediate;
+        guidance.pseudocode =
+            Some("add a field named json of type bool\nmark it with the arg attribute".into());
+        let attribute = explained("#[arg(long)]", "Makes it a flag.");
+        guidance.breakdown = vec![explained("arg", "The attribute."), attribute.clone()];
+        let blocks = step_blocks(&guidance, "rust");
+        assert_eq!(blocks.blocks.len(), 1);
+        let block = &blocks.blocks[0];
+        assert_eq!(block.kind, BlockKind::Pseudocode);
+        assert_eq!(block.grammar, None);
+        assert!(block.mark_parts);
+        assert_eq!(block.parts.len(), 1);
+        assert_eq!(block.parts[0].part, "arg");
+        assert_eq!(block.parts[0].spans.len(), 1);
+        assert_eq!(blocks.unmatched, [attribute]);
+    }
+
+    #[test]
+    fn step_blocks_uses_bash_for_a_command() {
+        let mut guidance = guidance(1);
+        guidance.command = Some("cargo add serde".into());
+        guidance.path = None;
+        let blocks = step_blocks(&guidance, "rust");
+        assert_eq!(blocks.blocks.len(), 1);
+        assert_eq!(blocks.blocks[0].kind, BlockKind::Command);
+        assert_eq!(blocks.blocks[0].grammar, Some("bash"));
+    }
+
+    #[test]
+    fn step_blocks_picks_the_grammar_from_the_path_then_the_language() {
+        let cases = [
+            (Some("web/App.tsx"), "typescript", Some("tsx")),
+            (Some("notes.txt"), "go", Some("go")),
+            (None, "kotlin", None),
+        ];
+        for (path, language, grammar) in cases {
+            let mut guidance = guidance(0);
+            guidance.code = Some("x".into());
+            guidance.path = path.map(Into::into);
+            assert_eq!(
+                step_blocks(&guidance, language).blocks[0].grammar,
+                grammar,
+                "{path:?} {language:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn step_blocks_skips_blank_fields_and_keeps_the_order() {
+        let mut guidance = guidance(0);
+        guidance.code = Some("  ".into());
+        assert!(step_blocks(&guidance, "rust").blocks.is_empty());
+
+        guidance.code = Some("let cargo = 1;".into());
+        guidance.command = Some("cargo add serde".into());
+        guidance.breakdown = vec![explained("cargo", "Rust's build tool.")];
+        let blocks = step_blocks(&guidance, "rust");
+        let kinds: Vec<BlockKind> = blocks.blocks.iter().map(|block| block.kind).collect();
+        assert_eq!(kinds, [BlockKind::Code, BlockKind::Command]);
+        assert_eq!(blocks.blocks[0].parts[0].spans, [4..9]);
+        assert_eq!(blocks.blocks[1].parts[0].spans, [0..5]);
+        assert!(blocks.unmatched.is_empty());
+    }
+
+    #[test]
+    fn part_at_prefers_the_shortest_span() {
+        let parts = [
+            block_part("#[arg(long)]", "a", vec![4..16]),
+            block_part("long", "b", vec![10..14]),
+        ];
+        assert_eq!(part_at(&parts, 11), Some(1));
+        assert_eq!(part_at(&parts, 5), Some(0));
+        assert_eq!(part_at(&parts, 0), None);
+    }
+
+    #[test]
+    fn inline_code_removes_backtick_pairs() {
+        let cases: [(&str, &str, Vec<Range<usize>>); 7] = [
+            ("`bool` is a type", "bool is a type", vec![0..4]),
+            ("a `b` and `c`", "a b and c", vec![2..3, 8..9]),
+            ("no code", "no code", vec![]),
+            ("odd ` one", "odd ` one", vec![]),
+            ("`a` and ` b", "a and ` b", vec![0..1]),
+            ("``", "", vec![]),
+            ("é `ü` x", "é ü x", vec![3..5]),
+        ];
+        for (text, shown, code) in cases {
+            assert_eq!(inline_code(text), (shown.to_owned(), code), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn part_label_is_the_first_line_cut_to_sixty_characters() {
+        assert_eq!(part_label("#[arg(long)]"), "#[arg(long)]");
+        assert_eq!(part_label("  fn main() {\n    run();\n}"), "fn main() {…");
+        assert_eq!(part_label(&"x".repeat(61)), format!("{}…", "x".repeat(60)));
+        assert_eq!(part_label(&"x".repeat(60)), "x".repeat(60));
+        assert_eq!(part_label(""), "");
     }
 
     #[test]
