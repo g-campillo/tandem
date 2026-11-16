@@ -169,7 +169,7 @@ fn unsupported_demonstrated_findings_become_concerns_and_optional_preferences_do
 }
 
 #[test]
-fn schema_four_migration_backs_up_before_upgrading_to_five() {
+fn schema_four_migration_backs_up_before_upgrading_to_six() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("workspace.sqlite");
     {
@@ -182,7 +182,7 @@ fn schema_four_migration_backs_up_before_upgrading_to_five() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     assert!(std::fs::read_dir(directory.path()).unwrap().any(|e| {
         e.unwrap()
             .file_name()

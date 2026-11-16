@@ -153,7 +153,7 @@ fn schema_four_migration_preserves_every_legacy_row_and_creates_backup() {
     assert_eq!(
         c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
 }
 fn legacy_run(task: Option<&TaskPlan>) -> String {

@@ -42,7 +42,7 @@ impl WorkspaceState {
 }
 
 pub struct Store {
-    connection: Connection,
+    pub(crate) connection: Connection,
     // Drop the connection before releasing the state-directory lock.
     _lock: StoreLock,
     pub directory: PathBuf,
@@ -80,10 +80,10 @@ impl Store {
         connection.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            version <= 5,
+            version <= 6,
             "This workspace state belongs to a newer Tandem version; it was not modified"
         );
-        if version > 0 && version < 5 {
+        if version > 0 && version < 6 {
             let backup = directory.join(format!(
                 "workspace-schema{version}-backup-{}.sqlite",
                 now_ms()
@@ -123,7 +123,13 @@ impl Store {
             CREATE TABLE IF NOT EXISTS session_operation(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, outcome TEXT);
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_session_operation ON session_operation(session_id) WHERE outcome IS NULL;
             CREATE TABLE IF NOT EXISTS legacy_task_link(session_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
-            PRAGMA user_version=5;")?;
+            CREATE TABLE IF NOT EXISTS chat_task(id TEXT PRIMARY KEY, root TEXT NOT NULL, updated INTEGER NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS chat_selection(root TEXT PRIMARY KEY, task_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS chat_item(id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, created INTEGER NOT NULL, data TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS chat_item_task ON chat_item(task_id, id);
+            CREATE TABLE IF NOT EXISTS chat_guidance(task_id TEXT NOT NULL, step INTEGER NOT NULL, level TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(task_id, step, level));
+            CREATE TABLE IF NOT EXISTS chat_change_set(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, created INTEGER NOT NULL, data TEXT NOT NULL);
+            PRAGMA user_version=6;")?;
         migration.commit()?;
         let mut store = Self {
             connection,
