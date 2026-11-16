@@ -1,4 +1,4 @@
-use super::pane_logic::pane_geometry;
+use super::pane_logic::{pane_geometry, terminal_columns};
 use super::*;
 use crate::appearance::{compact_button, navigation_button, palette, path_button};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -657,7 +657,8 @@ impl Render for Workspace {
         {
             // A hidden file tree has width 0 in `geometry`, so the editor column already
             // includes its space.
-            let columns = (geometry.terminal_available_width() / 7.3).max(40.0) as u16;
+            let cell = terminal.read(cx).cell_width(window);
+            let columns = terminal_columns(geometry.terminal_available_width(), cell);
             terminal.update(cx, |terminal, _| terminal.resize_columns(columns));
         }
         let files = shown.files.then(|| {

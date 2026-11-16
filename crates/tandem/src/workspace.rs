@@ -1195,7 +1195,14 @@ impl Workspace {
                 return;
             };
             match Terminal::new(&project.root) {
-                Ok(terminal) => self.terminal = Some(cx.new(|cx| TerminalView::new(terminal, cx))),
+                Ok(terminal) => {
+                    let font = self.terminal_font();
+                    self.terminal = Some(cx.new(|cx| {
+                        let mut view = TerminalView::new(terminal, cx);
+                        view.set_font(font, cx);
+                        view
+                    }));
+                }
                 Err(error) => {
                     self.message(format!("Cannot start terminal: {error:#}"), true, cx);
                     return;

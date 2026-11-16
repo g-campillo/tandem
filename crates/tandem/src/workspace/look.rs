@@ -119,7 +119,21 @@ impl Workspace {
     pub(super) fn apply_fonts(&mut self, cx: &mut Context<Self>) {
         self.look.fonts = pane_fonts(&self.look.prefs.fonts, &self.look.installed);
         crate::appearance::set_code_font(cx, self.look.fonts.editor.family.clone());
+        if let Some(terminal) = self.terminal.clone() {
+            let font = self.terminal_font();
+            terminal.update(cx, |terminal, cx| terminal.set_font(font, cx));
+        }
         cx.notify();
+    }
+
+    /// The terminal's font as the terminal view takes it.
+    pub(super) fn terminal_font(&self) -> tandem_terminal::TerminalFont {
+        let face = &self.look.fonts.terminal;
+        tandem_terminal::TerminalFont {
+            family: face.family.clone(),
+            size: face.size,
+            features: face.features.clone(),
+        }
     }
 
     /// Writes the appearance to the store when it differs from what the store holds. A

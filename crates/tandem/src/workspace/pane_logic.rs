@@ -102,6 +102,17 @@ pub fn drag_pane(
     next
 }
 
+/// How many columns a terminal `available` pixels wide has in a font whose characters
+/// are `cell` pixels wide: as many as fit, between 40 and 300.
+pub fn terminal_columns(available: f32, cell: f32) -> u16 {
+    let fit = if available.is_finite() && cell.is_finite() && cell > 0. {
+        (available / cell).floor()
+    } else {
+        0.
+    };
+    fit.clamp(40., 300.) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +401,28 @@ mod tests {
                     "pointer {pointer}, {pane:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn terminal_columns_fit_the_width_between_40_and_300() {
+        assert_eq!(terminal_columns(720., 7.2), 100);
+        assert_eq!(terminal_columns(719., 7.2), 99);
+        assert_eq!(terminal_columns(100., 7.2), 40);
+        assert_eq!(terminal_columns(10_000., 7.2), 300);
+        for (available, cell) in [
+            (720., 0.),
+            (720., -1.),
+            (720., f32::NAN),
+            (f32::NAN, 7.2),
+            (f32::INFINITY, 7.2),
+            (-50., 7.2),
+        ] {
+            assert_eq!(
+                terminal_columns(available, cell),
+                40,
+                "{available} / {cell}"
+            );
         }
     }
 }
