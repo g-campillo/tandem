@@ -20,6 +20,18 @@ pub fn next_bottom(current: Option<BottomTab>, clicked: BottomTab) -> Option<Bot
     }
 }
 
+/// The status bar's line count for the open file, counted the way Github counts: a final
+/// trailing newline does not start another line, so an empty file has 0 lines.
+pub fn line_count_label(text: &str) -> String {
+    let count = text.lines().count();
+
+    if count == 1 {
+        "1 line".to_owned()
+    } else {
+        format!("{count} lines")
+    }
+}
+
 /// The rows of Settings' "Help level per language", as (language id, label): every
 /// language in `HELP_LANGUAGES`, then each other language that has a saved level.
 pub fn help_languages<'a>(saved: impl IntoIterator<Item = &'a str>) -> Vec<(String, String)> {
@@ -157,6 +169,21 @@ mod tests {
                 expected,
                 "{current:?} clicked {clicked:?}"
             );
+        }
+    }
+
+    #[test]
+    fn line_count_label_counts_lines_like_github() {
+        let cases = [
+            ("", "0 lines"),
+            ("a", "1 line"),
+            ("a\n", "1 line"),
+            ("a\nb\n", "2 lines"),
+            ("a\r\nb", "2 lines"),
+        ];
+
+        for (text, expected) in cases {
+            assert_eq!(line_count_label(text), expected, "{text:?}");
         }
     }
 

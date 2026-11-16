@@ -632,6 +632,13 @@ impl Render for Workspace {
         } else {
             "Backing up drafts…"
         };
+
+        // GitHub-style line count of the open file, or None when no file is open.
+        let lines = self
+            .active
+            .and_then(|i| self.tabs.get(i))
+            .map(|tab| line_count_label(&tab.document.text));
+
         if self.bottom == Some(BottomTab::Terminal)
             && let Some(terminal) = &self.terminal
         {
@@ -706,7 +713,12 @@ impl Render for Workspace {
                 div()
                     .id("status")
                     .role(Role::Label)
-                    .aria_label(format!("{}. {backup}", self.status.trim_end_matches('.')))
+                    .aria_label(match &lines {
+                        Some(count) => {
+                            format!("{}. {count}. {backup}", self.status.trim_end_matches('.'))
+                        }
+                        None => format!("{}. {backup}", self.status.trim_end_matches('.')),
+                    })
                     .h_flex()
                     .flex_wrap()
                     .min_w_0()
@@ -725,6 +737,7 @@ impl Render for Workspace {
                             .when(self.error, |d| d.text_color(p.error))
                             .child(self.status.clone()),
                     )
+                    .children(lines)
                     .child(backup),
             )
     }

@@ -7,7 +7,7 @@ mod settings;
 mod tools;
 mod view;
 use chat::ChatUi;
-use chat_logic::{BottomTab, next_bottom};
+use chat_logic::{BottomTab, line_count_label, next_bottom};
 use settings::SettingsUi;
 pub use settings::runtime_status;
 use tools::Development;
