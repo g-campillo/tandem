@@ -65,6 +65,8 @@ pub struct Harness {
     companion: Option<Companion>,
     host: Option<thread::JoinHandle<()>>,
     run: Option<Run>,
+    /// Runs whose companion was dropped without waiting (`abandon()`).
+    abandoned: Vec<Run>,
 }
 
 /// The files of one helper run.
@@ -91,6 +93,7 @@ impl Harness {
             companion: None,
             host: None,
             run: None,
+            abandoned: Vec::new(),
         }
     }
 
@@ -209,16 +212,18 @@ impl Harness {
         if let Some(host) = self.host.take() {
             let _ = host.join();
         }
-        let status = self.run.as_ref()?.status.clone();
-        std::fs::read_to_string(status).ok()?.trim().parse().ok()
+        exit_status(&self.run.as_ref()?.status)
     }
 
     /// Drops the companion without waiting for it, as when Tandem quits: its thread and
-    /// helper wind down in the background.
+    /// helper wind down in the background. Dropping the harness then checks that the
+    /// helper ended by itself once its input closed, as the real helper does when Tandem
+    /// quits; a helper that ignores that would outlive the test run.
     pub fn abandon(&mut self) {
         drop(self.companion.take());
         // The host thread ends with the old controller.
         drop(self.host.take());
+        self.abandoned.extend(self.run.take());
     }
 
     /// The folder that holds the snapshot of change set `id`.
@@ -242,7 +247,26 @@ impl Drop for Harness {
         if let Some(companion) = self.companion.take() {
             companion.shutdown();
         }
+        if thread::panicking() {
+            return;
+        }
+        let deadline = Instant::now() + WAIT_LIMIT;
+        for run in &self.abandoned {
+            while exit_status(&run.status).is_none() {
+                assert!(
+                    Instant::now() < deadline,
+                    "an abandoned fake helper did not end by itself once its input closed; \
+                     it would outlive the test run"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
+}
+
+/// The fake helper's exit status, once the wrapper has recorded it.
+fn exit_status(status: &Path) -> Option<i32> {
+    std::fs::read_to_string(status).ok()?.trim().parse().ok()
 }
 
 /// Runs the fake helper through `bash`, appending everything Tandem writes to `log` and

@@ -1022,10 +1022,8 @@ fn a_takeover_interrupted_by_closing_tandem_is_recovered_for_review() {
         &[
             preamble(),
             turn_ok_with(json!({"policy": "takeover"})),
-            vec![
-                claude_writes(&harness, "src/cli.rs", CLAUDE_CLI),
-                json!({"hang": true}),
-            ],
+            // The turn never finishes; the helper reads until Tandem lets go of it.
+            vec![claude_writes(&harness, "src/cli.rs", CLAUDE_CLI)],
         ]
         .concat(),
     );
