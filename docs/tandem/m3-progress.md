@@ -1,5 +1,7 @@
 # M3 — the companion loop with Rust and Python
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Status: implemented and verified on the development Mac, including the native checks completed on 2026-11-14. The user authorized continuation after M2. Architecture and subscription requirements are unchanged; takeover remains M4.
 
 ## Working plan

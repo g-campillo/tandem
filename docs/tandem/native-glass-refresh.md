@@ -1,5 +1,7 @@
 # Native glass refresh verification
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Verified on macOS 27.0.1 (26A434), Apple silicon, on 2026-11-14. The final QA found no additional visual defect requiring a source change. Task 5 adds this report only; the application source remains at `a0fd795b6ef691d2d9542e86650560c28cb57a36`.
 
 ## Implemented design

@@ -1,5 +1,7 @@
 # M0 feasibility work
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 The user approved the initial plan on 2026-11-13. Implementation is authorized within that plan; material architecture or subscription changes still require review.
 
 ## M0-A working plan

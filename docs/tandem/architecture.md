@@ -1,5 +1,7 @@
 # Architecture and technical research
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Status: implemented guided-companion boundaries below, with historical architecture research dated 2026-11-13 retained in the numbered sections. [Plan entry point](README.md).
 
 Evidence labels in the historical research: **observed** means a local read-only inspection; **documented** means upstream documentation or source; **proposed** means the design at that time; **gate** means a then-future check. No runtime integration, performance or sandbox behavior was tested during that research phase. Current D/S/R/partial M results are in [guided-companion.md](guided-companion.md) and [verification.md](verification.md).

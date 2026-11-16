@@ -1,5 +1,7 @@
 # Implementation roadmap
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Status: approved on 2026-11-13; execution starts with M0. See [current evidence and progress](m0-progress.md). The acceptance criteria below are requirements, not claims of completed testing. [Plan entry point](README.md).
 
 Codex implements the approved milestones end to end, including focused verification and local usability fixes. Before each meaningful milestone/change, write a brief plan naming scope, tests and expected result. Routine choices inside approved scope do not need another approval. A change to architecture, subscription access, source protection or major product scope does.

@@ -1,5 +1,7 @@
 # Tandem plan
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Status: approved by the user on 2026-11-13. M0–M5 are implemented and verified on the development Mac. M3 includes real subscription-backed Rust/Python journeys and native companion, Python, guidance and recovery checks. M5 packages the verified runtime, adds a versioned install/rollback path and closes release usability gaps; see [M5 results](m5-progress.md) and [local usage](local-use.md). M4 adds scoped takeover, draft import/undo and measured improvement proposals; see [M4 results](m4-progress.md). See [M3 results](m3-progress.md), [M2 results](m2-progress.md), [M1 results](m1-progress.md) and [M0 results](m0-progress.md). The original research below is not runtime validation.
 
 ## Recommended direction

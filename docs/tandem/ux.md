@@ -1,5 +1,7 @@
 # UX and interaction specification
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Status: proposed. [Plan entry point](README.md). These are low-fidelity interaction sketches, not validated screens.
 
 ## Working layout

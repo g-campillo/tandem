@@ -1,5 +1,7 @@
 # Guided companion verification
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 A task begins as a persistent discussion. Research receipts inform separate Spec and Plan proposals; each document must be saved and explicitly approved. Start Implementation selects the first dependency-ready step. Its walkthrough separates file creation, one named symbol, a command, and cumulative validation. Review assesses captured inputs; a passing result enables one explicit Next. Final completion requires a full-spec assessment. Solutions remain hidden by default; separate Reveal or an explicitly selected standing AutomaticPreview preference grants no edits.
 
 This document records verification procedures and limits. Completed real fixture journeys do not establish general model quality or full native usability. Concrete packaging/signature/runtime checks remain separate from native observations and installation; see [local use and release preparation](local-use.md). Evidence classes are defined in [verification.md](verification.md).

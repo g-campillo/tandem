@@ -1,5 +1,7 @@
 # M1 — dependable local editor
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Status: implemented, with focused automated and native UI verification on the development Mac. The approved architecture is unchanged. This is an early local editor, not the first companion-equipped release.
 
 ## Working plan

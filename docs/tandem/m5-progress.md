@@ -1,5 +1,7 @@
 # M5 — local macOS release
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Status: implemented and verified for local macOS use; continuation authorized after M4. No architecture or subscription changes.
 
 ## Implementation plan

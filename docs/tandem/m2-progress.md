@@ -1,5 +1,7 @@
 # M2 — language tools, validation and task state
 
+> **Historical.** This document describes the earlier Codex-based design, which was replaced on 2026-11-15 by the Claude chat companion. The current design is in [companion.md](companion.md).
+
 Status: implemented and verified on the development Mac. The approved architecture and subscription requirement are unchanged. This milestone supplies language tools, local checks and operational task state; AI decomposition and review remain M3 work.
 
 ## Working plan
