@@ -10,6 +10,7 @@ mod panels;
 mod panes;
 mod provider;
 mod settings;
+mod settings_look;
 mod tools;
 mod view;
 use chat::ChatUi;
@@ -192,6 +193,7 @@ pub struct Workspace {
     font_size: f32,
     panes: PaneUi,
     look: LookUi,
+    look_controls: settings_look::LookControls,
     generation: u64,
     checkpointed: u64,
     checkpoint_inflight: bool,
@@ -252,6 +254,7 @@ impl Workspace {
         };
         let panes = PaneUi::load(&store.lock().unwrap());
         let look = LookUi::load(&store.lock().unwrap());
+        let look_controls = settings_look::LookControls::new(&look.prefs, window, cx);
         let mut view = Self {
             chat: ChatUi::new(window, cx),
             settings: SettingsUi::default(),
@@ -275,6 +278,7 @@ impl Workspace {
             font_size: 14.0,
             panes,
             look,
+            look_controls,
             generation: sequence,
             checkpointed: sequence,
             checkpoint_inflight: false,

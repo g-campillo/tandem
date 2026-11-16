@@ -170,6 +170,7 @@ impl Workspace {
                     .child(self.claude_settings(cx))
                     .child(self.help_level_settings(cx))
                     .child(self.layout_settings(cx))
+                    .child(self.appearance_settings(cx))
                     .child(self.language_settings(cx))
                     .child(self.app_settings(cx)),
             )
