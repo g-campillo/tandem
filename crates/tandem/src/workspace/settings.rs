@@ -67,17 +67,27 @@ fn settings_lines() -> (Vec<String>, Option<PathBuf>) {
             lines.push("Editing, saving and the terminal still work.".into());
         }
     }
-    if let Some(root) = &resources
-        && let Ok(bytes) = std::fs::read(root.join("release-manifest.json"))
-        && bytes.len() < 1024 * 1024
-        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
-    {
-        lines.push(format!(
-            "Release: {}",
-            value["release_id"].as_str().unwrap_or("development")
-        ));
+    if let Some(line) = resources.as_deref().and_then(release_line) {
+        lines.push(line);
     }
     (lines, resources)
+}
+
+/// The largest release manifest Settings reads; it matches `MANIFEST_LIMIT` in
+/// `scripts/macos_release.py`. Listing the bundled helper's files makes it about 1.5 MB.
+const RELEASE_MANIFEST_LIMIT: usize = 8 * 1024 * 1024;
+
+/// "Release: <id>" from the bundle's release manifest, when there is one.
+fn release_line(resources: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(resources.join("release-manifest.json")).ok()?;
+    if bytes.len() > RELEASE_MANIFEST_LIMIT {
+        return None;
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    Some(format!(
+        "Release: {}",
+        value["release_id"].as_str().unwrap_or("development")
+    ))
 }
 
 impl Workspace {
@@ -409,5 +419,39 @@ impl Workspace {
                     .border_color(cx.theme().border),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_line;
+
+    #[test]
+    fn release_line_reads_a_manifest_that_lists_the_bundled_helper() {
+        // A release manifest lists every file of the helper's npm tree: about 1.5 MB.
+        let resources = tempfile::tempdir().unwrap();
+        let files: serde_json::Map<String, serde_json::Value> = (0..9000)
+            .map(|i| {
+                (
+                    format!("Contents/Resources/claude-helper/node_modules/pkg/file-{i}.js"),
+                    "0".repeat(64).into(),
+                )
+            })
+            .collect();
+        let manifest = serde_json::json!({ "release_id": "redesign-1", "files": files });
+        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        assert!(bytes.len() > 1024 * 1024);
+        std::fs::write(resources.path().join("release-manifest.json"), bytes).unwrap();
+
+        assert_eq!(
+            release_line(resources.path()).as_deref(),
+            Some("Release: redesign-1")
+        );
+    }
+
+    #[test]
+    fn release_line_is_absent_without_a_manifest() {
+        let resources = tempfile::tempdir().unwrap();
+        assert_eq!(release_line(resources.path()), None);
     }
 }

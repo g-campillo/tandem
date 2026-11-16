@@ -14,11 +14,12 @@ import fcntl
 from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
-VENDOR = Path('/opt/homebrew/Caskroom/codex/0.169.0')
-RUNTIME_HASHES = {
-    'bin/codex': '739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002',
-    'bin/codex-exec-server': '0532760c03ec71af4ce4d7a8f745399dabdae2b9ee0283ec849c4997facdb918',
-}
+HELPER = ROOT / 'crates/tandem-claude/helper'
+PINS = json.loads((ROOT / 'scripts/release-inputs.json').read_text())
+CLAUDE_BINARY = 'node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude'
+SDK_LOCK_KEY = 'node_modules/@anthropic-ai/claude-agent-sdk'
+# Listing every file of the helper's npm tree makes a manifest of about 1.5 MB.
+MANIFEST_LIMIT = 8 * 1024 * 1024
 
 def digest(path):
     with path.open('rb') as file:
@@ -38,18 +39,45 @@ def release_name(value):
         raise ValueError('Release id must be a short filename, not a path')
     return value
 
-def copy_runtime(resources):
-    target = resources / 'codex'
-    for relative, expected in RUNTIME_HASHES.items():
-        source = VENDOR / relative
-        if source.is_symlink() or digest(source) != expected:
-            raise ValueError('Pinned vendor runtime component changed: ' + relative)
-        destination = target / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-    # Preserve the vendor layout contract. Unused voice/code-mode resources are
-    # intentionally absent; Tandem exposes neither capability.
-    shutil.copy2(VENDOR / 'codex-package.json', target / 'codex-package.json')
+def check_helper_pins():
+    """Refuse a helper install whose Claude Agent SDK or Claude Code binary is not the pinned one."""
+    if not (HELPER / 'node_modules').is_dir():
+        raise ValueError('Run npm ci in crates/tandem-claude/helper first')
+    lock = json.loads((HELPER / 'package-lock.json').read_text())
+    version = lock.get('packages', {}).get(SDK_LOCK_KEY, {}).get('version')
+    if version != PINS['claude_agent_sdk_version']:
+        raise ValueError(f"Pinned Claude Agent SDK changed: the helper lockfile has {version}, "
+                         f"scripts/release-inputs.json pins {PINS['claude_agent_sdk_version']}")
+    binary = HELPER / CLAUDE_BINARY
+    if not binary.is_file() or digest(binary) != PINS['claude_code_binary_sha256']:
+        raise ValueError('Pinned Claude Agent SDK changed: ' + CLAUDE_BINARY
+                         + ' does not match the fingerprint in scripts/release-inputs.json')
+
+def _skip_installer_files(directory, names):
+    # npm's .bin folders hold symlinks to package scripts, and the hidden
+    # lockfile is npm's install cache; neither is needed to run the helper.
+    skipped = {name for name in names if name == '.bin' and (Path(directory) / name).is_dir()}
+    if Path(directory) == HELPER / 'node_modules' and '.package-lock.json' in names:
+        skipped.add('.package-lock.json')
+    return skipped
+
+def copy_helper(resources):
+    """Copy the installed Claude helper (no tests, no npm links) into the bundle resources."""
+    check_helper_pins()
+    target = resources / 'claude-helper'
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    for name in ['main.mjs', 'package.json', 'package-lock.json']:
+        shutil.copy2(HELPER / name, target / name, follow_symlinks=False)
+    shutil.copytree(HELPER / 'src', target / 'src', symlinks=True)
+    shutil.copytree(HELPER / 'node_modules', target / 'node_modules', symlinks=True, ignore=_skip_installer_files)
+    links = sorted(path for path in target.rglob('*') if path.is_symlink())
+    if links:
+        shutil.rmtree(target)
+        raise ValueError('The helper contains a symlink: ' + str(links[0].relative_to(target)))
 
 def verify_signature(bundle):
     subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(bundle)], check=True, capture_output=True)
@@ -58,7 +86,7 @@ def verify_bundle(bundle):
     if bundle.is_symlink():
         raise ValueError('Verify the concrete versioned bundle, not a symlink')
     manifest_path = bundle / 'Contents/Resources/release-manifest.json'
-    if manifest_path.stat().st_size > 1024 * 1024:
+    if manifest_path.stat().st_size > MANIFEST_LIMIT:
         raise ValueError('Oversized release manifest')
     manifest = json.loads(manifest_path.read_text())
     release_name(manifest['release_id'])
@@ -77,9 +105,14 @@ def verify_bundle(bundle):
               and '_CodeSignature' not in p.parts and p != manifest_path and p != bundle/'Contents/MacOS/tandem'}
     if actual != set(manifest['files']):
         raise ValueError('Release inventory has missing or unexpected files')
-    for relative, expected in RUNTIME_HASHES.items():
-        if digest(bundle / 'Contents/Resources/codex' / relative) != expected:
-            raise ValueError('Runtime fingerprint changed')
+    # Releases from before the Claude helper carry no helper to check; their
+    # files are still verified above, so install and rollback keep working.
+    if 'claude_agent_sdk_version' in manifest:
+        helper = bundle / 'Contents/Resources/claude-helper'
+        if not (helper / 'main.mjs').is_file():
+            raise ValueError('The bundled Claude helper is missing')
+        if not (helper / CLAUDE_BINARY).is_file() or digest(helper / CLAUDE_BINARY) != PINS['claude_code_binary_sha256']:
+            raise ValueError('Claude Code fingerprint changed')
     executable=bundle/'Contents/MacOS/tandem'
     if executable.is_symlink() or not executable.is_file():
         raise ValueError('Missing app executable')
@@ -93,6 +126,8 @@ def package(binary, notices, destination, release_id):
     inventory = json.loads((notices / 'inventory.json').read_text())
     if inventory.get('tandem_lock_sha256') != digest(ROOT/'Cargo.lock'):
         raise ValueError('Notice inventory does not match the current Cargo.lock; regenerate it')
+    if inventory.get('helper_lock_sha256') != digest(HELPER / 'package-lock.json'):
+        raise ValueError('Notice inventory does not match the helper lockfile; regenerate it')
     if inventory.get('unresolved'):
         raise ValueError('Resolve missing third-party notices before packaging')
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -104,23 +139,24 @@ def package(binary, notices, destination, release_id):
         resources.mkdir()
         shutil.copy2(binary, macos / 'tandem')
         (macos / 'tandem').chmod(0o755)
-        copy_runtime(resources)
+        copy_helper(resources)
         shutil.copytree(notices, resources / 'ThirdPartyNotices')
         (resources / 'LOCAL-USE.md').write_text((ROOT / 'docs/tandem/local-use.md').read_text())
         (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({
             'CFBundleExecutable': 'tandem', 'CFBundleIdentifier': 'dev.tandem.ide',
             'CFBundleName': 'Tandem', 'CFBundlePackageType': 'APPL',
-            'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '5',
+            'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '6',
             'LSMinimumSystemVersion': '27.0', 'NSHighResolutionCapable': True,
         }))
         # Sign the main executable before hashing it; the outer seal does not
-        # re-sign vendor components and therefore preserves their pinned bytes.
+        # re-sign the bundled Claude Code binary and so preserves its pinned bytes.
         subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(macos / 'tandem')], check=True, capture_output=True)
         files = {str(p.relative_to(bundle)): digest(p) for p in sorted(bundle.rglob('*')) if p.is_file() and p != macos/'tandem' and '_CodeSignature' not in p.parts}
         write_json(resources / 'release-manifest.json', {
             'schema': 1, 'product': 'Tandem', 'release_id': release_id,
             'target': 'aarch64-apple-darwin', 'app_version': '0.1.0',
-            'codex_version': '0.169.0', 'database_schema': 5,
+            'claude_agent_sdk_version': PINS['claude_agent_sdk_version'],
+            'claude_code_version': PINS['claude_code_version'], 'database_schema': 6,
             'signature': 'ad-hoc', 'notarized': False, 'files': files,
             'source_binary_sha256':digest(binary),
             'executable_integrity':'verified by the code signature; excluded from the resource manifest to avoid a circular seal',

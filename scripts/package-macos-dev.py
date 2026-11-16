@@ -8,7 +8,7 @@ import subprocess
 import os
 import tempfile
 import argparse
-from macos_release import copy_runtime
+from macos_release import copy_helper
 
 root = Path(__file__).resolve().parents[1]
 binary = root / "target/debug/tandem"
@@ -35,7 +35,7 @@ finally:
     "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": profile[1:],
     "NSHighResolutionCapable": True,
 }))
-copy_runtime(bundle / "Contents/Resources")
+copy_helper(bundle / "Contents/Resources")
 subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)], check=True)
 (bundle.parent / "package-receipt.json").write_text(json.dumps({
     "bundle": str(bundle), "binary_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
