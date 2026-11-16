@@ -52,7 +52,142 @@ export function insideProject(cwd, candidate) {
   }
 }
 
-const PIPE_FILTERS = ['head', 'tail', 'grep', 'rg', 'wc', 'sort', 'uniq'];
+// Line breaks, other control characters, and blanks other than space and tab, which shells
+// may or may not split words on.
+const UNMODELLED_CHARACTERS = /[\0-\x08\n-\x1f\x7f]|[^\S \t]/u;
+// Unquoted characters that start syntax the classifier does not model: expansions, brace
+// expansion, subshells, command separators, redirections other than `2>&1`, and comments.
+const UNMODELLED_SYNTAX = new Set(['$', '`', '{', '}', '(', ')', ';', '<', '>', '#']);
+const GLOB = /[*?[]/;
+// Characters a backslash escapes inside double quotes; before any other it stays literal.
+const DOUBLE_QUOTE_ESCAPES = new Set(['$', '`', '"', '\\']);
+const MERGE_STDERR_TAIL = '>&1';
+const WORD_ENDS = new Set([undefined, ' ', '\t', '|', '&']);
+
+/** True at the `>` of a `2>&1` that stands as a word of its own. */
+function mergesStderr(command, index, word) {
+  return (
+    word !== null &&
+    word.start === index - 1 &&
+    command[word.start] === '2' &&
+    command.startsWith(MERGE_STDERR_TAIL, index) &&
+    WORD_ENDS.has(command[index + MERGE_STDERR_TAIL.length])
+  );
+}
+
+/**
+ * Splits `command` the way the shell would: into `&&` parts, each a list of `|` stages, each
+ * a list of words with quotes and backslashes removed. Returns null for syntax it does not
+ * model, and for a glob whose matches could start with `-` and so turn into an option.
+ */
+function parseCommand(command) {
+  if (UNMODELLED_CHARACTERS.test(command)) {
+    return null;
+  }
+  const parts = [];
+  let stages = [];
+  let words = [];
+  let word = null;
+
+  const append = (text, glob = false) => {
+    if (word.text === '' && text !== '') {
+      word.leadingGlob = glob;
+    }
+    word.text += text;
+    word.glob ||= glob;
+  };
+  const endWord = () => {
+    if (word !== null) {
+      if (word.glob && (word.leadingGlob || word.text.startsWith('-'))) {
+        return false;
+      }
+      words.push(word.text);
+      word = null;
+    }
+    return true;
+  };
+  const endStage = () => {
+    if (!endWord() || words.length === 0) {
+      return false;
+    }
+    stages.push(words);
+    words = [];
+    return true;
+  };
+  const endPart = () => {
+    if (!endStage()) {
+      return false;
+    }
+    parts.push(stages);
+    stages = [];
+    return true;
+  };
+
+  let index = 0;
+  while (index < command.length) {
+    const character = command[index];
+    const next = command[index + 1];
+    if (character === ' ' || character === '\t') {
+      if (!endWord()) {
+        return null;
+      }
+      index += 1;
+    } else if (character === '|') {
+      if (next === '|' || next === '&' || !endStage()) {
+        return null;
+      }
+      index += 1;
+    } else if (character === '&') {
+      if (next !== '&' || !endPart()) {
+        return null;
+      }
+      index += 2;
+    } else if (mergesStderr(command, index, word)) {
+      word = null;
+      index += MERGE_STDERR_TAIL.length;
+    } else if (UNMODELLED_SYNTAX.has(character)) {
+      return null;
+    } else {
+      word ??= { start: index, text: '', glob: false, leadingGlob: false };
+      if (character === "'") {
+        const end = command.indexOf("'", index + 1);
+        if (end === -1) {
+          return null;
+        }
+        append(command.slice(index + 1, end));
+        index = end + 1;
+      } else if (character === '"') {
+        index += 1;
+        while (command[index] !== '"') {
+          const quoted = command[index];
+          if (quoted === undefined || quoted === '$' || quoted === '`') {
+            return null;
+          }
+          if (quoted === '\\' && DOUBLE_QUOTE_ESCAPES.has(command[index + 1])) {
+            append(command[index + 1]);
+            index += 2;
+          } else {
+            append(quoted);
+            index += 1;
+          }
+        }
+        index += 1;
+      } else if (character === '\\') {
+        if (next === undefined) {
+          return null;
+        }
+        append(next);
+        index += 2;
+      } else {
+        append(character, GLOB.test(character));
+        index += 1;
+      }
+    }
+  }
+  return endPart() ? parts : null;
+}
+
+const PIPE_FILTERS = new Set(['head', 'tail', 'grep', 'rg', 'wc', 'sort', 'uniq']);
 const ENV_ASSIGNMENT = /^[A-Z_][A-Z0-9_]*=[\w./:-]*$/;
 const READ_COMMANDS = new Set([
   'ls', 'pwd', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'tree', 'file', 'stat', 'which', 'echo',
@@ -61,15 +196,15 @@ const FIND_ACTIONS = new Set([
   '-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls',
 ]);
 const GIT_READS = new Set(['status', 'diff', 'log', 'show', 'branch', 'ls-files', 'blame', 'rev-parse']);
+// With any other argument, such as a name, `git branch` creates, deletes, moves or copies one.
+const GIT_BRANCH_LISTING = new Set([
+  '-a', '--all', '-r', '--remotes', '-v', '-vv', '--verbose', '-l', '--list', '--show-current',
+]);
 const SCRIPT_RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
 const SCRIPT_NAMES = new Set(['test', 'lint', 'build', 'typecheck', 'check', 'tsc']);
 // Long options of read commands that write a file or run another program: git diff/log/show
 // and sort `--output`, rg `--pre` and `--hostname-bin`, sort `--compress-program`.
 const WRITING_OPTIONS = ['--output', '--pre', '--hostname-bin', '--compress-program'];
-
-function startsWithWord(stage, words) {
-  return words.some((word) => stage === word || stage.startsWith(`${word} `));
-}
 
 /** Options before a `--` end-of-options marker. */
 function optionsOf(args) {
@@ -102,24 +237,28 @@ function readerWritesOrRuns(tokens) {
     case 'sort':
       return options.some((token) => /^-[^-]*o/.test(token));
     case 'tree':
-      return options.includes('-o');
+      // `-o` names an output file and `-R` writes 00Tree.html into every folder.
+      return options.some((token) => /^-[^-]*[oR]/.test(token));
     case 'file':
-      return options.includes('-C') || hasLongOption(options, ['--compile']);
-    case 'uniq':
-      // A second operand is the output file.
-      return args.filter((token) => token === '-' || !token.startsWith('-')).length > 1;
+      return options.some((token) => /^-[^-]*C/.test(token)) || hasLongOption(options, ['--compile']);
+    case 'uniq': {
+      // A second operand is the output file, and a glob can expand into several operands.
+      const operands = args.filter((token) => token === '-' || !token.startsWith('-'));
+      return operands.length > 1 || operands.some((token) => GLOB.test(token));
+    }
     default:
       return false;
   }
 }
 
-/** A `cd` target that stays inside the project: relative, no `..`, no `~`, `-` or `$`. */
+/** A `cd` target that stays inside the project: relative, no `..`, `~`, `-`, `$` or glob. */
 function staysInside(target) {
   return (
     !path.isAbsolute(target) &&
     !target.startsWith('~') &&
     !target.startsWith('-') &&
     !target.includes('$') &&
+    !GLOB.test(target) &&
     !target.split('/').includes('..')
   );
 }
@@ -133,7 +272,11 @@ function isRead(tokens) {
     return !args.some((token) => FIND_ACTIONS.has(token));
   }
   if (name === 'git') {
-    return GIT_READS.has(args[0]);
+    const [subcommand, ...rest] = args;
+    if (subcommand === 'branch') {
+      return rest.every((token) => GIT_BRANCH_LISTING.has(token));
+    }
+    return GIT_READS.has(subcommand);
   }
   if (name === 'cd') {
     return args.length === 1 && staysInside(args[0]);
@@ -143,7 +286,13 @@ function isRead(tokens) {
 
 function rewritesFiles(tokens) {
   return tokens.some(
-    (token) => token === '--fix' || token.startsWith('--fix=') || token === '-w' || token === '--write',
+    (token) =>
+      token === '--fix' ||
+      token.startsWith('--fix=') ||
+      token === '--fix-only' ||
+      token === '--write' ||
+      // Go's flag package also accepts `--w` and `-w=true`.
+      /^--?w(=|$)/.test(token),
   );
 }
 
@@ -196,8 +345,7 @@ function isBuild(tokens) {
   }
 }
 
-function classifyStage(stage) {
-  const tokens = stage.split(/\s+/);
+function classifyStage(tokens) {
   let index = 0;
   while (index < tokens.length && ENV_ASSIGNMENT.test(tokens[index])) {
     index += 1;
@@ -217,32 +365,21 @@ function classifyStage(stage) {
   return isBuild(command) ? 'build' : 'other';
 }
 
-/** Classifies a shell command as `'read'`, `'build'` or `'other'`. */
+/**
+ * Classifies a shell command as `'read'`, `'build'` or `'other'`, judging the words the shell
+ * will see after quote removal. Anything it cannot read that way is `'other'`.
+ */
 export function classifyBash(command) {
-  if (
-    command.trim() === '' ||
-    ['\n', '`', '$(', '${', ';', '<'].some((needle) => command.includes(needle))
-  ) {
-    return 'other';
-  }
-  const simplified = command.replaceAll('2>&1', '');
-  if (simplified.includes('>') || simplified.replaceAll('&&', '').includes('&')) {
+  const parts = parseCommand(command);
+  if (parts === null) {
     return 'other';
   }
   const results = [];
-  for (const part of simplified.split('&&')) {
-    const stages = part.split('|').map((stage) => stage.trim());
-    if (stages.some((stage) => stage === '')) {
+  for (const [first, ...filters] of parts) {
+    if (filters.some((stage) => !PIPE_FILTERS.has(stage[0]) || readerWritesOrRuns(stage))) {
       return 'other';
     }
-    const filters = stages.slice(1);
-    if (
-      !filters.every((stage) => startsWithWord(stage, PIPE_FILTERS)) ||
-      filters.some((stage) => readerWritesOrRuns(stage.split(/\s+/)))
-    ) {
-      return 'other';
-    }
-    results.push(classifyStage(stages[0]));
+    results.push(classifyStage(first));
   }
   if (results.includes('other')) {
     return 'other';
