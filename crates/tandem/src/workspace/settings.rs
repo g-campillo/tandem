@@ -18,6 +18,7 @@ const USE_MY_SETUP_NOTE: &str = "On: Claude loads your Claude Code settings, CLA
 const PERMISSIONS_NOTE: &str = "Ask: Claude asks before a command Tandem does not allow by itself. Auto: Claude Code's safety check decides and asks only about risky actions. Bypass: nothing asks, and Claude may also edit project files outside a takeover. Outside a takeover there is no snapshot, so Undo cannot reverse what a command changed or, in Bypass, what Claude edited. Switching to or from Bypass reopens the Claude session and waits until Claude is idle.";
 const SUBSCRIPTION_NOTE: &str = "Tandem uses your Claude subscription through Claude Code. It never asks for or stores an API key.";
 const HELP_LEVEL_NOTE: &str = "Every level explains why. Beginner gives the full code and breaks down every part; Intermediate gives pseudocode and explains what is new; Expert gives a short description.";
+const LAYOUT_NOTE: &str = "Drag the divider between the editor and the file tree or the chat to resize that pane; double-click the divider for its default width. View → Swap File Tree and Chat does the same as this switch.";
 const LIMITS_NOTE: &str = "Local ad hoc macOS build. Not notarized; other Macs and Windows are untested. UTF-8 files ≤2 MiB; 32 open tabs. Buffer undo is per session.";
 
 #[derive(Default)]
@@ -168,6 +169,7 @@ impl Workspace {
                     )
                     .child(self.claude_settings(cx))
                     .child(self.help_level_settings(cx))
+                    .child(self.layout_settings(cx))
                     .child(self.language_settings(cx))
                     .child(self.app_settings(cx)),
             )
@@ -312,6 +314,33 @@ impl Workspace {
         section
             .children(rows)
             .child(panel_metadata(note(HELP_LEVEL_NOTE), cx))
+            .into_any_element()
+    }
+
+    /// Which side the file tree and the chat are on.
+    fn layout_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let swapped = self.panes.layout.swapped;
+        let weak = cx.entity().downgrade();
+        panel_body(cx)
+            .mt_3()
+            .pt_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(panel_heading(note("Layout")))
+            .child(
+                Switch::new("swap-panes")
+                    .label("Chat on the left, file tree on the right")
+                    .checked(swapped)
+                    .on_click(move |checked, _, cx| {
+                        let checked = *checked;
+                        let _ = weak.update(cx, |view, cx| {
+                            if view.panes.layout.swapped != checked {
+                                view.swap_panes(cx);
+                            }
+                        });
+                    }),
+            )
+            .child(panel_metadata(note(LAYOUT_NOTE), cx))
             .into_any_element()
     }
 

@@ -113,6 +113,7 @@ fn main() -> Result<()> {
                 ]),
                 Menu::new("View").items([
                     MenuItem::action("Chat", ToggleChat),
+                    MenuItem::action("Swap File Tree and Chat", SwapPanes),
                     MenuItem::action("Quick Open", QuickOpen),
                     MenuItem::action("Search Project", ProjectSearch),
                     MenuItem::action("Compare with Disk", Changes),

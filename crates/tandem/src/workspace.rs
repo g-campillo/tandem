@@ -1,13 +1,17 @@
 mod chat;
 mod chat_logic;
 mod chat_view;
+mod pane_logic;
 mod panels;
+mod panes;
 mod provider;
 mod settings;
 mod tools;
 mod view;
 use chat::ChatUi;
 use chat_logic::{BottomTab, line_count_label, next_bottom};
+use panes::PaneUi;
+pub use panes::SwapPanes;
 use settings::SettingsUi;
 pub use settings::runtime_status;
 use tools::Development;
@@ -115,6 +119,7 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
         v.chat.visible = !v.chat.visible;
         c.notify();
     });
+    route::<SwapPanes>(cx, window, view.clone(), |v, _, c| v.swap_panes(c));
     route::<FocusChat>(cx, window, view.clone(), |v, w, c| v.focus_chat(w, c));
     route::<FormatFile>(cx, window, view.clone(), |v, w, c| {
         v.language_action("textDocument/formatting", w, c)
@@ -180,6 +185,7 @@ pub struct Workspace {
     recent: Vec<String>,
     show_recent: bool,
     font_size: f32,
+    panes: PaneUi,
     generation: u64,
     checkpointed: u64,
     checkpoint_inflight: bool,
@@ -236,6 +242,7 @@ impl Workspace {
                 store.sequence().unwrap_or(0),
             )
         };
+        let panes = PaneUi::load(&store.lock().unwrap());
         let mut view = Self {
             chat: ChatUi::new(window, cx),
             settings: SettingsUi::default(),
@@ -256,6 +263,7 @@ impl Workspace {
             recent,
             show_recent: false,
             font_size: 14.0,
+            panes,
             generation: sequence,
             checkpointed: sequence,
             checkpoint_inflight: false,
@@ -284,6 +292,7 @@ impl Workspace {
                             view.checkpoint_async(cx);
                             view.development_tick(window, cx);
                             view.chat_tick(window, cx);
+                            view.pane_tick(cx);
                             let rescan = view.disk_events.swap(false, Ordering::Relaxed)
                                 || view.last_index.elapsed() > Duration::from_secs(30);
                             if !view.loading
@@ -383,6 +392,7 @@ impl Workspace {
             );
             return false;
         }
+        self.persist_layout(cx);
         match self.flush(cx) {
             Ok(()) => true,
             Err(error) => {
