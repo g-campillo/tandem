@@ -116,14 +116,76 @@ pub fn final_check(plan: &Plan) -> String {
         "[Tandem] All {} steps are finished. Check each \"done when\" criterion:",
         plan.steps.len()
     )];
-    lines.extend(
-        plan.done_when
-            .iter()
-            .enumerate()
-            .map(|(index, criterion)| format!("{}. {criterion}", index + 1)),
-    );
+    lines.extend(numbered_criteria(plan));
     lines.push("You may run build, test or lint commands. Then call report_check with scope \"task\": \"pass\" only when every criterion is met, otherwise \"needs_changes\" naming each criterion that fails and why. Do not edit files.".to_owned());
     lines.join("\n")
+}
+
+/// The message that hands step `step` (an index into the plan's steps) to Claude.
+pub fn takeover_step(plan: &Plan, step: usize) -> String {
+    let active = &plan.steps[step];
+    let number = step + 1;
+    format!(
+        "[Tandem] Takeover is active for step {number} of {} only: {}. {}\n\
+         Do this step yourself now: edit files inside the project folder, or run the command. Do not do later steps. When the step is finished and verified, call step_done with step {number} and one sentence that says what you did and why.",
+        plan.steps.len(),
+        step_name(active),
+        active.summary
+    )
+}
+
+/// The message that hands every step from `from` (an index into the plan's steps) to
+/// Claude, followed by the "done when" check. With no step left it asks only for that
+/// check.
+pub fn takeover_rest(plan: &Plan, from: usize) -> String {
+    let total = plan.steps.len();
+    let mut lines = Vec::new();
+    if from < total {
+        lines.push(format!(
+            "[Tandem] Takeover is active for all remaining steps, starting at step {} of {total}.",
+            from + 1
+        ));
+        lines.extend(
+            plan.steps
+                .iter()
+                .enumerate()
+                .skip(from)
+                .map(|(index, step)| {
+                    format!("{}. {}: {}", index + 1, step_name(step), step.summary)
+                }),
+        );
+        lines.push("Do them in order yourself and stay inside the project folder. After each step call step_done with its number. When every step is finished, check each \"done when\" criterion, fix what fails, and call report_check with scope \"task\":".to_owned());
+    } else {
+        lines.push("[Tandem] Takeover is active. Every step is finished but the task does not meet its \"done when\" criteria yet. Fix what is missing inside the project folder, then call report_check with scope \"task\":".to_owned());
+    }
+    lines.extend(numbered_criteria(plan));
+    lines.push("If you need a decision from the user, stop and ask in chat.".to_owned());
+    lines.join("\n")
+}
+
+/// The user's answer while a takeover of the remaining steps is paused; `current` is the
+/// index of the next step. Slash commands go through unchanged.
+pub fn takeover_chat(plan: &Plan, current: usize, text: &str) -> String {
+    if text.starts_with('/') {
+        return text.to_owned();
+    }
+    let context = if current < plan.steps.len() {
+        format!(
+            "[Tandem] Takeover is still active for the remaining steps (next: step {} of {}).",
+            current + 1,
+            plan.steps.len()
+        )
+    } else {
+        "[Tandem] Takeover is still active. Every step is finished.".to_owned()
+    };
+    format!("{context}\n\n{text}")
+}
+
+fn numbered_criteria(plan: &Plan) -> impl Iterator<Item = String> + '_ {
+    plan.done_when
+        .iter()
+        .enumerate()
+        .map(|(index, criterion)| format!("{}. {criterion}", index + 1))
 }
 
 /// The label of a step kind in prompts, as in "Edit src/cli.rs".
@@ -464,6 +526,62 @@ mod tests {
              2. The old output is unchanged\n\
              You may run build, test or lint commands. Then call report_check with scope \"task\": \"pass\" only when every criterion is met, otherwise \"needs_changes\" naming each criterion that fails and why. Do not edit files."
         );
+    }
+
+    #[test]
+    fn takeover_step_limits_claude_to_the_one_step() {
+        assert_eq!(
+            takeover_step(&guided_plan(), 0),
+            "[Tandem] Takeover is active for step 1 of 3 only: Edit src/cli.rs. Add `json` to Args\n\
+             Do this step yourself now: edit files inside the project folder, or run the command. Do not do later steps. When the step is finished and verified, call step_done with step 1 and one sentence that says what you did and why."
+        );
+        assert!(takeover_step(&guided_plan(), 1).starts_with(
+            "[Tandem] Takeover is active for step 2 of 3 only: Run cargo add serde. Add serde\n"
+        ));
+        assert!(takeover_step(&guided_plan(), 1).contains("call step_done with step 2 and"));
+    }
+
+    #[test]
+    fn takeover_rest_lists_the_remaining_steps_and_the_criteria() {
+        assert_eq!(
+            takeover_rest(&guided_plan(), 1),
+            "[Tandem] Takeover is active for all remaining steps, starting at step 2 of 3.\n\
+             2. Run cargo add serde: Add serde\n\
+             3. Create tests/cli.rs: Add a test\n\
+             Do them in order yourself and stay inside the project folder. After each step call step_done with its number. When every step is finished, check each \"done when\" criterion, fix what fails, and call report_check with scope \"task\":\n\
+             1. `--json` prints valid JSON\n\
+             2. The old output is unchanged\n\
+             If you need a decision from the user, stop and ask in chat."
+        );
+        let all = takeover_rest(&guided_plan(), 0);
+        assert!(all.starts_with(
+            "[Tandem] Takeover is active for all remaining steps, starting at step 1 of 3.\n1. Edit src/cli.rs: Add `json` to Args\n2. Run"
+        ));
+    }
+
+    #[test]
+    fn takeover_rest_with_no_step_left_asks_only_for_the_criteria() {
+        assert_eq!(
+            takeover_rest(&guided_plan(), 3),
+            "[Tandem] Takeover is active. Every step is finished but the task does not meet its \"done when\" criteria yet. Fix what is missing inside the project folder, then call report_check with scope \"task\":\n\
+             1. `--json` prints valid JSON\n\
+             2. The old output is unchanged\n\
+             If you need a decision from the user, stop and ask in chat."
+        );
+    }
+
+    #[test]
+    fn takeover_chat_names_the_next_step_and_keeps_slash_commands() {
+        let plan = guided_plan();
+        assert_eq!(
+            takeover_chat(&plan, 1, "yes, go on"),
+            "[Tandem] Takeover is still active for the remaining steps (next: step 2 of 3).\n\nyes, go on"
+        );
+        assert_eq!(
+            takeover_chat(&plan, 3, "Use serde_json."),
+            "[Tandem] Takeover is still active. Every step is finished.\n\nUse serde_json."
+        );
+        assert_eq!(takeover_chat(&plan, 0, "/compact"), "/compact");
     }
 
     #[test]

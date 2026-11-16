@@ -213,6 +213,19 @@ impl Harness {
         std::fs::read_to_string(status).ok()?.trim().parse().ok()
     }
 
+    /// Drops the companion without waiting for it, as when Tandem quits: its thread and
+    /// helper wind down in the background.
+    pub fn abandon(&mut self) {
+        drop(self.companion.take());
+        // The host thread ends with the old controller.
+        drop(self.host.take());
+    }
+
+    /// The folder that holds the snapshot of change set `id`.
+    pub fn snapshot_dir(&self, id: &str) -> PathBuf {
+        self.with_store(|store| store.directory.join("takeover").join(id))
+    }
+
     /// Shuts down and checks that the fake helper ran its whole script without a mismatch.
     pub fn finish(mut self) {
         assert_eq!(

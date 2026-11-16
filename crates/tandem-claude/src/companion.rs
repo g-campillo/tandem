@@ -1,7 +1,8 @@
 //! The headless companion controller. It runs on its own thread, owns the helper process
 //! and the active task, persists through the shared `Store`, and publishes an immutable
 //! `ChatState` snapshot for the UI. Only `Command`s from the UI and frames from the helper
-//! drive it; questions about the editor go to the UI as `Signal::Host`.
+//! drive it; questions about the editor go to the UI as `Signal::Host`. The guided build
+//! lives in `guided.rs` and takeovers in `takeover.rs`.
 
 use crate::client::{HelperClient, Received};
 use crate::guided::{self, TurnProgress};
@@ -15,6 +16,7 @@ use crate::state::{
     BufferText, ChatState, Command, CompanionConfig, Connection, HostAnswer, HostAsk, HostQuestion,
     InstallInfo, Signal, TurnKind,
 };
+use crate::takeover;
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -24,8 +26,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tandem_core::chat::{
-    ActivityKind, ChatItem, ChatPrefs, ChatTask, DEFAULT_MODEL, ItemKind, NEW_TASK_TITLE, Phase,
-    Plan, TaskSummary,
+    ActivityKind, ChatItem, ChatPrefs, ChatTask, DEFAULT_MODEL, ItemKind, Mode, NEW_TASK_TITLE,
+    Phase, Plan, TaskSummary,
 };
 use tandem_core::{Project, Store, new_id, normalized_relative};
 
@@ -210,10 +212,12 @@ fn run(
     }
 }
 
-/// Opens the project and loads the preferences, the task list and the selected task (a
-/// new one when the project has none) with its items.
+/// Opens the project, settles takeovers that Tandem closed during, and loads the
+/// preferences, the task list and the selected task (a new one when the project has none)
+/// with its items and change sets.
 fn load(config: &CompanionConfig) -> Result<(Project, ChatState)> {
     let project = Project::open(&config.project)?;
+    let recovery_problem = takeover::recover(&project, &config.store);
     let key = project.key().to_owned();
     let mut store = lock(&config.store);
     let prefs = store.chat_prefs()?;
@@ -236,6 +240,7 @@ fn load(config: &CompanionConfig) -> Result<(Project, ChatState)> {
     };
     let items = store.chat_items(&task.id)?;
     let tasks = store.chat_tasks(&key)?;
+    let change_sets = store.change_sets(&task.id)?;
     let guidance = guided::stored_guidance(&store, &task, &prefs);
     drop(store);
     let mut state = ChatState::starting();
@@ -243,6 +248,10 @@ fn load(config: &CompanionConfig) -> Result<(Project, ChatState)> {
         Ok(guidance) => state.guidance = guidance,
         Err(error) => state.banner = Some(guided::guidance_load_error(&error)),
     }
+    if recovery_problem.is_some() {
+        state.banner = recovery_problem;
+    }
+    state.change_sets = change_sets;
     state.prefs = prefs;
     state.tasks = tasks;
     state.task = Some(task);
@@ -290,10 +299,10 @@ struct PermissionAsk {
 }
 
 /// The controller's state on its own thread. The guided build's methods live in
-/// `guided.rs`.
+/// `guided.rs`, the takeover's in `takeover.rs`.
 pub(crate) struct Controller {
     config: CompanionConfig,
-    project: Project,
+    pub(crate) project: Project,
     publisher: Publisher,
     inbox: Receiver<Inbound>,
     inbox_sender: Sender<Inbound>,
@@ -373,6 +382,9 @@ impl Controller {
             Command::GuideStep => self.guide_step(),
             Command::CheckMyWork => self.check_my_work(),
             Command::SetHelpLevel { language, level } => self.set_help_level(&language, level),
+            Command::Takeover { request, saved } => self.take_over(request, &saved),
+            Command::Keep { change_set, path } => self.keep(&change_set, path.as_deref()),
+            Command::Undo { change_set, path } => self.undo(&change_set, path.as_deref()),
             Command::Reconnect => {
                 if self.snapshot().turn.is_none() {
                     self.connect();
@@ -709,6 +721,7 @@ impl Controller {
                         "read_editor_buffer" => self.read_editor_buffer(&input),
                         "show_step" => self.show_step(input),
                         "report_check" => self.report_check(input),
+                        "step_done" => self.step_done(input),
                         _ => (false, TOOL_UNAVAILABLE.to_owned()),
                     };
                     self.respond(&id, ResponseBody::Tool { ok, text });
@@ -752,7 +765,10 @@ impl Controller {
             }),
             Event::Notice { text } => self.append_item(ItemKind::Notice { text }),
             Event::AuthRefused { detail, .. } => {
-                let turn = self.snapshot().turn;
+                let turn = self.snapshot().turn.clone();
+                if let Some(kind) = &turn {
+                    self.settle_takeover(kind, TurnStatus::Error);
+                }
                 self.end_turn(None);
                 if let Some(kind) = turn {
                     self.after_turn(kind, TurnStatus::Error);
@@ -762,9 +778,10 @@ impl Controller {
             }
             Event::PermissionCancelled { id } => self.permission_cancelled(&id),
             Event::TurnFinished { status, error, .. } => {
-                let Some(kind) = self.snapshot().turn else {
+                let Some(kind) = self.snapshot().turn.clone() else {
                     return;
                 };
+                self.settle_takeover(&kind, status);
                 match status {
                     TurnStatus::Completed => self.end_turn(None),
                     TurnStatus::Interrupted => self.end_turn(Some(STOPPED_NOTICE.into())),
@@ -806,7 +823,8 @@ impl Controller {
 
     /// The helper exited, or its Claude session ended on its own.
     fn helper_stopped(&mut self, stderr_tail: &str, error: Option<String>) {
-        if let Some(kind) = self.snapshot().turn {
+        if let Some(kind) = self.snapshot().turn.clone() {
+            self.settle_takeover(&kind, TurnStatus::Error);
             self.end_turn_with_error(None);
             self.after_turn(kind, TurnStatus::Error);
         }
@@ -1031,6 +1049,10 @@ impl Controller {
         let Some(mut task) = state.task.clone() else {
             return;
         };
+        if task.phase == Phase::Build && task.mode == Mode::Takeover {
+            // Claude paused a takeover of the remaining steps to ask something.
+            return self.continue_takeover(text);
+        }
         let prompt = prompts::chat(&task, &state.items, text, self.recap);
         let policy = match task.phase {
             Phase::Discuss | Phase::Plan => Policy::Discuss,
@@ -1046,7 +1068,8 @@ impl Controller {
         self.start_turn(TurnKind::Chat, prompt, policy);
     }
 
-    pub(crate) fn start_turn(&mut self, kind: TurnKind, text: String, policy: Policy) {
+    /// Starts a turn; `false` when the helper refused it (the banner says why).
+    pub(crate) fn start_turn(&mut self, kind: TurnKind, text: String, policy: Policy) -> bool {
         let prefs = self.snapshot().prefs.clone();
         let turn = Turn {
             text,
@@ -1061,13 +1084,19 @@ impl Controller {
                 self.update(|state| {
                     state.turn = Some(kind);
                     state.banner = None;
+                    // A takeover goes from preparing to running in one step.
+                    state.preparing_takeover = false;
                 });
                 if let Some(mut task) = self.snapshot().task.clone() {
                     task.session_started = true;
                     self.save_task(task);
                 }
+                true
             }
-            Err(error) => self.set_banner(error.message),
+            Err(error) => {
+                self.set_banner(error.message);
+                false
+            }
         }
     }
 
@@ -1134,6 +1163,7 @@ impl Controller {
             state.guidance = None;
         });
         self.refresh_guidance();
+        self.refresh_change_sets();
         self.reopen_session();
     }
 
@@ -1287,6 +1317,6 @@ fn title_from(text: &str) -> String {
     cut(text.trim(), TITLE_CHARS).trim_end().to_owned()
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

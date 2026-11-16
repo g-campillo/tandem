@@ -4,7 +4,8 @@
 use crate::protocol::ModelChoice;
 use crate::state::{ChatState, Connection, TurnKind};
 use tandem_core::chat::{
-    ActivityKind, Guidance, HelpLevel, ItemKind, Phase, StepKind, normalize_language,
+    ActivityKind, ChangeKind, Decision, Guidance, HelpLevel, ItemKind, Phase, StepKind,
+    normalize_language,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,6 +216,56 @@ pub fn final_card(state: &ChatState) -> bool {
     })
 }
 
+/// Whether Claude is editing files: a takeover turn runs or its snapshot is being taken.
+pub fn takeover_running(state: &ChatState) -> bool {
+    state.preparing_takeover || matches!(state.turn, Some(TurnKind::Takeover { .. }))
+}
+
+/// One file of a takeover's changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeRow {
+    pub path: String,
+    pub kind: ChangeKind,
+    pub decision: Decision,
+    /// Undo can restore the earlier version.
+    pub undoable: bool,
+}
+
+/// The card for a `Changes` item: what one takeover changed, with Keep and Undo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangesCard {
+    pub id: String,
+    pub rows: Vec<ChangeRow>,
+    /// The files still waiting for Keep or Undo.
+    pub undecided: usize,
+    /// No turn runs and no takeover is being prepared; the connection does not matter.
+    pub can_act: bool,
+}
+
+/// The card for the active task's change set `change_set`, if it has one by that id.
+pub fn changes_card(state: &ChatState, change_set: &str) -> Option<ChangesCard> {
+    let set = state.change_sets.iter().find(|set| set.id == change_set)?;
+    let rows: Vec<ChangeRow> = set
+        .files
+        .iter()
+        .map(|file| ChangeRow {
+            path: file.path.clone(),
+            kind: file.kind,
+            decision: file.decision,
+            undoable: file.undoable,
+        })
+        .collect();
+    Some(ChangesCard {
+        id: set.id.clone(),
+        undecided: rows
+            .iter()
+            .filter(|row| row.decision == Decision::Undecided)
+            .count(),
+        rows,
+        can_act: state.turn.is_none() && !state.preparing_takeover,
+    })
+}
+
 /// The saved help level for `language`, Beginner when none was chosen.
 pub fn level_for(state: &ChatState, language: &str) -> HelpLevel {
     state.prefs.help_level(&normalize_language(language))
@@ -306,7 +357,10 @@ fn inline_image(text: &str) -> Option<(&str, &str, usize)> {
 mod tests {
     use super::*;
     use crate::state::TurnKind;
-    use tandem_core::chat::{ChatItem, ChatTask, ItemKind, Plan, PlanStep};
+    use tandem_core::chat::{
+        ChangeSet, ChangeSetStatus, ChatItem, ChatTask, FileChange, ItemKind, Plan, PlanStep,
+        TakeoverScope,
+    };
 
     fn ready() -> Connection {
         Connection::Ready {
@@ -638,6 +692,108 @@ mod tests {
         state.task = None;
         assert_eq!(step_card(&state), None);
         assert!(!final_card(&state));
+    }
+
+    fn takeover_turn() -> TurnKind {
+        TurnKind::Takeover {
+            scope: TakeoverScope::Step(0),
+            change_set: "set-1".into(),
+        }
+    }
+
+    #[test]
+    fn takeover_running_covers_the_turn_and_the_snapshot() {
+        let mut state = guided_state(0);
+        assert!(!takeover_running(&state));
+        state.turn = Some(TurnKind::Chat);
+        assert!(!takeover_running(&state));
+        state.turn = Some(takeover_turn());
+        assert!(takeover_running(&state));
+        state.turn = None;
+        state.preparing_takeover = true;
+        assert!(takeover_running(&state));
+    }
+
+    fn change(path: &str, kind: ChangeKind, decision: Decision, undoable: bool) -> FileChange {
+        FileChange {
+            path: path.into(),
+            kind,
+            decision,
+            after_hash: None,
+            undoable,
+        }
+    }
+
+    #[test]
+    fn changes_card_lists_the_files_and_counts_the_undecided_ones() {
+        let mut state = guided_state(1);
+        state.change_sets = vec![
+            ChangeSet {
+                id: "set-0".into(),
+                task_id: "t".into(),
+                scope: TakeoverScope::Step(0),
+                status: ChangeSetStatus::Resolved,
+                files: vec![change("a.rs", ChangeKind::Created, Decision::Kept, true)],
+                created_at_ms: 1,
+            },
+            ChangeSet {
+                id: "set-1".into(),
+                task_id: "t".into(),
+                scope: TakeoverScope::Step(0),
+                status: ChangeSetStatus::Review,
+                files: vec![
+                    change("src/a.rs", ChangeKind::Modified, Decision::Undecided, true),
+                    change(
+                        "src/big.bin",
+                        ChangeKind::Modified,
+                        Decision::Undecided,
+                        false,
+                    ),
+                    change("src/main.rs", ChangeKind::Deleted, Decision::Undone, true),
+                ],
+                created_at_ms: 2,
+            },
+        ];
+        let card = changes_card(&state, "set-1").expect("a card");
+        assert_eq!(
+            card,
+            ChangesCard {
+                id: "set-1".into(),
+                rows: vec![
+                    ChangeRow {
+                        path: "src/a.rs".into(),
+                        kind: ChangeKind::Modified,
+                        decision: Decision::Undecided,
+                        undoable: true,
+                    },
+                    ChangeRow {
+                        path: "src/big.bin".into(),
+                        kind: ChangeKind::Modified,
+                        decision: Decision::Undecided,
+                        undoable: false,
+                    },
+                    ChangeRow {
+                        path: "src/main.rs".into(),
+                        kind: ChangeKind::Deleted,
+                        decision: Decision::Undone,
+                        undoable: true,
+                    },
+                ],
+                undecided: 2,
+                can_act: true,
+            }
+        );
+        assert_eq!(changes_card(&state, "set-0").unwrap().undecided, 0);
+        assert_eq!(changes_card(&state, "missing"), None);
+
+        // The buttons wait while any turn runs, also without a connection.
+        state.turn = Some(TurnKind::Chat);
+        assert!(!changes_card(&state, "set-1").unwrap().can_act);
+        state.turn = None;
+        state.connection = Connection::Starting;
+        assert!(changes_card(&state, "set-1").unwrap().can_act);
+        state.preparing_takeover = true;
+        assert!(!changes_card(&state, "set-1").unwrap().can_act);
     }
 
     #[test]

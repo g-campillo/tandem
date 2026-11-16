@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use tandem_core::Store;
-use tandem_core::chat::{ChatItem, ChatPrefs, ChatTask, Guidance, HelpLevel, TaskSummary};
+use tandem_core::chat::{
+    ChangeSet, ChatItem, ChatPrefs, ChatTask, Guidance, HelpLevel, TakeoverScope, TaskSummary,
+};
 
 /// How far Tandem got in reaching Claude.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +47,7 @@ pub struct InstallInfo {
 }
 
 /// What the running turn was started for. Step numbers are indexes into the plan's steps.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnKind {
     Chat,
     /// Claude prepares guidance for `step` at `level`.
@@ -59,6 +61,18 @@ pub enum TurnKind {
     },
     /// Claude checks the whole task against its "done when" criteria.
     FinalCheck,
+    /// Claude does the work itself; `change_set` records what it changes.
+    Takeover {
+        scope: TakeoverScope,
+        change_set: String,
+    },
+}
+
+/// What the user asks Claude to do: the active step only, or every remaining step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TakeoverRequest {
+    Step,
+    Rest,
 }
 
 /// An immutable snapshot of everything the chat panel shows.
@@ -82,6 +96,11 @@ pub struct ChatState {
     pub banner: Option<String>,
     /// Guidance for the active step at the current help level, if any.
     pub guidance: Option<Guidance>,
+    /// The active task's takeover change sets, oldest first.
+    pub change_sets: Vec<ChangeSet>,
+    /// Tandem is getting a takeover ready: taking the snapshot of the project and starting
+    /// the turn. The editor stays read-only, as it does while the takeover turn runs.
+    pub preparing_takeover: bool,
 }
 
 impl ChatState {
@@ -101,6 +120,8 @@ impl ChatState {
             pending_permission: None,
             banner: None,
             guidance: None,
+            change_sets: Vec::new(),
+            preparing_takeover: false,
         }
     }
 }
@@ -126,6 +147,21 @@ pub enum Command {
     SetHelpLevel {
         language: String,
         level: HelpLevel,
+    },
+    /// Let Claude do the work. `saved` lists the files the UI saved just before.
+    Takeover {
+        request: TakeoverRequest,
+        saved: Vec<String>,
+    },
+    /// Accept Claude's change to `path`, or to every undecided file when `None`.
+    Keep {
+        change_set: String,
+        path: Option<String>,
+    },
+    /// Restore the file from before Claude's change, or every undecided file when `None`.
+    Undo {
+        change_set: String,
+        path: Option<String>,
     },
     Reconnect,
     Shutdown,

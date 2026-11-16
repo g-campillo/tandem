@@ -1,19 +1,20 @@
 //! The guided build: guidance for each step at the user's help level, "Check my work" and
 //! the final check against the plan's "done when" criteria. These are methods of the
 //! companion controller; `companion.rs` routes the commands, the `show_step` and
-//! `report_check` tools and every finished turn here.
+//! `report_check` tools and every finished turn here. A takeover of the remaining steps
+//! also ends with `report_check` (see `takeover.rs`).
 
 use crate::companion::Controller;
 use crate::prompts;
 use crate::protocol::{Policy, TurnStatus};
-use crate::state::{ChatState, Connection, HostAnswer, HostQuestion, TurnKind};
+use crate::state::{ChatState, Connection, TurnKind};
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 use tandem_core::Store;
 use tandem_core::chat::{
     BreakdownItem, ChatPrefs, ChatTask, CheckResult, Finding, Guidance, HelpLevel, ItemKind, Mode,
-    Phase, PlanStep, StepKind, normalize_language,
+    Phase, PlanStep, StepKind, TakeoverScope, normalize_language,
 };
 
 const BUILDING: &str = "You are building this. Claude guides each step.";
@@ -33,10 +34,12 @@ const NO_VERDICT: &str = "Claude did not give a verdict. Use \"Check my work\" a
 pub(crate) struct TurnProgress {
     guidance_shown: bool,
     verdict_reported: bool,
-    follow_up: Option<FollowUp>,
+    /// A takeover recorded a finished step with `step_done`.
+    pub(crate) step_recorded: bool,
+    pub(crate) follow_up: Option<FollowUp>,
 }
 
-enum FollowUp {
+pub(crate) enum FollowUp {
     /// A step passed and another one is open.
     NextGuidance,
     /// The last step passed.
@@ -111,6 +114,13 @@ pub(crate) fn guidance_load_error(error: &anyhow::Error) -> String {
     format!("Could not load the step guidance: {error:#}")
 }
 
+/// Every step of the plan is finished.
+fn every_step_finished(task: &ChatTask) -> bool {
+    task.plan
+        .as_ref()
+        .is_some_and(|plan| task.current_step >= plan.steps.len())
+}
+
 fn idle_and_ready(state: &ChatState) -> bool {
     state.turn.is_none() && matches!(state.connection, Connection::Ready { .. })
 }
@@ -139,7 +149,7 @@ impl Controller {
 
     /// Shows the stored guidance for the active step at its help level, or asks Claude for
     /// it.
-    fn start_guidance(&mut self) {
+    pub(crate) fn start_guidance(&mut self) {
         let state = self.snapshot();
         let Some(task) = &state.task else {
             return;
@@ -247,10 +257,7 @@ impl Controller {
             return self.start_final_check();
         };
         let level = state.prefs.help_level(&step.language);
-        let unsaved = match self.ask_host(HostQuestion::DirtyPaths) {
-            Some(HostAnswer::DirtyPaths(paths)) => paths,
-            _ => Vec::new(),
-        };
+        let unsaved = self.dirty_paths();
         self.start_turn(
             TurnKind::Check { step: index },
             prompts::check(plan, index, level, &unsaved),
@@ -337,15 +344,20 @@ impl Controller {
         (true, GUIDANCE_SHOWN.into())
     }
 
-    /// The `report_check` tool: one verdict per Check or FinalCheck turn.
+    /// The `report_check` tool: one verdict per Check or FinalCheck turn, or per takeover
+    /// of the remaining steps once every step is finished.
     pub(crate) fn report_check(&mut self, input: Value) -> (bool, String) {
         let state = self.snapshot();
-        if !matches!(
-            state.turn,
-            Some(TurnKind::Check { .. } | TurnKind::FinalCheck)
-        ) {
-            return (false, NO_CHECK.into());
-        }
+        // The step being checked, `None` for the whole task.
+        let checking = match &state.turn {
+            Some(TurnKind::Check { step }) => Some(*step),
+            Some(TurnKind::FinalCheck) => None,
+            Some(TurnKind::Takeover {
+                scope: TakeoverScope::Rest(_),
+                ..
+            }) if state.task.as_ref().is_some_and(every_step_finished) => None,
+            _ => return (false, NO_CHECK.into()),
+        };
         if self.progress.verdict_reported {
             return (false, ALREADY_REPORTED.into());
         }
@@ -358,8 +370,8 @@ impl Controller {
                 );
             }
         };
-        let step = match (input.scope, state.turn) {
-            (CheckScope::Step, Some(TurnKind::Check { step })) => {
+        let step = match (input.scope, checking) {
+            (CheckScope::Step, Some(step)) => {
                 if input.step.is_some_and(|number| number != step + 1) {
                     return (
                         false,
@@ -371,7 +383,7 @@ impl Controller {
                 }
                 Some(step)
             }
-            (CheckScope::Task, Some(TurnKind::FinalCheck)) => None,
+            (CheckScope::Task, None) => None,
             _ => return (false, NO_CHECK.into()),
         };
         let explanation = input.explanation.trim().to_owned();

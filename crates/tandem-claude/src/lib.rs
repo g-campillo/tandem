@@ -8,6 +8,7 @@ pub mod install;
 pub mod prompts;
 pub mod protocol;
 pub mod state;
+mod takeover;
 pub mod view;
 
 pub use client::*;
