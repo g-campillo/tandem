@@ -49,6 +49,11 @@ pub enum Node {
 /// and deeper renders stay empty, so a body from a language server cannot exhaust the stack.
 const MAX_NESTING: usize = 100;
 
+/// The longest text an expansion inserts: no more than the editor can save. Mirrors of
+/// mirrors double their text at each level and a variable value may be repeated, so the
+/// text is cut here, on a char boundary.
+const MAX_TEXT_BYTES: usize = crate::MAX_FILE_BYTES as usize;
+
 /// Parses `$1`, `${1}`, `${1:default}`, `${1|a,b|}`, `$name`, `${name}`, `${name:default}`
 /// and transforms (`${1/regex/format/flags}`, `${name/…/…/…}`, kept as the plain tab stop
 /// or variable). `\$`, `\}` and `\\` are escapes everywhere; inside a choice `\,` and `\|`
@@ -357,7 +362,8 @@ pub struct Expansion {
 /// becomes a placeholder showing its default, else its name, numbered after the highest
 /// index in the snippet in order of appearance (repeats share the number). `$0` is not a
 /// stop: it sets `final_offset`, which is otherwise the end of the text. Each `\n` inserted
-/// is followed by `indent.line` and each `\t` becomes `indent.unit`.
+/// is followed by `indent.line` and each `\t` becomes `indent.unit`. The text stops at
+/// `MAX_TEXT_BYTES`; stops past that point are empty ranges at its end.
 pub fn expand(
     body: &str,
     variables: &HashMap<String, String>,
@@ -374,8 +380,10 @@ pub fn expand(
         indent,
         defaults: &defaults,
         text: String::new(),
+        full: false,
         ranges: BTreeMap::new(),
         final_offset: None,
+        rendered: HashMap::new(),
         expanding: Vec::new(),
         depth: 0,
     };
@@ -496,8 +504,14 @@ struct Renderer<'a> {
     indent: &'a SnippetIndent,
     defaults: &'a HashMap<u32, &'a Node>,
     text: String,
+    /// Whether `text` reached `MAX_TEXT_BYTES`; nothing more is appended then.
+    full: bool,
     ranges: BTreeMap<u32, Vec<Range<usize>>>,
     final_offset: Option<usize>,
+    /// Where in `text` each index's default was first rendered. Later occurrences copy that
+    /// text instead of rendering the default again, so each default renders at most twice
+    /// (once more where it is defined, to record its nested stops).
+    rendered: HashMap<u32, Range<usize>>,
     /// The indices whose default text is being rendered, innermost last. An index inside
     /// its own default renders empty.
     expanding: Vec<u32>,
@@ -539,19 +553,24 @@ impl<'a> Renderer<'a> {
         let start = self.text.len();
         let expandable = !self.expanding.contains(&index);
         if let Some(&source) = self.defaults.get(&index).filter(|_| expandable) {
-            self.expanding.push(index);
-            match source {
-                Node::Placeholder(_, children) => {
-                    self.render(children, record && std::ptr::eq(source, node));
-                }
-                Node::Choice(_, options) => {
-                    if let Some(first) = options.first() {
-                        self.push(first);
+            let defining = record && std::ptr::eq(source, node);
+            match self.rendered.get(&index) {
+                Some(earlier) if !defining => self.copy(earlier.clone()),
+                _ => {
+                    self.expanding.push(index);
+                    match source {
+                        Node::Placeholder(_, children) => self.render(children, defining),
+                        Node::Choice(_, options) => {
+                            if let Some(first) = options.first() {
+                                self.push(first);
+                            }
+                        }
+                        _ => {}
                     }
+                    self.expanding.pop();
+                    self.rendered.entry(index).or_insert(start..self.text.len());
                 }
-                _ => {}
             }
-            self.expanding.pop();
         }
         if !record {
             return;
@@ -566,8 +585,52 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// Appends `text` as inserted: each `\n` followed by the line indent, each `\t` as one
+    /// unit.
     fn push(&mut self, text: &str) {
-        self.text.push_str(&indented(text, self.indent));
+        let indent = self.indent;
+        for c in text.chars() {
+            if self.full {
+                return;
+            }
+            match c {
+                '\n' => {
+                    self.append("\n");
+                    self.append(&indent.line);
+                }
+                '\t' => self.append(&indent.unit),
+                c => self.append(c.encode_utf8(&mut [0; 4])),
+            }
+        }
+    }
+
+    /// Appends the text at `range` of `text` again.
+    fn copy(&mut self, range: Range<usize>) {
+        if self.full {
+            return;
+        }
+        let room = MAX_TEXT_BYTES - self.text.len();
+        let mut end = range.end.min(range.start + room);
+        while !self.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.extend_from_within(range.start..end);
+        self.full = end < range.end;
+    }
+
+    /// Appends as much of `piece` as fits under `MAX_TEXT_BYTES`.
+    fn append(&mut self, piece: &str) {
+        let room = MAX_TEXT_BYTES - self.text.len();
+        if piece.len() <= room {
+            self.text.push_str(piece);
+            return;
+        }
+        let mut end = room;
+        while !piece.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.push_str(&piece[..end]);
+        self.full = true;
     }
 }
 
@@ -1006,5 +1069,59 @@ mod tests {
         let expansion = expand_plain(&body);
         assert!(expansion.text.ends_with('x'));
         assert_eq!(expansion.stops.len(), count);
+    }
+
+    /// `${1:$2$2} ${2:$3$3} … ${39:$40$40} ` and then `last`: each default holds two
+    /// mirrors of the next stop, so the text of stop 1 is 2^39 copies of the last one.
+    fn doubling_mirrors(last: &str) -> String {
+        let count = 40;
+        let mut body: String = (1..count)
+            .map(|index| format!("${{{index}:${next}${next}}} ", next = index + 1))
+            .collect();
+        body.push_str(last);
+        body
+    }
+
+    fn assert_ranges_inside_the_text(expansion: &Expansion) {
+        for stop in &expansion.stops {
+            for range in &stop.ranges {
+                assert!(range.start <= range.end && range.end <= expansion.text.len());
+                assert!(expansion.text.is_char_boundary(range.start));
+                assert!(expansion.text.is_char_boundary(range.end));
+            }
+        }
+    }
+
+    #[test]
+    fn mirrors_of_mirrors_cannot_grow_the_text_past_the_limit() {
+        // The leading "a" makes the limit fall inside a two-byte char.
+        let expansion = expand_plain(&format!("a{}", doubling_mirrors("${40:é}")));
+        assert!(expansion.text.len() <= MAX_TEXT_BYTES);
+        assert!(expansion.text.len() > MAX_TEXT_BYTES - 2);
+        assert_eq!(expansion.stops.len(), 40);
+        assert_ranges_inside_the_text(&expansion);
+    }
+
+    #[test]
+    fn mirrors_of_mirrors_without_text_finish() {
+        let expansion = expand_plain(&doubling_mirrors("$40"));
+        assert_eq!(expansion.text, " ".repeat(39));
+        assert_eq!(expansion.stops.len(), 40);
+        assert_ranges_inside_the_text(&expansion);
+    }
+
+    #[test]
+    fn variable_values_cannot_grow_the_text_past_the_limit() {
+        let clipboard = "é".repeat(MAX_TEXT_BYTES / 3);
+        let expansion = expand_with(
+            "a$CLIPBOARD$CLIPBOARD$CLIPBOARD$CLIPBOARD$1",
+            &[("CLIPBOARD", &clipboard)],
+        );
+        assert!(expansion.text.len() <= MAX_TEXT_BYTES);
+        assert!(expansion.text.len() > MAX_TEXT_BYTES - 2);
+        let end = expansion.text.len();
+        assert_eq!(stop_texts(&expansion), vec![(1, vec![""])]);
+        assert_eq!(expansion.stops[0].ranges, vec![end..end]);
+        assert_eq!(expansion.final_offset, end);
     }
 }
