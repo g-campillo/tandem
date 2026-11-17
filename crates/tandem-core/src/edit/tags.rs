@@ -21,6 +21,10 @@ pub const VOID_ELEMENTS: &[&str] = &[
 /// How far back before the `<` of a typed `</` `complete_close_tag` reads.
 const SCAN_LIMIT: usize = 64 * 1024;
 
+/// How many `>` the attribute expressions of one open tag may hold in that scan, so the
+/// scan stays linear when braces never balance.
+const MAX_GREATER_THAN_SIGNS_IN_EXPRESSIONS: usize = 32;
+
 /// After `>` was typed at `start` (`text` is after the edit, the cursor at `start + 1`):
 /// the matching close tag inserted after the cursor, the cursor staying where it is.
 ///
@@ -56,8 +60,10 @@ pub fn close_tag(text: &str, start: usize, language: &str) -> Option<Edit> {
 /// nearest unclosed tag and `>`, the cursor after it.
 ///
 /// The open elements come from one forward scan over at most the last 64 KiB before the
-/// `<`: `<!-- … -->` is skipped, a tag `close_tag` would close opens an element, and a close
-/// tag closes the most recent open element of its name and every element opened after it.
+/// `<`: `<!-- … -->` is skipped, a tag `close_tag` would close opens an element (its end is
+/// the first `>` outside its attribute expressions, so `<button onClick={() => go()}>` opens
+/// a `button`), and a close tag closes the most recent open element of its name and every
+/// element opened after it.
 /// When a `>` already follows the cursor only the name is inserted and the cursor moves
 /// past that `>`. `None` when nothing is open, or when a fragment's `</` already has its `>`.
 pub fn complete_close_tag(text: &str, start: usize, language: &str) -> Option<Edit> {
@@ -197,10 +203,14 @@ fn same_name(a: &str, b: &str, language: &str) -> bool {
 fn innermost_open_element<'a>(text: &'a str, end: usize, language: &str) -> Option<&'a str> {
     let begin = text.ceil_char_boundary(end.saturating_sub(SCAN_LIMIT));
     let braces = BraceCounts::new(text, begin..end);
+    let closes: Vec<usize> = text[begin..end]
+        .match_indices('>')
+        .map(|(i, _)| begin + i)
+        .collect();
     let mut open: Vec<&str> = Vec::new();
     let mut at = begin;
-    // The first `>` after the current `<`, kept while several `<` share it.
-    let mut next_close: Option<usize> = None;
+    // The index in `closes` of the first `>` after the current `<`.
+    let mut next_close = 0;
     while let Some(tag) = text[at..end].find('<').map(|i| at + i) {
         if text[tag..end].starts_with("<!--") {
             let Some(comment_end) = text[tag..end].find("-->") else {
@@ -209,10 +219,8 @@ fn innermost_open_element<'a>(text: &'a str, end: usize, language: &str) -> Opti
             at = tag + comment_end + "-->".len();
             continue;
         }
-        if next_close.is_none_or(|close| close <= tag) {
-            next_close = text[tag + 1..end].find('>').map(|i| tag + 1 + i);
-        }
-        let Some(close) = next_close else {
+        next_close += closes[next_close..].partition_point(|&close| close < tag);
+        let Some(&close) = closes.get(next_close) else {
             break;
         };
         if let Some(content) = text[tag + 1..close].strip_prefix('/') {
@@ -223,8 +231,8 @@ fn innermost_open_element<'a>(text: &'a str, end: usize, language: &str) -> Opti
                 open.truncate(index);
             }
             at = close + 1;
-        } else if let Some(name) = opened_element(text, tag, close, language)
-            && braces.balanced(tag..close)
+        } else if let Some(close) = open_tag_end(&braces, tag, &closes[next_close..])
+            && let Some(name) = opened_element(text, tag, close, language)
         {
             open.push(name);
             at = close + 1;
@@ -233,6 +241,25 @@ fn innermost_open_element<'a>(text: &'a str, end: usize, language: &str) -> Opti
         }
     }
     open.last().copied()
+}
+
+/// The `>` that ends the tag whose `<` is at `tag`, from `closes`, the `>` after it in
+/// order: the first one outside the tag's attribute expressions, so the `>` of
+/// `onClick={() => go()}` or `show={a > b}` does not end it. `None` when the braces stay
+/// open past `MAX_GREATER_THAN_SIGNS_IN_EXPRESSIONS` of them, or when a `}` closes more than
+/// the tag opened, which puts the `<` itself inside an expression.
+fn open_tag_end(braces: &BraceCounts, tag: usize, closes: &[usize]) -> Option<usize> {
+    for &close in closes
+        .iter()
+        .take(MAX_GREATER_THAN_SIGNS_IN_EXPRESSIONS + 1)
+    {
+        match braces.depth(tag..close) {
+            0 => return Some(close),
+            depth if depth < 0 => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Running brace counts over a stretch of text, so the brace count of any tag in it is
@@ -258,9 +285,9 @@ impl BraceCounts {
         }
     }
 
-    /// Whether `range` (within the counted stretch) holds as many `}` as `{`.
-    fn balanced(&self, range: Range<usize>) -> bool {
-        self.prefix[range.end - self.begin] == self.prefix[range.start - self.begin]
+    /// `{` minus `}` in `range` (within the counted stretch).
+    fn depth(&self, range: Range<usize>) -> i64 {
+        self.prefix[range.end - self.begin] - self.prefix[range.start - self.begin]
     }
 }
 
@@ -588,6 +615,76 @@ mod tests {
             completed("return <div>{f<string>(x)}<|", "typescriptreact"),
             some("return <div>{f<string>(x)}</div>|")
         );
+    }
+
+    #[test]
+    fn a_greater_than_sign_inside_an_attribute_expression_does_not_end_the_open_tag() {
+        assert_eq!(
+            completed(
+                "return (\n  <div>\n    <button onClick={() => go()}>\n      <|",
+                "typescriptreact"
+            ),
+            some("return (\n  <div>\n    <button onClick={() => go()}>\n      </button>|")
+        );
+        assert_eq!(
+            completed(
+                "return <button onClick={() => go()}>\n  <|",
+                "typescriptreact"
+            ),
+            some("return <button onClick={() => go()}>\n  </button>|")
+        );
+        assert_eq!(
+            completed(
+                "return <ul>\n  <Item show={a > b}>\n    <|",
+                "typescriptreact"
+            ),
+            some("return <ul>\n  <Item show={a > b}>\n    </Item>|")
+        );
+        assert_eq!(
+            completed("<div>\n  <button on:click={() => n++}>\n    <|", "svelte"),
+            some("<div>\n  <button on:click={() => n++}>\n    </button>|")
+        );
+        assert_eq!(
+            completed(
+                "<ul>{items.map((i) => <li key={i}>\n  <|",
+                "typescriptreact"
+            ),
+            some("<ul>{items.map((i) => <li key={i}>\n  </li>|")
+        );
+    }
+
+    #[test]
+    fn tags_inside_an_attribute_expression_belong_to_that_expression() {
+        assert_eq!(
+            completed("return <Route element={<Home />}>\n  <|", "typescriptreact"),
+            some("return <Route element={<Home />}>\n  </Route>|")
+        );
+        assert_eq!(
+            completed(
+                "return <List render={() => <li>a</li>}>\n  <|",
+                "javascriptreact"
+            ),
+            some("return <List render={() => <li>a</li>}>\n  </List>|")
+        );
+    }
+
+    #[test]
+    fn a_tag_whose_attribute_expression_never_ends_opens_no_element() {
+        assert_eq!(
+            completed(
+                "return <div>\n  <b onClick={() => go()>\n  <|",
+                "typescriptreact"
+            ),
+            some("return <div>\n  <b onClick={() => go()>\n  </div>|")
+        );
+        let long = "x > ".repeat(MAX_GREATER_THAN_SIGNS_IN_EXPRESSIONS + 1);
+        let marked = format!("<div><b title={{{long}}}><|");
+        let expected = format!("<div><b title={{{long}}}></div>|");
+        assert_eq!(completed(&marked, "svelte"), Some(expected));
+        let short = "x > ".repeat(MAX_GREATER_THAN_SIGNS_IN_EXPRESSIONS);
+        let marked = format!("<div><b title={{{short}}}><|");
+        let expected = format!("<div><b title={{{short}}}></b>|");
+        assert_eq!(completed(&marked, "svelte"), Some(expected));
     }
 
     #[test]
