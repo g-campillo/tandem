@@ -145,6 +145,23 @@ fn cursor_look(shape: CursorShape, focused: bool) -> Option<CursorLook> {
     }
 }
 
+/// How long a blinking cursor stays on, and then off.
+const BLINK: Duration = Duration::from_millis(500);
+
+/// Whether the cursor is drawn `elapsed` after its blink last restarted (on focus, a key
+/// press or new output). Without focus it is always drawn; with focus it is on for the
+/// first 500 ms, off for the next 500 ms, and so on.
+fn cursor_on(focused: bool, elapsed: Duration) -> bool {
+    !focused || (elapsed.as_nanos() / BLINK.as_nanos()).is_multiple_of(2)
+}
+
+/// How long after `elapsed` a blinking cursor next turns on or off: more than zero and
+/// at most 500 ms.
+fn next_blink(elapsed: Duration) -> Duration {
+    let into = elapsed.as_nanos() % BLINK.as_nanos();
+    BLINK - Duration::from_nanos(u64::try_from(into).unwrap_or(0))
+}
+
 /// The thickness of a beam or an underline cursor, in pixels.
 const BAR: f32 = 2.;
 
@@ -417,8 +434,14 @@ pub struct TerminalView {
     font: TerminalFont,
     /// The cursor as of the last output; `None` while it is hidden or scrolled off.
     cursor: Option<CursorCell>,
-    /// Whether the terminal has keyboard focus in the active window.
+    /// Whether the terminal has keyboard focus in the active window. Only then does the
+    /// cursor blink.
     focused: bool,
+    /// When the blink last restarted: on focus, a key press or new output.
+    blink_origin: Instant,
+    /// Redraws the view each time the cursor turns on or off. It runs only while the
+    /// terminal is focused; dropping it stops the blink.
+    blink: Option<Task<()>>,
     /// The focus, blur and window activation watchers, made on the first render because
     /// they need the window.
     watchers: Vec<Subscription>,
@@ -451,6 +474,7 @@ impl TerminalView {
                         if revision != view.revision {
                             view.revision = revision;
                             (view.text, view.cursor) = view.terminal.snapshot();
+                            view.restart_blink(cx);
                             cx.notify();
                         }
                     })
@@ -470,8 +494,38 @@ impl TerminalView {
             font: TerminalFont::default(),
             cursor: None,
             focused: false,
+            blink_origin: Instant::now(),
+            blink: None,
             watchers: Vec::new(),
         }
+    }
+
+    /// Shows the cursor at once and blinks it from now on, while the terminal is focused.
+    /// Without focus it does nothing: the cursor is a steady hollow block then.
+    fn restart_blink(&mut self, cx: &mut Context<Self>) {
+        if !self.focused {
+            return;
+        }
+        let origin = Instant::now();
+        self.blink_origin = origin;
+        // Replacing the task drops, and so cancels, the one timed from the old origin.
+        self.blink = Some(cx.spawn(async move |view, cx| {
+            loop {
+                smol::Timer::after(next_blink(origin.elapsed())).await;
+                if view
+                    .update(cx, |view, cx| {
+                        // A hidden cursor has nothing to blink, so skip the redraw.
+                        if view.cursor.is_some() {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
     }
 
     /// Follows keyboard focus and the window's activation: the cursor is drawn as the
@@ -481,14 +535,23 @@ impl TerminalView {
         let focused = self.focus.is_focused(window) && window.is_window_active();
         if focused != self.focused {
             self.focused = focused;
+            if focused {
+                self.restart_blink(cx);
+            } else {
+                self.blink = None;
+            }
             cx.notify();
         }
     }
 
-    /// The cursor drawn over the output at its cell, or `None` while it is hidden.
+    /// The cursor drawn over the output at its cell, or `None` while it is hidden or in the
+    /// off half of its blink.
     fn cursor_overlay(&self, cell_width: f32, line_height: f32, cx: &App) -> Option<Div> {
         let cursor = self.cursor.as_ref()?;
         let look = cursor_look(cursor.shape, self.focused)?;
+        if !cursor_on(self.focused, self.blink_origin.elapsed()) {
+            return None;
+        }
         let rect = cursor_rect(look, cursor, cell_width, line_height);
         let ink = cx.theme().foreground;
         let overlay = div()
@@ -561,6 +624,7 @@ impl TerminalView {
         };
         if !bytes.is_empty() {
             let _ = self.terminal.send(&bytes);
+            self.restart_blink(cx);
             cx.stop_propagation();
         }
     }

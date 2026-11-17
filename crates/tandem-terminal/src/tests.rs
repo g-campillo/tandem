@@ -1,7 +1,7 @@
 use super::{
-    BAR, CursorCell, CursorLook, CursorRect, Events, Size, Terminal, TerminalFont, Writer,
-    cursor_look, cursor_rect, scroll_lines, view_height, viewport_row, visible_cursor,
-    visible_text, wait_for_line,
+    BAR, BLINK, CursorCell, CursorLook, CursorRect, Events, Size, Terminal, TerminalFont, Writer,
+    cursor_look, cursor_on, cursor_rect, next_blink, scroll_lines, view_height, viewport_row,
+    visible_cursor, visible_text, wait_for_line,
 };
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term};
@@ -259,4 +259,56 @@ fn the_cursor_rectangle_fills_its_cells_or_draws_a_bar() {
         rect(22.5, 52., 7.5, BAR)
     );
     assert_eq!(BAR, 2.);
+}
+
+#[test]
+fn a_focused_cursor_is_on_for_500_ms_then_off_for_500_ms() {
+    let ms = Duration::from_millis;
+    assert_eq!(BLINK, ms(500));
+    for (elapsed, on) in [
+        (0, true),
+        (499, true),
+        (500, false),
+        (999, false),
+        (1000, true),
+        (1500, false),
+        (60_250, true),
+    ] {
+        assert_eq!(cursor_on(true, ms(elapsed)), on, "{elapsed} ms");
+    }
+    assert!(cursor_on(true, ms(500) - Duration::from_nanos(1)));
+}
+
+#[test]
+fn an_unfocused_cursor_never_blinks() {
+    for elapsed in [0, 499, 500, 999, 1500, 60_750] {
+        assert!(
+            cursor_on(false, Duration::from_millis(elapsed)),
+            "{elapsed} ms"
+        );
+    }
+}
+
+#[test]
+fn the_next_blink_is_at_the_next_half_second_boundary() {
+    let ms = Duration::from_millis;
+    assert_eq!(next_blink(ms(0)), ms(500));
+    assert_eq!(next_blink(ms(120)), ms(380));
+    assert_eq!(next_blink(ms(500)), ms(500));
+    assert_eq!(next_blink(ms(1499)), ms(1));
+    assert_eq!(
+        next_blink(ms(1499) + Duration::from_nanos(999_999)),
+        Duration::from_nanos(1)
+    );
+    // Waking at the boundary it names always lands in the other half of the blink.
+    for elapsed in [0, 1, 250, 499, 500, 777, 1000, 12_345] {
+        let now = ms(elapsed);
+        let wait = next_blink(now);
+        assert!(wait > Duration::ZERO && wait <= BLINK, "{elapsed} ms");
+        assert_ne!(
+            cursor_on(true, now),
+            cursor_on(true, now + wait),
+            "{elapsed} ms"
+        );
+    }
 }
