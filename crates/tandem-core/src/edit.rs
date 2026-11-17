@@ -2,6 +2,7 @@
 pub mod comment;
 pub mod lines;
 pub mod select;
+pub mod snippet;
 
 use std::ops::Range;
 
