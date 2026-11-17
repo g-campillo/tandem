@@ -10,6 +10,20 @@ pub const CHAT_WIDTH: (f32, f32) = (280., 900.);
 /// The width the panes always leave for the editor.
 pub const EDITOR_MIN: f32 = 360.;
 
+/// The width of the activity bar: the strip of icons on the window's edge, beside the
+/// file tree.
+pub const ACTIVITY_BAR: f32 = 44.;
+
+/// The width of the row that holds the panes and the editor, in a window `window_width`
+/// wide: what the activity bar leaves.
+pub fn row_width(window_width: f32) -> f32 {
+    if window_width.is_finite() {
+        (window_width - ACTIVITY_BAR).max(0.)
+    } else {
+        0.
+    }
+}
+
 /// The (narrowest, widest) width of `pane`.
 pub fn width_limits(pane: Pane) -> (f32, f32) {
     match pane {
@@ -100,6 +114,17 @@ pub fn drag_pane(
     let mut next = *layout;
     next.set_width(pane, Some(requested.clamp(narrowest, widest).round()));
     next
+}
+
+/// How many columns a terminal `available` pixels wide has in a font whose characters
+/// are `cell` pixels wide: as many as fit, between 40 and 300.
+pub fn terminal_columns(available: f32, cell: f32) -> u16 {
+    let fit = if available.is_finite() && cell.is_finite() && cell > 0. {
+        (available / cell).floor()
+    } else {
+        0.
+    };
+    fit.clamp(40., 300.) as u16
 }
 
 #[cfg(test)]
@@ -390,6 +415,51 @@ mod tests {
                     "pointer {pointer}, {pane:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn row_width_is_what_the_activity_bar_leaves() {
+        assert_eq!(row_width(1280.), 1236.);
+        assert_eq!(row_width(900.), 856.);
+        assert_eq!(row_width(44.), 0.);
+        for width in [0., 20., -5., f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(row_width(width), 0., "window {width}");
+        }
+    }
+
+    #[test]
+    fn the_smallest_window_keeps_the_editor_beside_the_activity_bar_and_both_panes() {
+        // Tandem's window is at least 900 wide.
+        let geometry = pane_geometry(row_width(900.), &PaneLayout::default(), BOTH);
+        assert_eq!(widths(geometry), (210., 286., 360.));
+        assert_eq!(
+            ACTIVITY_BAR + geometry.sidebar + geometry.utility + geometry.content,
+            900.
+        );
+        let wide = pane_geometry(row_width(1324.), &PaneLayout::default(), BOTH);
+        assert_eq!(widths(wide), (250., 390., 640.));
+    }
+
+    #[test]
+    fn terminal_columns_fit_the_width_between_40_and_300() {
+        assert_eq!(terminal_columns(720., 7.2), 100);
+        assert_eq!(terminal_columns(719., 7.2), 99);
+        assert_eq!(terminal_columns(100., 7.2), 40);
+        assert_eq!(terminal_columns(10_000., 7.2), 300);
+        for (available, cell) in [
+            (720., 0.),
+            (720., -1.),
+            (720., f32::NAN),
+            (f32::NAN, 7.2),
+            (f32::INFINITY, 7.2),
+            (-50., 7.2),
+        ] {
+            assert_eq!(
+                terminal_columns(available, cell),
+                40,
+                "{available} / {cell}"
+            );
         }
     }
 }

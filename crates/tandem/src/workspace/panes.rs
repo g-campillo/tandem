@@ -2,6 +2,7 @@
 //! the dividers that resize them, and saving that layout.
 use super::pane_logic::{ShownPanes, drag_pane};
 use super::*;
+use crate::appearance::{PANEL_INSET, glass_panel};
 use gpui_kit::component::resizable::HandleEdge;
 use gpui_kit::component::*;
 use tandem_core::layout::{Pane, PaneLayout, PaneSide};
@@ -114,11 +115,13 @@ impl Workspace {
         }
     }
 
-    /// Wraps a pane's content with the divider on the edge that faces the editor. Dragging
-    /// the divider resizes the pane; a double click returns it to its default width.
+    /// Sets a pane's content in a glass panel `width` wide, inset from the window's edges and
+    /// the editor, with the divider on the edge that faces the editor. Dragging the divider
+    /// resizes the pane; a double click returns it to its default width.
     pub(super) fn pane_frame(
         &self,
         pane: Pane,
+        width: f32,
         content: AnyElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -136,7 +139,17 @@ impl Workspace {
             .items_stretch()
             .min_h_0()
             .flex_shrink_0()
-            .child(content)
+            .w(px(width))
+            .child(
+                div()
+                    .v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .px(px(PANEL_INSET))
+                    .pb(px(PANEL_INSET))
+                    .child(glass_panel(cx).flex_1().child(content)),
+            )
             .child(
                 resize_handle(id, Axis::Horizontal)
                     .inside(edge)

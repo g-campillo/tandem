@@ -1,4 +1,7 @@
-use super::{Events, Size, Terminal, Writer, visible_text, wait_for_line};
+use super::{
+    Events, Size, Terminal, TerminalFont, Writer, scroll_lines, view_height, visible_text,
+    wait_for_line,
+};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
@@ -73,4 +76,32 @@ fn closing_terminal_stops_its_foreground_job() {
     }
     assert!(!alive(shell));
     assert!(!alive(foreground as u32));
+}
+
+#[test]
+fn the_default_font_is_menlo_at_12_with_the_terminals_former_height() {
+    let font = TerminalFont::default();
+    assert_eq!(font.family.as_ref(), "Menlo");
+    assert_eq!(font.size, 12.);
+    assert_eq!(font.line_height(), 18.);
+    assert_eq!(view_height(&font), 230.);
+}
+
+#[test]
+fn a_larger_font_makes_taller_rows_and_a_taller_view() {
+    let font = TerminalFont {
+        size: 14.,
+        ..TerminalFont::default()
+    };
+    assert_eq!(font.line_height(), 21.);
+    assert_eq!(view_height(&font), 257.);
+}
+
+#[test]
+fn scroll_lines_counts_whole_rows_of_the_row_height() {
+    assert_eq!(scroll_lines(36., 18.), 2);
+    assert_eq!(scroll_lines(-18., 18.), -1);
+    assert_eq!(scroll_lines(8., 18.), 0);
+    assert_eq!(scroll_lines(36., 0.), 0);
+    assert_eq!(scroll_lines(f32::NAN, 18.), 0);
 }

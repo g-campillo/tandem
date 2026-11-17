@@ -22,6 +22,17 @@ pub fn next_bottom(current: Option<BottomTab>, clicked: BottomTab) -> Option<Bot
     }
 }
 
+/// The tallest the card above the composer may be in a window `window_height` high:
+/// 45% of the chat panel, which is the window without the title bar, the status bar
+/// and the panel's inset (64 px), and never less than 160 px.
+pub fn step_card_max_height(window_height: f32) -> f32 {
+    if window_height.is_finite() {
+        ((window_height - 64.) * 0.45).round().max(160.)
+    } else {
+        160.
+    }
+}
+
 /// The status bar's line count for the open file, counted the way Github counts: a final
 /// trailing newline does not start another line, so an empty file has 0 lines.
 pub fn line_count_label(text: &str) -> String {
@@ -297,6 +308,16 @@ pub fn takeover_save_plan(tabs: &[TabFacts]) -> SavePlan {
 mod tests {
     use super::*;
     use tandem_core::chat::EditLocation;
+
+    #[test]
+    fn step_card_max_height_is_45_percent_of_the_chat_and_at_least_160() {
+        assert_eq!(step_card_max_height(820.), 340.);
+        assert_eq!(step_card_max_height(600.), 241.);
+        assert_eq!(step_card_max_height(200.), 160.);
+        assert_eq!(step_card_max_height(0.), 160.);
+        assert_eq!(step_card_max_height(f32::NAN), 160.);
+        assert_eq!(step_card_max_height(f32::INFINITY), 160.);
+    }
 
     #[test]
     fn next_bottom_hides_the_visible_tab_and_shows_any_other() {

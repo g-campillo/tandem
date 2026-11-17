@@ -1,3 +1,5 @@
+use super::breadcrumbs::OutlineSymbol;
+use super::chrome_logic::{ProblemCounts, problem_counts};
 use super::*;
 
 use serde_json::{Value, json};
@@ -27,8 +29,17 @@ pub struct Development {
     pub diagnostic_key: String,
     pub diagnostic_stamp: Option<LanguageStamp>,
     pub problems: Vec<Navigation>,
+    /// The errors and warnings in the open file, for the status bar.
+    pub problem_counts: ProblemCounts,
     pub navigation: Vec<Navigation>,
     pub navigation_stamp: Option<LanguageStamp>,
+    /// The symbols of the open file, for the breadcrumbs.
+    pub outline: Vec<OutlineSymbol>,
+    /// The tab instance and text hash `outline` was last asked for.
+    pub outline_key: String,
+    /// The tab instance `outline` belongs to.
+    pub outline_instance: String,
+    pub outline_busy: bool,
 }
 impl Development {
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
@@ -50,8 +61,13 @@ impl Development {
             diagnostic_key: String::new(),
             diagnostic_stamp: None,
             problems: vec![],
+            problem_counts: ProblemCounts::default(),
             navigation: vec![],
             navigation_stamp: None,
+            outline: vec![],
+            outline_key: String::new(),
+            outline_instance: String::new(),
+            outline_busy: false,
         }
     }
     pub fn reset(
@@ -264,10 +280,15 @@ impl Workspace {
         self.dev.python_health = "Python tools off".into();
         self.dev.health = "Language tools off".into();
         self.dev.problems.clear();
+        self.dev.problem_counts = ProblemCounts::default();
         self.dev.navigation.clear();
         self.dev.diagnostic_stamp = None;
         self.dev.navigation_stamp = None;
         self.dev.diagnostic_busy = false;
+        self.dev.outline.clear();
+        self.dev.outline_key.clear();
+        self.dev.outline_instance.clear();
+        self.dev.outline_busy = false;
         for tab in &mut self.tabs {
             tab.language_bound = false;
             tab.editor.update(cx, |editor, cx| {
@@ -388,6 +409,7 @@ impl Workspace {
         self.dev.diagnostic_stamp = None;
         self.dev.navigation_stamp = None;
         self.dev.problems.clear();
+        self.dev.problem_counts = ProblemCounts::default();
         self.dev.navigation.clear();
         if let Some(manager) = &self.dev.language {
             manager.invalidate();
@@ -444,6 +466,12 @@ impl Workspace {
             self.invalidate_language(cx);
         }
         if health.state == "ready"
+            && !self.dev.outline_busy
+            && self.dev.last_edit.elapsed() >= Duration::from_millis(700)
+        {
+            self.request_outline(cx);
+        }
+        if health.state == "ready"
             && !self.dev.diagnostic_busy
             && self.dev.last_edit.elapsed() >= Duration::from_millis(700)
         {
@@ -467,6 +495,64 @@ impl Workspace {
                 self.language_action("textDocument/diagnostic", window, cx);
             }
         }
+    }
+    /// Asks the language server for the open file's symbols when its text has changed
+    /// since the last answer. The breadcrumbs look the cursor's line up in the answer, so
+    /// a cursor move asks for nothing.
+    fn request_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(manager) = self.language_manager().cloned() else {
+            return;
+        };
+        let (Some(project), Some(tab)) =
+            (&self.project, self.active.and_then(|i| self.tabs.get(i)))
+        else {
+            return;
+        };
+        let text = tab.editor.read(cx).text().to_string();
+        let key = format!("{}:{}", tab.instance, content_hash(text.as_bytes()));
+        if key == self.dev.outline_key {
+            return;
+        }
+        let file = project.root.join(&tab.document.path);
+        let instance = tab.instance.clone();
+        let epoch = self.epoch;
+        self.dev.outline_key = key;
+        self.dev.outline_busy = true;
+        let operation = cx.background_spawn({
+            let (manager, instance) = (manager.clone(), instance.clone());
+            async move {
+                manager
+                    .request(
+                        "textDocument/documentSymbol",
+                        &file,
+                        &instance,
+                        &text,
+                        json!({}),
+                    )
+                    .await
+            }
+        });
+        cx.spawn(async move |view, cx| {
+            let result = operation.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.epoch != epoch {
+                    return;
+                }
+                view.dev.outline_busy = false;
+                match result {
+                    Ok(reply) if manager.is_current(&reply.stamp) => {
+                        view.dev.outline = super::breadcrumbs::outline(&reply.value);
+                        view.dev.outline_instance = instance;
+                        cx.notify();
+                    }
+                    // The text changed while the server worked: ask again on a later tick.
+                    Ok(_) => view.dev.outline_key.clear(),
+                    // The server cannot answer: wait for the next change of the text.
+                    Err(_) => {}
+                }
+            });
+        })
+        .detach();
     }
     pub(super) fn language_action(
         &mut self,
@@ -539,6 +625,7 @@ impl Workspace {
                 "textDocument/diagnostic"=>{
                     let items=tandem_lsp::diagnostic_items(reply.value)?;
                     view.dev.problems=items.iter().take(200).map(|d|Navigation{path:relative.clone(),line:d.range.start.line as usize+1,label:format!("{}:{}  {}",relative,d.range.start.line+1,d.message)}).collect();
+                    view.dev.problem_counts=problem_counts(items.iter().map(|d|d.severity));
                     view.dev.diagnostic_stamp=Some(reply.stamp);
                     if let Some(tab)=view.tabs.iter().find(|t|t.document.path==relative){tab.editor.update(cx,|editor,cx|{if let Some(set)=editor.diagnostics_mut(){set.clear();set.extend(items.into_iter().map(gpui_kit::component::highlighter::Diagnostic::from));}cx.notify();});}
                 },

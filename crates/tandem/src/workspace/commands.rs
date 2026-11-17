@@ -1,10 +1,10 @@
 //! Editor and workbench commands in the style of VS Code: their actions, shortcuts, menu entries and handlers.
+mod center;
 mod editing;
 mod files;
 mod history;
 mod layout;
 mod navigation;
-mod palette;
 mod selection;
 
 use super::*;
@@ -245,6 +245,15 @@ pub fn commands() -> Vec<CommandSpec> {
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// The shortcut of the registry command titled `title`, as shown to the user. Empty when
+/// the command has no shortcut or there is no such command.
+pub fn shortcut(title: &str) -> &'static str {
+    commands()
+        .into_iter()
+        .find(|spec| spec.title == title)
+        .map_or("", |spec| spec.shortcut)
 }
 
 fn app() -> Vec<CommandSpec> {
@@ -592,8 +601,8 @@ pub fn extend_menus(mut menus: Vec<Menu>) -> Vec<Menu> {
 /// Routes the registry's own actions to the workspace, so they work from keys, menus and
 /// the palette.
 pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace>) {
-    route::<ShowCommandPalette>(cx, window, &view, |v, w, c| v.open_palette(w, c));
-    route::<ShowKeyboardShortcuts>(cx, window, &view, |v, w, c| v.open_palette(w, c));
+    route::<ShowCommandPalette>(cx, window, &view, |v, w, c| v.open_center(">", w, c));
+    route::<ShowKeyboardShortcuts>(cx, window, &view, |v, w, c| v.open_center(">", w, c));
     route::<ToggleLineComment>(cx, window, &view, |v, w, c| {
         v.comment_lines(LineComment::Toggle, w, c)
     });
@@ -691,7 +700,7 @@ fn route<A: Action>(
 mod tests {
     // Explicit imports: `super::*` would bring in GPUI's `test` macro through `gpui_kit::*`
     // and shadow Rust's `#[test]`.
-    use super::{KeyScope, MenuId, commands, extend_menus, key_bindings};
+    use super::{KeyScope, MenuId, commands, extend_menus, key_bindings, shortcut};
     use gpui_kit::{Keystroke, Menu, MenuItem};
     use std::collections::HashSet;
 
@@ -1131,5 +1140,42 @@ mod tests {
                 .iter()
                 .all(|menu| !action_names(&menu.items).is_empty())
         );
+    }
+
+    #[test]
+    fn shortcut_finds_a_command_by_its_title() {
+        assert_eq!(shortcut("Quick Open"), "⌘P");
+        assert_eq!(shortcut("Toggle Panel"), "⌘J");
+        assert_eq!(shortcut("New Task"), "");
+        assert_eq!(shortcut("No Such Command"), "");
+    }
+
+    #[test]
+    fn every_command_the_chrome_names_is_in_the_registry() {
+        use crate::workspace::chrome_logic::Activity;
+        let titles: HashSet<&str> = commands().iter().map(|spec| spec.title).collect();
+        let named = [
+            "Quick Open",
+            "Command Palette…",
+            "Toggle File Explorer",
+            "Toggle Panel",
+            "Toggle Chat",
+            "New File",
+            "Save",
+            "Compare with Disk",
+            "Close File",
+            "Go to Line…",
+            "Stop Claude",
+        ]
+        .into_iter()
+        .chain(
+            Activity::TOP
+                .into_iter()
+                .chain([Activity::Settings])
+                .map(Activity::command),
+        );
+        for title in named {
+            assert!(titles.contains(title), "{title} is not a registry command");
+        }
     }
 }

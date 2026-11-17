@@ -1,5 +1,5 @@
 use super::*;
-use crate::appearance::{panel_body, panel_code, panel_heading, path_button};
+use crate::appearance::{RADIUS_CONTROL, panel_body, panel_code, panel_heading, path_button};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
@@ -32,6 +32,7 @@ impl Workspace {
                     Button::new("refresh-diagnostics"),
                     "Check Language Snapshot",
                 )
+                .icon(IconName::RefreshCw)
                 .disabled(self.dev.diagnostic_busy)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.language_action("textDocument/diagnostic", window, cx)
@@ -88,10 +89,10 @@ pub(super) fn code_note(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
     cx: &App,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     panel_code(div().id(id), cx)
         .p_2()
-        .rounded(px(6.))
+        .rounded(px(RADIUS_CONTROL))
         .h_flex()
         .overflow_x_scroll()
         .child(

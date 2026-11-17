@@ -1,4 +1,5 @@
 mod appearance;
+mod native_window;
 mod workspace;
 
 use anyhow::{Context as _, Result};
@@ -51,7 +52,7 @@ fn main() -> Result<()> {
         project = store.lock().unwrap().last_project()?.map(PathBuf::from);
     }
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             cx.bind_keys([
@@ -143,15 +144,15 @@ fn main() -> Result<()> {
             .detach();
             let handle = gpui_kit::open_window(
                 WindowOptions {
-                    #[cfg(target_os = "macos")]
-                    window_background: WindowBackgroundAppearance::Blurred,
+                    // The workspace sets the blur behind this transparent window.
+                    window_background: WindowBackgroundAppearance::Transparent,
                     window_min_size: Some(size(px(900.0), px(600.0))),
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                         None,
                         size(px(1280.0), px(820.0)),
                         cx,
                     ))),
-                    ..Default::default()
+                    ..gpui_kit::component::TitleBar::window_options()
                 },
                 cx,
                 move |window, cx| {

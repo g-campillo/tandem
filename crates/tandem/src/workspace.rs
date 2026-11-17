@@ -1,18 +1,26 @@
+mod breadcrumbs;
 mod chat;
 mod chat_logic;
 mod chat_view;
+mod chrome;
+mod chrome_logic;
 mod code_view;
 pub mod commands;
+mod fonts;
 mod hover;
+mod look;
 mod pane_logic;
 mod panels;
 mod panes;
 mod provider;
 mod settings;
+mod settings_look;
 mod tools;
 mod view;
 use chat::ChatUi;
 use chat_logic::{BottomTab, line_count_label, next_bottom};
+use fonts::FontPane;
+use look::{FontChange, LookUi};
 use panes::PaneUi;
 pub use panes::SwapPanes;
 use settings::SettingsUi;
@@ -96,9 +104,7 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     route::<Save>(cx, window, view.clone(), |v, _, c| v.save_active(c));
     route::<SaveAll>(cx, window, view.clone(), |v, _, c| v.save_all(c));
     route::<SaveCopy>(cx, window, view.clone(), |v, w, c| v.save_copy(w, c));
-    route::<QuickOpen>(cx, window, view.clone(), |v, w, c| {
-        v.set_sidebar(Sidebar::Files, w, c)
-    });
+    route::<QuickOpen>(cx, window, view.clone(), |v, w, c| v.open_center("", w, c));
     route::<ProjectSearch>(cx, window, view.clone(), |v, w, c| {
         v.set_sidebar(Sidebar::Search, w, c)
     });
@@ -116,8 +122,8 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     });
     route::<Changes>(cx, window, view.clone(), |v, w, c| v.show_diff(w, c));
     route::<ToggleTerminal>(cx, window, view.clone(), |v, _, c| v.toggle_terminal(c));
-    route::<ZoomIn>(cx, window, view.clone(), |v, _, c| v.zoom(1.0, c));
-    route::<ZoomOut>(cx, window, view.clone(), |v, _, c| v.zoom(-1.0, c));
+    route::<ZoomIn>(cx, window, view.clone(), |v, w, c| v.zoom(1.0, w, c));
+    route::<ZoomOut>(cx, window, view.clone(), |v, w, c| v.zoom(-1.0, w, c));
     route::<ToggleChat>(cx, window, view.clone(), |v, _, c| {
         v.chat.visible = !v.chat.visible;
         c.notify();
@@ -174,6 +180,8 @@ struct LoadedProject {
 pub struct Workspace {
     store: Arc<Mutex<Store>>,
     project: Option<Project>,
+    /// The git branch the project is on, as `reconcile` last read it.
+    branch: Option<String>,
     index: FileIndex,
     tabs: Vec<Tab>,
     active: Option<usize>,
@@ -187,8 +195,9 @@ pub struct Workspace {
     error: bool,
     recent: Vec<String>,
     show_recent: bool,
-    font_size: f32,
     panes: PaneUi,
+    look: LookUi,
+    look_controls: settings_look::LookControls,
     generation: u64,
     checkpointed: u64,
     checkpoint_inflight: bool,
@@ -223,7 +232,7 @@ impl Workspace {
     ) -> Self {
         let appearance = crate::appearance::install(window, cx);
         window.set_window_title("Tandem");
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find a file · ⌘P"));
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files · ⇧⌘E"));
         let subscription = cx.subscribe_in(
             &query,
             window,
@@ -248,6 +257,10 @@ impl Workspace {
             )
         };
         let panes = PaneUi::load(&store.lock().unwrap());
+        let installed = cx.text_system().all_font_names();
+        let look = LookUi::load(&store.lock().unwrap(), installed);
+        let look_controls =
+            settings_look::LookControls::new(&look.prefs, &look.installed, window, cx);
         let mut view = Self {
             chat: ChatUi::new(window, cx),
             settings: SettingsUi::default(),
@@ -255,6 +268,7 @@ impl Workspace {
             dev: Development::new(window, cx),
             store,
             project: None,
+            branch: None,
             index: FileIndex::default(),
             tabs: Vec::new(),
             active: None,
@@ -268,8 +282,9 @@ impl Workspace {
             error: false,
             recent,
             show_recent: false,
-            font_size: 14.0,
             panes,
+            look,
+            look_controls,
             generation: sequence,
             checkpointed: sequence,
             checkpoint_inflight: false,
@@ -289,6 +304,8 @@ impl Workspace {
             close_pending: false,
             hover: cx.new(hover::HoverTip::new),
         };
+        view.apply_window_look(window);
+        view.apply_fonts(cx);
         let weak = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
@@ -300,6 +317,7 @@ impl Workspace {
                             view.development_tick(window, cx);
                             view.chat_tick(window, cx);
                             view.pane_tick(cx);
+                            view.persist_look(cx);
                             let rescan = view.disk_events.swap(false, Ordering::Relaxed)
                                 || view.last_index.elapsed() > Duration::from_secs(30);
                             if !view.loading
@@ -361,7 +379,7 @@ impl Workspace {
                 .active
                 .and_then(|i| self.tabs.get(i))
                 .map(|t| t.document.path.clone()),
-            font_size: self.font_size,
+            font_size: self.look.prefs.fonts.editor.size,
             sequence: self.generation,
         })
     }
@@ -401,6 +419,7 @@ impl Workspace {
             return false;
         }
         self.persist_layout(cx);
+        self.persist_look(cx);
         match self.flush(cx) {
             Ok(()) => true,
             Err(error) => {
@@ -541,14 +560,14 @@ impl Workspace {
                             return;
                         }
                         view.stop_language(cx);
-                        view.tabs.clear(); view.active = None; view.diff = None; view.close_pending = false;
+                        view.tabs.clear(); view.active = None; view.diff = None; view.close_pending = false; view.branch = None;
                         view.terminal = None; view.bottom = None; view._watcher = None;
                         view.project = Some(loaded.project.clone()); view.index = loaded.index; view.show_recent = false;
                         view.dev.reset(loaded.tools, window, cx);
                         view.start_chat(window, cx);
                         let name = loaded.project.root.file_name().map(|name| name.to_string_lossy()).unwrap_or_else(|| "Project".into());
                         window.set_window_title(&format!("{name} — Tandem"));
-                        view.font_size = loaded.state.font_size.clamp(10.0, 30.0); view.expanded.clear(); view.search_hits.clear();
+                        view.expanded.clear(); view.search_hits.clear();
                         view.set_sidebar(Sidebar::Files, window, cx);
                         for document in loaded.documents { view.add_tab(document, window, cx); }
                         view.active = loaded.state.active.and_then(|path| view.tabs.iter().position(|t| t.document.path == path)).or_else(|| (!view.tabs.is_empty()).then_some(0));
@@ -996,18 +1015,23 @@ impl Workspace {
                     (id, document, change)
                 })
                 .collect();
-            (rescan.then(|| project.index()), changes)
+            let branch = tandem_core::git::head_branch(&project.root);
+            (rescan.then(|| project.index()), changes, branch)
         });
         let weak = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let (index, changes) = operation.await;
+                let (index, changes, branch) = operation.await;
                 let _ = weak.update_in(cx, |view, window, cx| {
                     view.reconcile_inflight = false;
                     if view.epoch != epoch {
                         return;
                     }
                     let mut changed = false;
+                    if view.branch != branch {
+                        view.branch = branch;
+                        changed = true;
+                    }
                     if let Some(index) = index {
                         changed |= view.index.files != index.files
                             || view.index.truncated != index.truncated;
@@ -1102,7 +1126,7 @@ impl Workspace {
             query.set_value("", window, cx);
             query.set_placeholder(
                 match sidebar {
-                    Sidebar::Files => "Find a file · ⌘P",
+                    Sidebar::Files => "Filter files · ⇧⌘E",
                     Sidebar::Search => "Search text · Enter to run",
                     Sidebar::New => "New file: relative/path.rs",
                 },
@@ -1179,7 +1203,14 @@ impl Workspace {
                 return;
             };
             match Terminal::new(&project.root) {
-                Ok(terminal) => self.terminal = Some(cx.new(|cx| TerminalView::new(terminal, cx))),
+                Ok(terminal) => {
+                    let font = self.terminal_font();
+                    self.terminal = Some(cx.new(|cx| {
+                        let mut view = TerminalView::new(terminal, cx);
+                        view.set_font(font, cx);
+                        view
+                    }));
+                }
                 Err(error) => {
                     self.message(format!("Cannot start terminal: {error:#}"), true, cx);
                     return;
@@ -1189,9 +1220,10 @@ impl Workspace {
         self.bottom = next_bottom(self.bottom, BottomTab::Terminal);
         cx.notify();
     }
-    fn zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
-        self.font_size = (self.font_size + delta).clamp(10.0, 30.0);
-        self.changed(cx);
+    /// ⌘= and ⌘−: the editor's font size, for every project.
+    fn zoom(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let size = tandem_core::appearance::zoomed(self.look.prefs.fonts.editor.size, delta);
+        self.change_font(FontChange::Size(FontPane::Editor, size), window, cx);
     }
     fn navigation(&self, cx: &App) -> Vec<(String, String, usize, bool)> {
         let query = self.query.read(cx).text().to_string().to_lowercase();

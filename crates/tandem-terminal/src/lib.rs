@@ -4,7 +4,7 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use anyhow::{Context as _, Result, ensure};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, Sizable, StyledExt};
+use gpui_kit::component::{ActiveTheme, IconName, Sizable, StyledExt};
 use gpui_kit::*;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -15,6 +15,50 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 mod tests;
+
+/// The rows of the terminal.
+const ROWS: u16 = 9;
+
+/// The font the terminal's output is drawn in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalFont {
+    pub family: SharedString,
+    /// The size in pixels.
+    pub size: f32,
+    pub features: FontFeatures,
+}
+
+impl Default for TerminalFont {
+    fn default() -> Self {
+        Self {
+            family: "Menlo".into(),
+            size: 12.,
+            features: FontFeatures::default(),
+        }
+    }
+}
+
+impl TerminalFont {
+    /// The height of a row: one and a half times the size, in whole pixels.
+    pub fn line_height(&self) -> f32 {
+        (self.size * 1.5).round()
+    }
+}
+
+/// The height of the terminal view in `font`: its rows, and 68 px for the buttons
+/// above them and the padding.
+pub fn view_height(font: &TerminalFont) -> f32 {
+    f32::from(ROWS) * font.line_height() + 68.
+}
+
+/// How many rows a scroll of `pixels` moves when a row is `line_height` high.
+pub fn scroll_lines(pixels: f32, line_height: f32) -> i32 {
+    if line_height > 0. && pixels.is_finite() {
+        (pixels / line_height).round() as i32
+    } else {
+        0
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Size {
@@ -66,7 +110,10 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn new(cwd: &Path) -> Result<Self> {
-        let size = Size { rows: 9, cols: 100 };
+        let size = Size {
+            rows: ROWS,
+            cols: 100,
+        };
         let pair = native_pty_system().openpty(size.pty())?;
         let mut command = CommandBuilder::new("/bin/sh");
         command.arg("-i");
@@ -229,6 +276,7 @@ pub struct TerminalView {
     text: String,
     revision: u64,
     columns: u16,
+    font: TerminalFont,
 }
 
 pub fn start() -> Result<Terminal> {
@@ -241,7 +289,7 @@ pub fn start() -> Result<Terminal> {
 impl TerminalView {
     pub fn resize_columns(&mut self, columns: u16) {
         let columns = columns.clamp(40, 300);
-        if columns != self.columns && self.terminal.resize(9, columns).is_ok() {
+        if columns != self.columns && self.terminal.resize(ROWS, columns).is_ok() {
             self.columns = columns;
         }
     }
@@ -274,7 +322,32 @@ impl TerminalView {
             text: String::new(),
             revision: 0,
             columns: 100,
+            font: TerminalFont::default(),
         }
+    }
+
+    /// Draws the output in `font` from now on.
+    pub fn set_font(&mut self, font: TerminalFont, cx: &mut Context<Self>) {
+        if self.font != font {
+            self.font = font;
+            cx.notify();
+        }
+    }
+
+    /// The width of one character of the terminal's font, in pixels.
+    pub fn cell_width(&self, window: &Window) -> f32 {
+        let font = Font {
+            family: self.font.family.clone(),
+            features: self.font.features.clone(),
+            fallbacks: None,
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        };
+        let id = window.text_system().resolve_font(&font);
+        window
+            .text_system()
+            .ch_advance(id, px(self.font.size))
+            .map_or(self.font.size * 0.6, f32::from)
     }
 
     fn key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -310,6 +383,7 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let line = self.font.line_height();
         div()
             .id("human-terminal")
             .role(Role::Group)
@@ -323,21 +397,18 @@ impl Render for TerminalView {
                 cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)),
             )
             .on_key_down(cx.listener(|this, event, _, cx| this.key(event, cx)))
-            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
-                let lines = (f32::from(event.delta.pixel_delta(px(18.0)).y) / 18.0).round() as i32;
+            .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, cx| {
+                let lines = scroll_lines(f32::from(event.delta.pixel_delta(px(line)).y), line);
                 this.terminal.scroll(Scroll::Delta(lines));
                 cx.stop_propagation();
             }))
             .v_flex()
             .w_full()
             .min_w_0()
-            .h(px(230.0))
+            .h(px(view_height(&self.font)))
             .flex_shrink_0()
             .overflow_hidden()
             .p_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
                 div()
@@ -350,36 +421,33 @@ impl Render for TerminalView {
                     .font_family(".SystemUIFont")
                     .child(
                         Button::new("terminal-interrupt")
+                            .icon(IconName::Square)
                             .small()
-                            .compact()
-                            .h(px(28.))
                             .ghost()
                             .accessibility_label("Interrupt")
-                            .child(div().text_size(px(13.)).child("Interrupt"))
+                            .tooltip("Interrupt  ⌃C")
                             .on_click(cx.listener(|this, _, _, _| {
                                 let _ = this.terminal.send(&[3]);
                             })),
                     )
                     .child(
                         Button::new("terminal-copy")
+                            .icon(IconName::Copy)
                             .small()
-                            .compact()
-                            .h(px(28.))
                             .ghost()
                             .accessibility_label("Copy Visible Output")
-                            .child(div().text_size(px(13.)).child("Copy Visible Output"))
+                            .tooltip("Copy Visible Output")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(this.text.clone()))
                             })),
                     )
                     .child(
                         Button::new("terminal-bottom")
+                            .icon(IconName::ArrowDown)
                             .small()
-                            .compact()
-                            .h(px(28.))
                             .ghost()
                             .accessibility_label("Latest Output")
-                            .child(div().text_size(px(13.)).child("Latest Output"))
+                            .tooltip("Latest Output")
                             .on_click(
                                 cx.listener(|this, _, _, _| this.terminal.scroll(Scroll::Bottom)),
                             ),
@@ -390,13 +458,14 @@ impl Render for TerminalView {
                     .id("terminal-output")
                     .role(Role::Label)
                     .aria_label(self.text.clone())
-                    .font_family("Menlo")
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
+                    .font_family(self.font.family.clone())
+                    .font_features(self.font.features.clone())
+                    .text_size(px(self.font.size))
+                    .line_height(px(line))
                     .children(
                         self.text
                             .lines()
-                            .map(|line| div().h(px(18.0)).child(line.to_string())),
+                            .map(|text| div().h(px(line)).child(text.to_string())),
                     ),
             )
     }

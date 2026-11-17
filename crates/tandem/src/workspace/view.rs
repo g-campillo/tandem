@@ -1,162 +1,23 @@
-use super::pane_logic::pane_geometry;
+use super::chat_logic::step_card_max_height;
+use super::chrome::file_icon_image;
+use super::chrome_logic::{file_icon, tab_labels, tab_name, tooltip};
+use super::commands::shortcut;
+use super::pane_logic::{pane_geometry, row_width, terminal_columns};
 use super::*;
-use crate::appearance::{compact_button, navigation_button, palette, path_button};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use crate::appearance::{
+    PANEL_INSET, compact_button, glass_panel, navigation_button, palette, path_button, tree_button,
+};
+use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Editor, Input};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 use tandem_core::layout::{Pane, PaneSide};
 
 impl Workspace {
-    fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn sidebar_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
-        div()
-            .h_flex()
-            .flex_wrap()
-            .min_w_0()
-            .flex_shrink_0()
-            .gap_2()
-            .p_2()
-            .border_b_1()
-            .border_color(p.border)
-            .bg(p.chrome())
-            .child(
-                div()
-                    .text_size(px(16.))
-                    .font_semibold()
-                    .px_2()
-                    .child("Tandem"),
-            )
-            .child(
-                compact_button(Button::new("open-project"), "Open Folder")
-                    .icon(IconName::FolderOpen)
-                    .ghost()
-                    .on_click(cx.listener(|this, _, window, cx| this.choose_project(window, cx))),
-            )
-            .child(
-                navigation_button(
-                    compact_button(Button::new("recent-projects"), "Recent")
-                        .icon(IconName::RotateCw),
-                    self.show_recent,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_recent = !this.show_recent;
-                    cx.notify();
-                })),
-            )
-            .child(
-                compact_button(Button::new("new-file"), "New File")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_sidebar(Sidebar::New, window, cx)
-                    })),
-            )
-            .child(
-                compact_button(Button::new("save"), "Save  ⌘S")
-                    .icon(IconName::HardDrive)
-                    .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| this.save_active(cx))),
-            )
-            .child(
-                navigation_button(
-                    compact_button(
-                        Button::new("changes"),
-                        if self.diff.is_some() {
-                            "Back to Code"
-                        } else {
-                            "Changes"
-                        },
-                    )
-                    .icon(IconName::Replace),
-                    self.diff.is_some(),
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.show_diff(window, cx))),
-            )
-            .child(
-                navigation_button(
-                    compact_button(
-                        Button::new("terminal"),
-                        if self.bottom == Some(BottomTab::Terminal) {
-                            "Hide Terminal"
-                        } else {
-                            "Terminal"
-                        },
-                    )
-                    .icon(IconName::SquareTerminal),
-                    self.bottom == Some(BottomTab::Terminal),
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal(cx))),
-            )
-            .when(self.terminal.is_some(), |d| {
-                d.child(
-                    compact_button(Button::new("close-terminal"), "Stop Terminal")
-                        .icon(IconName::Square)
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.terminal = None;
-                            if this.bottom == Some(BottomTab::Terminal) {
-                                this.bottom = None;
-                            }
-                            cx.notify();
-                        })),
-                )
-            })
-            .child(div().flex_1().min_w_0())
-            .child(
-                navigation_button(
-                    compact_button(Button::new("toolbar-settings"), "Settings  ⌘,")
-                        .icon(IconName::Settings2),
-                    self.settings.open,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
-            )
-            .child(
-                navigation_button(
-                    compact_button(
-                        Button::new("toggle-chat"),
-                        if self.chat.visible {
-                            "Hide Chat"
-                        } else {
-                            "Chat"
-                        },
-                    )
-                    .icon(match self.panes.layout.side(Pane::Chat) {
-                        PaneSide::Left => IconName::PanelLeft,
-                        PaneSide::Right => IconName::PanelRight,
-                    }),
-                    self.chat.visible,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.chat.visible = !this.chat.visible;
-                    cx.notify();
-                })),
-            )
-            .when(self.takeover_running(), |d| {
-                d.child(
-                    div()
-                        .id("mode")
-                        .role(Role::Label)
-                        .aria_label(
-                            "Claude is editing files. The editor is read-only; Command-period stops Claude.",
-                        )
-                        .self_center()
-                        .text_size(px(12.))
-                        .text_color(p.warning)
-                        .px_2()
-                        .child("Claude is editing files · ⌘. stops"),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn sidebar_view(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette(cx.theme().mode);
+        let face = self.look.fonts.explorer.clone();
         let rows = self.navigation(cx);
         let files = rows
             .into_iter()
@@ -166,22 +27,31 @@ impl Workspace {
                     .active
                     .and_then(|i| self.tabs.get(i))
                     .is_some_and(|t| t.document.path == path);
+                // A file's icon sits under the folder icon of the directory rows.
+                let (icons, indent) = if directory {
+                    let (chevron, folder) = if expanded {
+                        (IconName::ChevronDown, IconName::FolderOpen)
+                    } else {
+                        (IconName::ChevronRight, IconName::Folder)
+                    };
+                    (vec![Icon::new(chevron), Icon::new(folder)], depth * 12)
+                } else {
+                    (
+                        vec![Icon::new(file_icon_image(file_icon(&path)))],
+                        depth * 12 + 16,
+                    )
+                };
                 div()
                     .min_w_0()
-                    .pl(px((depth * 12) as f32))
+                    .pl(px(indent as f32))
                     .child(
                         navigation_button(
-                            path_button(
+                            tree_button(
                                 Button::new(SharedString::from(format!("nav:{path}"))),
-                                format!(
-                                    "{}{}",
-                                    if directory {
-                                        if expanded { "▾ " } else { "▸ " }
-                                    } else {
-                                        ""
-                                    },
-                                    label
-                                ),
+                                icons,
+                                label,
+                                face.family.clone(),
+                                face.size,
                             )
                             .tooltip(path.clone()),
                             selected,
@@ -226,40 +96,49 @@ impl Workspace {
             .collect::<Vec<_>>();
         div()
             .v_flex()
-            .w(px(width))
+            .size_full()
             .min_w_0()
             .min_h_0()
-            .flex_shrink_0()
-            .bg(p.chrome())
+            .font_family(face.family.clone())
             .child(
                 div()
                     .h_flex()
-                    .flex_wrap()
+                    .items_center()
                     .gap_1()
-                    .p_2()
+                    .h(px(32.))
+                    .px_2()
+                    .flex_shrink_0()
                     .child(
-                        navigation_button(
-                            compact_button(Button::new("files"), "Files"),
-                            self.sidebar == Sidebar::Files,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_sidebar(Sidebar::Files, window, cx)
-                        })),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .font_semibold()
+                            .text_color(p.secondary_foreground)
+                            .child(match self.sidebar {
+                                Sidebar::Files => "EXPLORER",
+                                Sidebar::Search => "SEARCH",
+                                Sidebar::New => "NEW FILE",
+                            }),
                     )
                     .child(
-                        navigation_button(
-                            compact_button(Button::new("search"), "Search"),
-                            self.sidebar == Sidebar::Search,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_sidebar(Sidebar::Search, window, cx)
-                        })),
-                    )
-                    .child(
-                        compact_button(Button::new("refresh-files"), "Refresh")
+                        Button::new("new-file")
+                            .icon(Lucide::FilePlus)
                             .ghost()
+                            .xsmall()
+                            .accessibility_label("New File")
+                            .tooltip(tooltip("New File", shortcut("New File")))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_sidebar(Sidebar::New, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("refresh-files")
+                            .icon(Lucide::RefreshCw)
+                            .ghost()
+                            .xsmall()
+                            .accessibility_label("Refresh Files")
+                            .tooltip("Refresh Files")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.disk_events.store(true, Ordering::Relaxed);
                                 this.message("Refreshing project files…", false, cx);
@@ -319,62 +198,177 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The tab bar: one tab per open file, with the file's icon, its name and, in a slot
+    /// at its end, a dot for unsaved changes that turns into a close button while the pointer
+    /// is on the tab. Save and Compare with Disk sit at the bar's right end.
     fn tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
+        let paths: Vec<&str> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.document.path.as_str())
+            .collect();
+        let labels = tab_labels(&paths);
         let tabs = self
             .tabs
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                let tab_path = tab.document.path.clone();
-                navigation_button(
-                    compact_button(
-                        Button::new(SharedString::from(format!("tab:{tab_path}"))),
-                        format!(
-                            "{}{}{}",
-                            tab.document.path,
-                            if tab.document.dirty() { " •" } else { "" },
-                            if tab.saving { " ⟳" } else { "" }
-                        ),
+                let active = self.active == Some(index);
+                let dirty = tab.document.dirty();
+                let path = tab.document.path.clone();
+                let label = labels[index].clone();
+                let selected_path = path.clone();
+                let button = Button::new(SharedString::from(format!("tab:{path}")))
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(Hsla::transparent_black())
+                            .foreground(if active {
+                                p.selected_foreground
+                            } else {
+                                p.foreground
+                            })
+                            .hover(Hsla::transparent_black())
+                            .active(Hsla::transparent_black()),
                     )
-                    .tooltip(tab_path.clone()),
-                    self.active == Some(index),
-                    cx,
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if let Some(index) = this
-                        .tabs
-                        .iter()
-                        .position(|tab| tab.document.path == tab_path)
-                    {
-                        this.select_tab(index, window, cx);
-                    }
-                }))
-                .into_any_element()
+                    .small()
+                    .h(px(24.))
+                    .icon(file_icon_image(file_icon(&path)))
+                    .accessibility_label(tab_name(&path, dirty, tab.saving))
+                    .tooltip(path.clone())
+                    .child(div().text_size(px(13.)).child(label.clone()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(index) = this
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.document.path == selected_path)
+                        {
+                            this.select_tab(index, window, cx);
+                        }
+                    }));
+                let slot = div().relative().size(px(16.)).flex_none();
+                let slot = if tab.saving {
+                    slot.child(Icon::new(IconName::LoaderCircle).xsmall())
+                } else {
+                    let layer = || {
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                    };
+                    let closed_path = path.clone();
+                    let close = Button::new(("tab-close", index))
+                        .icon(Lucide::X)
+                        .ghost()
+                        .xsmall()
+                        .accessibility_label(format!("Close {label}"))
+                        .tooltip(tooltip("Close", shortcut("Close File")))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let Some(index) = this
+                                .tabs
+                                .iter()
+                                .position(|tab| tab.document.path == closed_path)
+                            else {
+                                return;
+                            };
+                            if this.active != Some(index) {
+                                this.select_tab(index, window, cx);
+                            }
+                            this.close_file(false, window, cx);
+                        }));
+                    slot.when(dirty, |slot| {
+                        slot.child(
+                            layer()
+                                .group_hover("tab", |style| style.invisible())
+                                .child(div().size(px(7.)).rounded_full().bg(p.foreground)),
+                        )
+                    })
+                    .child(
+                        layer()
+                            .when(!active || dirty, |layer| {
+                                layer
+                                    .invisible()
+                                    .group_hover("tab", |style| style.visible())
+                            })
+                            .child(close),
+                    )
+                };
+                div()
+                    .id(("tab-item", index))
+                    .group("tab")
+                    .h_flex()
+                    .items_center()
+                    .flex_none()
+                    .h(px(26.))
+                    .px_1()
+                    .gap_1()
+                    .rounded(px(6.))
+                    .when(active, |tab| tab.bg(p.selected))
+                    .when(!active, |tab| tab.hover(|style| style.bg(p.hover())))
+                    .child(button)
+                    .child(slot)
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
+        let open = self.active.is_some();
+        let comparing = self.diff.is_some();
+        let compare_label = if comparing {
+            "Back to Code"
+        } else {
+            "Compare with Disk"
+        };
+        let actions = div()
+            .h_flex()
+            .items_center()
+            .gap_1()
+            .flex_none()
+            .px_1()
+            .child(
+                Button::new("tab-save")
+                    .icon(Lucide::Save)
+                    .ghost()
+                    .xsmall()
+                    .disabled(!open)
+                    .accessibility_label("Save")
+                    .tooltip(tooltip("Save", shortcut("Save")))
+                    .on_click(cx.listener(|this, _, _, cx| this.save_active(cx))),
+            )
+            .child(
+                Button::new("tab-compare")
+                    .icon(Lucide::FileDiff)
+                    .ghost()
+                    .xsmall()
+                    .disabled(!open)
+                    .selected(comparing)
+                    .accessibility_label(compare_label)
+                    .tooltip(tooltip(compare_label, shortcut("Compare with Disk")))
+                    .on_click(cx.listener(|this, _, window, cx| this.show_diff(window, cx))),
+            );
         div()
             .id("tabs")
             .h_flex()
-            .gap_1()
-            .min_w_0()
+            .items_center()
+            .h(px(34.))
             .flex_shrink_0()
-            .bg(p.chrome())
+            .min_w_0()
+            .bg(p.content)
             .border_b_1()
             .border_color(p.border)
-            .overflow_x_scroll()
-            .p_1()
-            .children(tabs)
-            .when(self.active.is_some(), |d| {
-                d.child(
-                    compact_button(Button::new("close-tab"), "Close")
-                        .icon(IconName::Close)
-                        .ghost()
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.close_file(false, window, cx)),
-                        ),
-                )
-            })
+            .child(
+                div()
+                    .id("tab-list")
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .px_1()
+                    .children(tabs),
+            )
+            .child(actions)
             .into_any_element()
     }
 
@@ -395,6 +389,7 @@ impl Workspace {
         } else {
             "Recovered unsaved draft · Review before saving."
         };
+        let face = self.look.fonts.editor.clone();
         let recent = self
             .recent
             .iter()
@@ -442,16 +437,30 @@ impl Workspace {
                                 "Open your project"
                             }),
                     )
+                    .when(self.project.is_none(), |d| {
+                        d.child(
+                            compact_button(Button::new("welcome-open-folder"), "Open Folder…")
+                                .icon(IconName::FolderOpen)
+                                .primary()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_project(window, cx)
+                                })),
+                        )
+                    })
                     .child("⌘P opens files · ⌘N creates a file · ⌘S saves")
                     .children(recent),
             );
-        div()
+        let editor_block = div()
             .v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .bg(p.content)
-            .child(self.tab_strip(cx))
+            .when(!self.tabs.is_empty(), |d| d.child(self.tab_strip(cx)))
+            .children(
+                self.breadcrumbs(cx)
+                    .filter(|_| self.diff.is_none() && !self.settings.open),
+            )
             .when(conflict || recovered || read_only, |d| {
                 d.child(
                     div()
@@ -531,7 +540,9 @@ impl Workspace {
                                     .aria_label("Read-only changes preview")
                                     .h(relative(1.0))
                                     .size_full()
-                                    .text_size(px(self.font_size)),
+                                    .font_family(face.family.clone())
+                                    .font_features(face.features.clone())
+                                    .text_size(px(face.size)),
                             )
                         },
                     )
@@ -547,14 +558,28 @@ impl Workspace {
                                     .aria_label(format!("Editor: {path}"))
                                     .h(relative(1.0))
                                     .size_full()
-                                    .text_size(px(self.font_size)),
+                                    .font_family(face.family.clone())
+                                    .font_features(face.features.clone())
+                                    .text_size(px(face.size)),
                             )
                             .child(self.hover.clone())
                         })
                         .when(self.active.is_none(), |d| d.child(empty))
                     }),
-            )
-            .children(self.bottom_panel(cx))
+            );
+        div()
+            .v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(editor_block)
+            .children(self.bottom_panel(cx).map(|panel| {
+                div()
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .p(px(PANEL_INSET))
+                    .child(glass_panel(cx).child(panel))
+            }))
             .into_any_element()
     }
 
@@ -567,8 +592,6 @@ impl Workspace {
             .flex_wrap()
             .gap_1()
             .p_1()
-            .bg(p.chrome())
-            .border_t_1()
             .border_b_1()
             .border_color(p.border)
             .child(
@@ -594,6 +617,33 @@ impl Workspace {
                     this.bottom = next_bottom(this.bottom, BottomTab::Problems);
                     cx.notify();
                 })),
+            )
+            .child(div().flex_1().min_w_0())
+            .when(self.terminal.is_some(), |d| {
+                d.child(
+                    Button::new("close-terminal")
+                        .icon(Lucide::Trash)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Stop Terminal")
+                        .accessibility_label("Stop Terminal")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.terminal = None;
+                            if this.bottom == Some(BottomTab::Terminal) {
+                                this.bottom = None;
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                Button::new("hide-panel")
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .accessibility_label("Hide Panel")
+                    .tooltip(tooltip("Hide Panel", shortcut("Toggle Panel")))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_bottom_panel(cx))),
             );
         let content = match bottom {
             BottomTab::Terminal => self
@@ -607,7 +657,6 @@ impl Workspace {
                     .max_h(px(240.))
                     .overflow_y_scroll()
                     .p_3()
-                    .bg(p.surface)
                     .child(self.problems_panel(cx))
                     .into_any_element(),
             ),
@@ -629,52 +678,43 @@ impl Render for Workspace {
         let p = palette(cx.theme().mode);
         let shown = self.shown_panes();
         let geometry = pane_geometry(
-            f32::from(window.viewport_size().width),
+            row_width(f32::from(window.viewport_size().width)),
             &self.panes.layout,
             shown,
         );
-        let backup = if self.project.is_none() {
-            "Ready"
-        } else if self.checkpointed >= self.generation {
-            "Drafts backed up"
-        } else {
-            "Backing up drafts…"
-        };
-
-        // GitHub-style line count of the open file, or None when no file is open.
-        let lines = self
-            .active
-            .and_then(|i| self.tabs.get(i))
-            .map(|tab| line_count_label(&tab.document.text));
-
         if self.bottom == Some(BottomTab::Terminal)
             && let Some(terminal) = &self.terminal
         {
             // A hidden file tree has width 0 in `geometry`, so the editor column already
             // includes its space.
-            let columns = (geometry.terminal_available_width() / 7.3).max(40.0) as u16;
+            let cell = terminal.read(cx).cell_width(window);
+            let columns = terminal_columns(geometry.terminal_available_width(), cell);
             terminal.update(cx, |terminal, _| terminal.resize_columns(columns));
         }
         let files = shown.files.then(|| {
-            let files = self.sidebar_view(geometry.sidebar, cx);
-            self.pane_frame(Pane::Files, files, cx)
+            let files = self.sidebar_view(cx);
+            self.pane_frame(Pane::Files, geometry.sidebar, files, cx)
         });
+        let card_max = step_card_max_height(f32::from(window.viewport_size().height));
         let chat = shown.chat.then(|| {
-            let chat = self.chat_panel(geometry.utility, cx);
-            self.pane_frame(Pane::Chat, chat, cx)
+            let chat = self.chat_panel(card_max, cx);
+            self.pane_frame(Pane::Chat, geometry.utility, chat, cx)
         });
-        let (left, right) = match self.panes.layout.side(Pane::Files) {
-            PaneSide::Left => (files, chat),
-            PaneSide::Right => (chat, files),
+        // The activity bar sits on the window's edge beside the file tree.
+        let activity_bar = Some(self.activity_bar(cx));
+        let (bar_left, left, right, bar_right) = match self.panes.layout.side(Pane::Files) {
+            PaneSide::Left => (activity_bar, files, chat, None),
+            PaneSide::Right => (None, chat, files, activity_bar),
         };
         div()
             .id("workspace")
             .key_context("Workspace")
             .v_flex()
             .size_full()
+            .bg(p.chrome())
             .text_color(p.foreground)
             .text_size(px(13.))
-            .child(self.toolbar(cx))
+            .child(self.title_bar(cx))
             .when(self.show_recent, |d| {
                 d.child(
                     div()
@@ -718,41 +758,21 @@ impl Render for Workspace {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .on_drag_move(cx.listener(Self::resize_pane))
-                    .children(left)
-                    .child(self.content_view(cx))
-                    .children(right),
-            )
-            .child(
-                div()
-                    .id("status")
-                    .role(Role::Label)
-                    .aria_label(match &lines {
-                        Some(count) => {
-                            format!("{}. {count}. {backup}", self.status.trim_end_matches('.'))
-                        }
-                        None => format!("{}. {backup}", self.status.trim_end_matches('.')),
-                    })
-                    .h_flex()
-                    .flex_wrap()
-                    .min_w_0()
-                    .flex_shrink_0()
-                    .p_2()
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(p.border)
-                    .bg(p.content)
-                    .text_size(px(12.))
-                    .text_color(p.secondary_foreground)
+                    .children(bar_left)
                     .child(
                         div()
+                            .h_flex()
+                            .items_stretch()
                             .flex_1()
                             .min_w_0()
-                            .when(self.error, |d| d.text_color(p.error))
-                            .child(self.status.clone()),
+                            .min_h_0()
+                            .on_drag_move(cx.listener(Self::resize_pane))
+                            .children(left)
+                            .child(self.content_view(cx))
+                            .children(right),
                     )
-                    .children(lines)
-                    .child(backup),
+                    .children(bar_right),
             )
+            .child(self.status_bar(cx))
     }
 }

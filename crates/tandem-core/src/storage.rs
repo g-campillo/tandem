@@ -11,9 +11,16 @@ pub struct WorkspaceState {
     pub root: String,
     pub tabs: Vec<String>,
     pub active: Option<String>,
+    /// No longer read: the editor font size is the global `appearance` setting. Still
+    /// written, so that a Tandem from before that setting can open the row.
+    #[serde(default = "default_font_size")]
     pub font_size: f32,
     #[serde(default)]
     pub sequence: u64,
+}
+
+fn default_font_size() -> f32 {
+    14.0
 }
 
 impl WorkspaceState {

@@ -94,6 +94,30 @@ fn intermediate_step_guidance() -> Guidance {
                 "#[arg(long)]",
                 "Rust's attribute syntax: it annotates the item that follows.",
             ),
+            part(
+                "struct",
+                "Args is a struct, a type made of named fields that belong together. The new json field goes inside its braces, after the name field already there.",
+            ),
+            part(
+                "pub",
+                "The existing fields are marked pub so that main.rs can read them. Mark json the same way, or main.rs cannot see whether the user gave the flag.",
+            ),
+            part(
+                "bool",
+                "A flag that is either given or not is a bool. clap sets the field to true when --json is on the command line and leaves it false otherwise.",
+            ),
+            part(
+                "--json",
+                "This is how the user writes the new flag. clap builds its name from the field: a long flag is two dashes followed by the field's own name.",
+            ),
+            part(
+                "derive",
+                "The #[derive(Parser)] line above Args asks clap to write the parsing code for you. It reads every field, so the new one needs no code of its own.",
+            ),
+            part(
+                "Parser",
+                "Parser is the clap trait that the derive implements for Args. It provides Args::parse(), which main.rs already calls to read the command line.",
+            ),
         ],
         path: Some("src/cli.rs".into()),
         anchor: None,
