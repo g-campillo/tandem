@@ -1,11 +1,12 @@
 //! Tandem's IDE layer over the toolkit editor: the per-language editing rules, the
-//! corrections made right after a keystroke (indentation and tag closing) and Tandem's own
-//! completion list. Every edit this layer makes to a buffer goes through
-//! [`Workspace::ide_replace`], one undo step each.
+//! corrections made right after a keystroke (indentation and tag closing), Tandem's own
+//! completion list and the tab stops of inserted snippets. Every edit this layer makes to a
+//! buffer goes through [`Workspace::ide_replace`], one undo step each.
 mod complete;
 mod icons;
 mod popup;
 mod rules;
+mod snippets;
 
 pub(super) use rules::register_language_rules;
 
@@ -13,7 +14,7 @@ use super::fonts::Face;
 use super::*;
 use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InputEdit, MoveDown, MovePageDown, MovePageUp, MoveUp,
-    OutdentInline, Rope,
+    OutdentInline, RangeDecorationCollection, Rope,
 };
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -22,6 +23,7 @@ use tandem_core::edit::Edit;
 use tandem_core::edit::comment::comment_tokens;
 use tandem_core::edit::indent::{self, IndentUnit};
 use tandem_core::edit::snippet::library::UserSnippets;
+use tandem_core::edit::snippet::session::SnippetSession;
 use tandem_core::edit::tags;
 use tandem_lsp::LanguageManager;
 use tandem_lsp::features::completion;
@@ -45,7 +47,8 @@ pub(super) struct IdeUi {
 }
 
 impl IdeUi {
-    /// Tells the key listeners which popups are on screen now.
+    /// Tells the key listeners which popups are on screen now and which editor fills in a
+    /// snippet.
     fn sync_keys(&self) {
         self.keys.set(KeyClaim {
             list: self
@@ -53,6 +56,11 @@ impl IdeUi {
                 .as_ref()
                 .filter(|list| list.shown())
                 .map(|list| list.editor_id),
+            session: self
+                .tabs
+                .iter()
+                .find(|(_, tab)| tab.session.is_some())
+                .map(|(editor, _)| *editor),
         });
     }
 }
@@ -67,6 +75,10 @@ struct TabIde {
     /// The language server's completion trigger characters, shared with the tab's
     /// completion source and kept current by `ide_tick`.
     triggers: Rc<RefCell<Vec<String>>>,
+    /// The snippet being filled in, in at most one tab at a time.
+    session: Option<SnippetSession>,
+    /// Where the snippet's tab stops are drawn, created on first use.
+    placeholders: Option<RangeDecorationCollection>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -107,13 +119,18 @@ pub(in crate::workspace) enum IdeKey {
 struct KeyClaim {
     /// The editor whose completion list is on screen.
     list: Option<EntityId>,
+    /// The editor whose snippet is being filled in.
+    session: Option<EntityId>,
 }
 
 impl KeyClaim {
     /// Whether `ide_key` takes `key` pressed in `editor`: the completion list takes every
-    /// key but ⇧Tab.
+    /// key but ⇧Tab, a snippet session Tab, ⇧Tab and Escape.
     fn takes(&self, editor: EntityId, key: IdeKey) -> bool {
-        self.list == Some(editor) && key != IdeKey::ShiftTab
+        let list = self.list == Some(editor) && key != IdeKey::ShiftTab;
+        let session = self.session == Some(editor)
+            && matches!(key, IdeKey::Tab | IdeKey::ShiftTab | IdeKey::Escape);
+        list || session
     }
 
     /// Whether `ide_key` has a popup to close in an editor other than `editor`.
@@ -359,7 +376,8 @@ impl Workspace {
             }
         });
         let moved = cx.observe(editor, |view, editor, cx| {
-            view.completion_moved(&editor, cx)
+            view.completion_moved(&editor, cx);
+            view.snippet_moved(&editor, cx);
         });
         let triggers = Rc::new(RefCell::new(Vec::new()));
         let source = Rc::new(complete::CompletionSource {
@@ -379,6 +397,8 @@ impl Workspace {
                 unit,
                 own_edits: 0,
                 triggers,
+                session: None,
+                placeholders: None,
                 _subscriptions: vec![edits, blur, moved],
             },
         );
@@ -438,8 +458,9 @@ impl Workspace {
     }
 
     /// Applies one IDE edit as one undo step and selects `edit.selection` afterwards;
-    /// counts it so `ide_edits` skips its event. False when refused (loading or takeover)
-    /// or when the edit changes nothing.
+    /// counts it so `ide_edits` skips its event, and keeps the tab's snippet session in
+    /// step with it. False when refused (loading or takeover) or when the edit changes
+    /// nothing.
     pub(in crate::workspace) fn ide_replace(
         &mut self,
         editor: &Entity<EditorState>,
@@ -461,11 +482,16 @@ impl Workspace {
             editor.replace(edit.text.clone(), window, cx);
             editor.set_selected_range(edit.selection.clone(), cx);
         });
+        self.snippet_followed(
+            editor.entity_id(),
+            [(edit.range.start, edit.range.end, edit.text.len())],
+            cx,
+        );
         true
     }
 
     /// Handles a key while the editor container has focus; true when consumed. The
-    /// popups are asked in order: the completion list first.
+    /// popups are asked in order: the completion list first, then the snippet session.
     pub(in crate::workspace) fn ide_key(
         &mut self,
         key: IdeKey,
@@ -477,7 +503,7 @@ impl Workspace {
             .map(|target| target.editor)
             .filter(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
             .map(|editor| editor.entity_id());
-        self.completion_key(key, focused, window, cx)
+        self.completion_key(key, focused, window, cx) || self.snippet_key(key, focused, window, cx)
     }
 
     /// The IDE layer of `editor`, the active tab's editor on screen: its key listeners and
@@ -506,9 +532,9 @@ impl Workspace {
         }
     }
 
-    /// Follows a user edit: corrects a single keystroke (see `typing_correction`) as its
-    /// own undo step, then keeps the completion list in step with the text. Edits made by
-    /// `ide_replace` are skipped.
+    /// Follows a user edit: keeps the snippet session in step with it, corrects a single
+    /// keystroke (see `typing_correction`) as its own undo step, then keeps the completion
+    /// list in step with the text. Edits made by `ide_replace` are skipped.
     fn ide_edits(
         &mut self,
         editor: &Entity<EditorState>,
@@ -523,6 +549,11 @@ impl Workspace {
             tab.own_edits -= 1;
             return;
         }
+        let changes = event.edits().iter().map(|(edit, _)| {
+            let new_len = edit.new_end_byte.saturating_sub(edit.start_byte);
+            (edit.start_byte, edit.old_end_byte, new_len)
+        });
+        self.snippet_followed(editor.entity_id(), changes, cx);
         if let Some(fix) = self.typing_correction(editor, event, window, cx) {
             self.ide_replace(editor, &fix, window, cx);
         }
@@ -558,13 +589,14 @@ impl Workspace {
         typing_fix(&text, start, &inserted, tab.language, tab.unit)
     }
 
-    /// Forgets the tabs whose editor is gone, closes a completion list whose editor is
-    /// gone, and refreshes the active tab's completion trigger characters from its
-    /// language server (none while language tools are off).
+    /// Forgets the tabs whose editor is gone, with their snippet sessions, closes a
+    /// completion list whose editor is gone, and refreshes the active tab's completion
+    /// trigger characters from its language server (none while language tools are off).
     pub(in crate::workspace) fn ide_tick(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ide
             .tabs
             .retain(|_, tab| tab.editor.upgrade().is_some());
+        self.ide.sync_keys();
         if self
             .ide
             .completion
@@ -763,7 +795,10 @@ mod tests {
     #[test]
     fn an_open_list_takes_every_key_but_shift_tab_in_its_own_editor() {
         let (ours, other) = (EntityId::from(1), EntityId::from(2));
-        let open = KeyClaim { list: Some(ours) };
+        let open = KeyClaim {
+            list: Some(ours),
+            ..KeyClaim::default()
+        };
         for key in [
             IdeKey::Up,
             IdeKey::Down,
@@ -779,6 +814,51 @@ mod tests {
         assert!(!open.takes(ours, IdeKey::ShiftTab));
         assert!(!open.elsewhere(ours));
         assert!(open.elsewhere(other));
+    }
+
+    #[test]
+    fn a_snippet_session_takes_tab_shift_tab_and_escape_in_its_own_editor() {
+        let (ours, other) = (EntityId::from(1), EntityId::from(2));
+        let session = KeyClaim {
+            session: Some(ours),
+            ..KeyClaim::default()
+        };
+        for key in [IdeKey::Tab, IdeKey::ShiftTab, IdeKey::Escape] {
+            assert!(session.takes(ours, key), "{key:?}");
+            assert!(!session.takes(other, key), "{key:?}");
+        }
+        for key in [
+            IdeKey::Up,
+            IdeKey::Down,
+            IdeKey::PageUp,
+            IdeKey::PageDown,
+            IdeKey::Enter,
+        ] {
+            assert!(!session.takes(ours, key), "{key:?}");
+        }
+        // A session in another editor has nothing to close.
+        assert!(!session.elsewhere(other));
+    }
+
+    #[test]
+    fn an_open_list_comes_before_the_session_but_leaves_it_shift_tab() {
+        let ours = EntityId::from(1);
+        let both = KeyClaim {
+            list: Some(ours),
+            session: Some(ours),
+        };
+        for key in [
+            IdeKey::Up,
+            IdeKey::Down,
+            IdeKey::PageUp,
+            IdeKey::PageDown,
+            IdeKey::Enter,
+            IdeKey::Tab,
+            IdeKey::ShiftTab,
+            IdeKey::Escape,
+        ] {
+            assert!(both.takes(ours, key), "{key:?}");
+        }
     }
 
     #[test]

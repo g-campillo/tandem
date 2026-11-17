@@ -4,6 +4,7 @@
 use super::*;
 use gpui_kit::component::input::{CompletionProvider, Rope};
 use lsp_types::{CompletionContext, CompletionItem, CompletionResponse, CompletionTriggerKind};
+use std::ops::Range;
 use std::time::Duration;
 use tandem_core::edit::snippet::library::{self, SnippetDef};
 use tandem_core::edit::syntax::likely_in_string_or_comment;
@@ -68,11 +69,27 @@ impl CompletionProvider for CompletionSource {
     }
 }
 
+/// What a completion list offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ListKind {
+    /// The language server's entries and the snippets for the word at the cursor.
+    Words,
+    /// The options of the active snippet stop.
+    Choices,
+    /// Every snippet of the language, from Insert Snippet….
+    Snippets,
+}
+
 /// The completion list of one editor: on screen once it has rows, or waiting for the
 /// language server's reply.
 pub(in crate::workspace) struct CompletionState {
     pub(super) editor_id: EntityId,
     pub(super) editor: WeakEntity<EditorState>,
+    pub(super) kind: ListKind,
+    /// The selection a list of choices or snippets opened with, and its text. The list
+    /// stays as it opened while the editor keeps that selection, and a snippet chosen
+    /// from Insert Snippet… gets that text as `TM_SELECTED_TEXT`.
+    held: Option<(Range<usize>, String)>,
     /// Where the word being completed starts; the list hangs below it.
     pub(super) word_start: usize,
     /// The cursor when the entries were asked for.
@@ -110,6 +127,8 @@ impl CompletionState {
         Self {
             editor_id: editor.entity_id(),
             editor,
+            kind: ListKind::Words,
+            held: None,
             word_start,
             request_cursor: cursor,
             items: Vec::new(),
@@ -377,12 +396,68 @@ impl Workspace {
         self.completion_changed(cx);
     }
 
+    /// Opens a list of `candidates` hanging below `start` in `editor`, every one of them in
+    /// their own order (an empty query): the options of a snippet stop, or every snippet
+    /// from Insert Snippet…. The list stays as it opened while the editor keeps the
+    /// selection it has now; after that, the open-list rule applies from `start`.
+    pub(super) fn open_fixed_list(
+        &mut self,
+        editor: &Entity<EditorState>,
+        kind: ListKind,
+        start: usize,
+        candidates: Vec<Candidate>,
+        snippets: Vec<SnippetDef>,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, cursor, selection, typed) = {
+            let state = editor.read(cx);
+            let cursor = state.cursor();
+            (
+                state.text().to_string(),
+                cursor,
+                state.selected_range(),
+                typed_since(state.text(), start, cursor).unwrap_or_default(),
+            )
+        };
+        // Nothing ranks when `start` is not a position in the text.
+        let ranked = completion::rank(&text, start, &candidates, RANK_LIMIT);
+        if ranked.is_empty() {
+            self.close_completion(cx);
+            return;
+        }
+        self.ide.lists += 1;
+        let mut list = CompletionState::waiting(editor.downgrade(), start, start);
+        list.kind = kind;
+        let selected = text.get(selection.clone()).unwrap_or_default().to_string();
+        list.held = Some((selection, selected));
+        list.ranked_for = (cursor, typed);
+        list.snippets = snippets;
+        list.candidates = candidates;
+        list.ranked = ranked;
+        list.serial = self.ide.lists;
+        self.ide.completion = Some(list);
+        self.completion_changed(cx);
+    }
+
+    /// Closes the list of `editor` when it offers the options of a snippet stop.
+    pub(super) fn close_choices(&mut self, editor: EntityId, cx: &mut Context<Self>) {
+        if self
+            .ide
+            .completion
+            .as_ref()
+            .is_some_and(|list| list.editor_id == editor && list.kind == ListKind::Choices)
+        {
+            self.close_completion(cx);
+        }
+    }
+
     /// The open-list rule, after an edit or a cursor move: the list closes when the cursor
     /// is before where its candidates start, or the text from there to the cursor holds
     /// whitespace or a line break; otherwise it is ranked again for that text, so
     /// characters the word rules leave out (`-`, `@`, `:` inside an entry's range) refine
     /// it instead of closing it. A list that still waits for its reply is only closed or
-    /// kept. False when the list closed.
+    /// kept, and a list of choices or snippets stays as it opened while the editor keeps
+    /// the selection it opened with. False when the list closed.
     fn refresh_completion(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(list) = self.ide.completion.as_mut() else {
             return false;
@@ -392,6 +467,13 @@ impl Workspace {
             return false;
         };
         let state = editor.read(cx);
+        if list
+            .held
+            .as_ref()
+            .is_some_and(|held| selection_holds(held, state.text(), &state.selected_range()))
+        {
+            return true;
+        }
         let cursor = state.cursor();
         let Some(typed) = typed_since(state.text(), list.start(), cursor) else {
             self.close_completion(cx);
@@ -686,10 +768,10 @@ impl Workspace {
     }
 
     /// Accepts the row at `index`: a server entry through `completion::accept_item`, a
-    /// snippet through `accept_snippet`. A server entry that may still lack the edits it
-    /// adds (an import) waits up to `ACCEPT_WAIT` for its details when the server resolves
-    /// entries, and goes in as it is when they do not come in time. Accepting again
-    /// replaces an entry still waiting.
+    /// snippet through `accept_snippet`, a snippet stop's option into that stop. A server
+    /// entry that may still lack the edits it adds (an import) waits up to `ACCEPT_WAIT`
+    /// for its details when the server resolves entries, and goes in as it is when they do
+    /// not come in time. Accepting again replaces an entry still waiting.
     pub(super) fn accept_completion(
         &mut self,
         index: usize,
@@ -701,10 +783,11 @@ impl Workspace {
         };
         self.ide.accepting = None;
         self.completion_changed(cx);
-        let Some(candidate) = list
+        let Some(source) = list
             .ranked
             .get(index)
             .and_then(|row| list.candidates.get(row.candidate))
+            .map(|candidate| candidate.source)
         else {
             return;
         };
@@ -714,20 +797,35 @@ impl Workspace {
         else {
             return;
         };
-        let (insertion, wait) = match candidate.source {
-            Source::Server(index) => {
+        let (insertion, wait) = match (list.kind, source) {
+            (_, Source::Choice(choice)) => {
+                self.accept_choice(list.editor_id, choice, window, cx);
+                return;
+            }
+            (ListKind::Snippets, Source::Snippet(snippet)) => {
+                let selected = list.held.as_ref().map_or("", |(_, text)| text.as_str());
+                let body = &list.snippets[snippet].body;
+                self.insert_chosen_snippet(
+                    list.editor_id,
+                    list.word_start,
+                    selected,
+                    body,
+                    window,
+                    cx,
+                );
+                return;
+            }
+            (_, Source::Server(index)) => {
                 let cached = list.resolved.get(&index);
                 let item = resolved_item(cached, &list.items[index]);
                 let resolves = target.manager.as_ref().is_some_and(resolves_entries);
                 let wait = accept_waits_for_details(&item, cached.is_some(), resolves);
                 (Insertion::Item(Box::new(item)), wait)
             }
-            Source::Snippet(snippet) => (
+            (_, Source::Snippet(snippet)) => (
                 Insertion::Snippet(list.snippets[snippet].body.clone()),
                 false,
             ),
-            // A snippet's choices are offered only while its session runs.
-            Source::Choice(_) => return,
         };
         let start = list.start();
         let at = {
@@ -774,7 +872,8 @@ impl Workspace {
     /// at this moment. Nothing happens when that editor is no longer the active tab's on
     /// screen or the accepted word is gone (see `AcceptedAt::still_applies`). The edit is
     /// one undo step the toolkit does not see as typing; the selection then goes where
-    /// the entry says, and an entry that asks for the list again gets it at the new cursor.
+    /// the entry says, a snippet's tab stops start, and an entry that asks for the list
+    /// again gets it at the new cursor.
     fn insert_accepted(&mut self, accepted: Accepted, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self
             .ide_target()
@@ -834,16 +933,11 @@ impl Workspace {
                 return;
             }
         };
-        if plan.edit.changes_text() && !self.ide_replace(&target.editor, &plan.edit, window, cx) {
+        let command = plan.command.clone();
+        if !self.apply_accepted(&target.editor, plan, window, cx) {
             return;
         }
-        target.editor.update(cx, |editor, cx| {
-            editor.set_selected_range(plan.selection.clone(), cx)
-        });
-        if plan
-            .command
-            .is_some_and(|command| command.command == TRIGGER_SUGGEST)
-        {
+        if command.is_some_and(|command| command.command == TRIGGER_SUGGEST) {
             self.suggest_again(accepted.editor, window, cx);
         }
     }
@@ -862,7 +956,11 @@ impl Workspace {
 
     /// The snippets of `language`: the user's first, then the built-in ones they leave. A
     /// snippet file that cannot be read is reported once in the status bar.
-    fn completion_snippets(&mut self, language: &str, cx: &mut Context<Self>) -> Vec<SnippetDef> {
+    pub(super) fn completion_snippets(
+        &mut self,
+        language: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<SnippetDef> {
         let store = &self.store;
         let user = self.ide.snippets.get_or_insert_with(|| {
             UserSnippets::new(store.lock().unwrap().directory.join("snippets"))
@@ -1026,6 +1124,17 @@ fn opens_list(typed: &str, language: &str, triggers: &[String]) -> bool {
     }
 }
 
+/// Whether the editor still has the selection a list opened with (`held`: its range and
+/// text), with the same text in it.
+fn selection_holds(held: &(Range<usize>, String), text: &Rope, selection: &Range<usize>) -> bool {
+    let (range, selected) = held;
+    range == selection
+        && range.end <= text.len()
+        && text.is_char_boundary(range.start)
+        && text.is_char_boundary(range.end)
+        && text.slice(range.clone()) == selected.as_str()
+}
+
 /// The text from `start` to the cursor while the list stays open for it: `None` when the
 /// cursor is before `start` or that text holds whitespace or a line break.
 fn typed_since(text: &Rope, start: usize, cursor: usize) -> Option<String> {
@@ -1046,7 +1155,8 @@ mod tests {
     // and shadow Rust's `#[test]`.
     use super::{
         AcceptedAt, accept_waits_for_details, move_selection, opens_list, resolved_item,
-        scrolled_top, selection_wants_details, should_auto_request, typed_since, visible_top,
+        scrolled_top, selection_holds, selection_wants_details, should_auto_request, typed_since,
+        visible_top,
     };
     use gpui_kit::component::input::Rope;
     use lsp_types::{CompletionItem, Documentation, Position, Range, TextEdit};
@@ -1263,6 +1373,25 @@ mod tests {
         assert_eq!(typed_since(&text, 4, 8), None);
         assert_eq!(typed_since(&text, 8, 22), None);
         assert_eq!(typed_since(&text, 8, 99), None);
+    }
+
+    #[test]
+    fn a_held_selection_holds_while_the_editor_keeps_it_unchanged() {
+        let text = Rope::from_str("let x = a + b;\n");
+        let held = (8..13, "a + b".to_string());
+        assert!(selection_holds(&held, &text, &(8..13)));
+        // The selection moved or shrank.
+        assert!(!selection_holds(&held, &text, &(13..13)));
+        assert!(!selection_holds(&held, &text, &(8..12)));
+        // Same range, other text in it.
+        let edited = Rope::from_str("let x = a - b;\n");
+        assert!(!selection_holds(&held, &edited, &(8..13)));
+        // The text became shorter than the range.
+        assert!(!selection_holds(&held, &Rope::from_str("let"), &(8..13)));
+        // An empty selection holds while the cursor stays.
+        let cursor = (4..4, String::new());
+        assert!(selection_holds(&cursor, &text, &(4..4)));
+        assert!(!selection_holds(&cursor, &text, &(5..5)));
     }
 
     #[test]
