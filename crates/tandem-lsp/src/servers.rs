@@ -1,6 +1,6 @@
 //! How Tandem launches each language server it runs: program, arguments, environment and settings.
 use crate::{DiagnosticMode, ServerConfig};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
 use tandem_core::Launch;
@@ -89,7 +89,72 @@ pub fn server_config(
             config.ready_detail = "jdtls ready · Maven and Gradle import offline".into();
             config
         }
+        Launch::Tsgo { server: program } => {
+            let mut config = typescript_config(&server.title, program, project, cache);
+            config.args = vec!["--lsp".into(), "--stdio".into()];
+            config
+        }
+        Launch::TypeScriptLanguageServer {
+            node,
+            server: script,
+            tsserver,
+        } => {
+            let mut config = typescript_config(&server.title, node, project, cache);
+            config.args = vec![script.into(), "--stdio".into()];
+            config.path = node.parent().map(Path::to_path_buf).into_iter().collect();
+            // Without automatic typing acquisition tsserver never runs `npm install @types/...`.
+            config.initialization_options = json!({
+                "tsserver": {"path": tsserver},
+                "disableAutomaticTypingAcquisition": true,
+                "preferences": inlay_preferences(),
+            });
+            config
+        }
     }
+}
+
+/// Settings both TypeScript servers share. tsgo pulls diagnostics; `Settled` is the fallback for
+/// pushes, which typescript-language-server sends without versions.
+fn typescript_config(title: &str, program: &Path, project: &Path, cache: &Path) -> ServerConfig {
+    let mut config = ServerConfig::new(title, program, project, cache);
+    config.configuration = typescript_settings();
+    config.diagnostics = DiagnosticMode::Settled;
+    config.start_timeout = Duration::from_secs(30);
+    config.request_timeout = Duration::from_secs(30);
+    config
+}
+
+/// tsserver's preferences for type hints and parameter-name hints.
+fn inlay_preferences() -> Value {
+    json!({
+        "includeInlayParameterNameHints": "all",
+        "includeInlayParameterNameHintsWhenArgumentMatchesName": false,
+        "includeInlayFunctionParameterTypeHints": true,
+        "includeInlayVariableTypeHints": true,
+        "includeInlayVariableTypeHintsWhenTypeMatchesName": false,
+        "includeInlayPropertyDeclarationTypeHints": true,
+        "includeInlayFunctionLikeReturnTypeHints": true,
+        "includeInlayEnumMemberValueHints": true,
+    })
+}
+
+/// VS Code's `typescript` and `javascript` settings, as workspace/configuration answers them: the
+/// same hints, and no automatic type acquisition. tsgo 7.0.2 otherwise runs
+/// `npm install @types/...` in ~/Library/Caches/typescript when it finds npm; either setting stops it.
+fn typescript_settings() -> Value {
+    let settings = json!({
+        "inlayHints": {
+            "parameterNames": {"enabled": "all", "suppressWhenArgumentMatchesName": true},
+            "parameterTypes": {"enabled": true},
+            "variableTypes": {"enabled": true, "suppressWhenTypeMatchesName": true},
+            "propertyDeclarationTypes": {"enabled": true},
+            "functionLikeReturnTypes": {"enabled": true},
+            "enumMemberValues": {"enabled": true},
+        },
+        "tsserver": {"automaticTypeAcquisition": {"enabled": false}},
+        "disableAutomaticTypeAcquisition": true,
+    });
+    json!({"typescript": settings, "javascript": settings})
 }
 
 #[cfg(test)]
@@ -258,6 +323,149 @@ mod tests {
         assert!(config.initialization_options.is_null());
         assert!(!config.push_configuration);
         assert!(!config.resend_on_change);
+    }
+
+    fn tsgo_tools() -> tandem_core::ServerTools {
+        tandem_core::ServerTools {
+            name: "tsgo".into(),
+            title: "TypeScript 7.0.2 (global)".into(),
+            languages: vec!["typescript".into(), "javascript".into()],
+            launch: tandem_core::Launch::Tsgo {
+                server: "/n/lib/node_modules/typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc".into(),
+            },
+        }
+    }
+
+    fn ts_ls_tools() -> tandem_core::ServerTools {
+        tandem_core::ServerTools {
+            name: "typescript-language-server".into(),
+            title: "TypeScript 5.9.3 (project) via typescript-language-server 6.0.2".into(),
+            languages: vec!["typescript".into(), "javascript".into()],
+            launch: tandem_core::Launch::TypeScriptLanguageServer {
+                node: "/n/bin/node".into(),
+                server: "/n/lib/node_modules/typescript-language-server/lib/cli.mjs".into(),
+                tsserver: "/work/app/node_modules/typescript/lib/tsserver.js".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn tsgo_config_runs_the_native_lsp_mode() {
+        let cache = Path::new("/state/language-cache/p/typescript/tsgo");
+        let config = server_config(&tsgo_tools(), Path::new("/work/app"), cache);
+        assert_eq!(config.name, "TypeScript 7.0.2 (global)");
+        assert_eq!(
+            config.program,
+            PathBuf::from(
+                "/n/lib/node_modules/typescript/node_modules/@typescript/typescript-darwin-arm64/lib/tsc"
+            )
+        );
+        assert_eq!(
+            config.args,
+            vec![OsString::from("--lsp"), OsString::from("--stdio")]
+        );
+        assert_eq!(config.project, PathBuf::from("/work/app"));
+        assert_eq!(config.cache, cache);
+        assert!(config.path.is_empty());
+        assert!(config.env.is_empty());
+        assert!(config.initialization_options.is_null());
+        assert_eq!(config.capabilities, json!({}));
+        assert_eq!(config.diagnostics, DiagnosticMode::Settled);
+        assert_eq!(config.start_timeout, Duration::from_secs(30));
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.ready_detail, "TypeScript 7.0.2 (global) ready");
+        assert!(!config.resend_on_change);
+    }
+
+    #[test]
+    fn ts_ls_config_disables_type_acquisition() {
+        let cache = Path::new("/state/language-cache/p/typescript/typescript-language-server");
+        let config = server_config(&ts_ls_tools(), Path::new("/work/app"), cache);
+        assert_eq!(
+            config.name,
+            "TypeScript 5.9.3 (project) via typescript-language-server 6.0.2"
+        );
+        assert_eq!(config.program, PathBuf::from("/n/bin/node"));
+        assert_eq!(
+            config.args,
+            vec![
+                OsString::from("/n/lib/node_modules/typescript-language-server/lib/cli.mjs"),
+                OsString::from("--stdio")
+            ]
+        );
+        assert_eq!(config.path, vec![PathBuf::from("/n/bin")]);
+        assert!(config.env.is_empty());
+        assert_eq!(config.cache, cache);
+        assert_eq!(
+            config.initialization_options.pointer("/tsserver/path"),
+            Some(&json!("/work/app/node_modules/typescript/lib/tsserver.js"))
+        );
+        assert_eq!(
+            config
+                .initialization_options
+                .pointer("/disableAutomaticTypingAcquisition"),
+            Some(&json!(true))
+        );
+        assert_eq!(config.diagnostics, DiagnosticMode::Settled);
+        assert_eq!(config.start_timeout, Duration::from_secs(30));
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(
+            config.ready_detail,
+            "TypeScript 5.9.3 (project) via typescript-language-server 6.0.2 ready"
+        );
+    }
+
+    #[test]
+    fn ts_ls_config_sets_inlay_hint_preferences() {
+        let config = server_config(
+            &ts_ls_tools(),
+            Path::new("/work/app"),
+            Path::new("/state/ts"),
+        );
+        assert_eq!(
+            config.initialization_options["preferences"],
+            json!({"includeInlayParameterNameHints":"all","includeInlayParameterNameHintsWhenArgumentMatchesName":false,"includeInlayFunctionParameterTypeHints":true,"includeInlayVariableTypeHints":true,"includeInlayVariableTypeHintsWhenTypeMatchesName":false,"includeInlayPropertyDeclarationTypeHints":true,"includeInlayFunctionLikeReturnTypeHints":true,"includeInlayEnumMemberValueHints":true})
+        );
+    }
+
+    #[test]
+    fn typescript_configuration_answers_inlay_hint_settings() {
+        let hints = json!({"parameterNames":{"enabled":"all","suppressWhenArgumentMatchesName":true},"parameterTypes":{"enabled":true},"variableTypes":{"enabled":true,"suppressWhenTypeMatchesName":true},"propertyDeclarationTypes":{"enabled":true},"functionLikeReturnTypes":{"enabled":true},"enumMemberValues":{"enabled":true}});
+        for tools in [tsgo_tools(), ts_ls_tools()] {
+            let config = server_config(&tools, Path::new("/work/app"), Path::new("/state/ts"));
+            // workspace/configuration answers each item's section from this value.
+            for section in ["typescript", "javascript"] {
+                assert_eq!(
+                    config.configuration[section]["inlayHints"], hints,
+                    "{} {section}",
+                    tools.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typescript_configuration_turns_off_type_acquisition() {
+        // tsgo otherwise runs `npm install @types/...` in ~/Library/Caches/typescript when npm
+        // is on its PATH; each of these settings stops it.
+        for tools in [tsgo_tools(), ts_ls_tools()] {
+            let config = server_config(&tools, Path::new("/work/app"), Path::new("/state/ts"));
+            for section in ["typescript", "javascript"] {
+                let settings = &config.configuration[section];
+                assert_eq!(
+                    settings.pointer("/tsserver/automaticTypeAcquisition/enabled"),
+                    Some(&json!(false)),
+                    "{} {section}",
+                    tools.name
+                );
+                assert_eq!(
+                    settings["disableAutomaticTypeAcquisition"],
+                    json!(true),
+                    "{} {section}",
+                    tools.name
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Language servers beyond Rust and Python: where Tandem looks, what it found and what is
 //! missing. Discovery inspects files only; it never runs a tool or an installer.
-use super::{file_hash, java, swift};
+use super::{file_hash, java, swift, typescript};
 use crate::{ToolKind, content_hash};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -43,6 +43,15 @@ pub enum Launch {
     Jdtls {
         launcher: PathBuf,
         java_home: PathBuf,
+    },
+    /// TypeScript 7's native compiler, whose `--lsp --stdio` mode is a full language server.
+    Tsgo { server: PathBuf },
+    /// typescript-language-server under `node`, driving the tsserver of TypeScript 6 or older.
+    /// `server` is the package's `lib/cli.mjs`; `tsserver` is TypeScript's `lib/tsserver.js`.
+    TypeScriptLanguageServer {
+        node: PathBuf,
+        server: PathBuf,
+        tsserver: PathBuf,
     },
 }
 
@@ -96,6 +105,7 @@ pub type Discover = fn(&Path, &ToolRoots) -> Result<KindTools, MissingTools>;
 pub const SERVER_KINDS: &[(ToolKind, Discover)] = &[
     (ToolKind::Java, java::discover),
     (ToolKind::Swift, swift::discover),
+    (ToolKind::TypeScript, typescript::discover),
 ];
 
 /// Runs the discovery of `kind`; `None` when the kind is not served through this registry.
