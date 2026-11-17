@@ -125,7 +125,7 @@ Every guided step uses one of three help levels. The level is saved per language
 
 At every level Claude must say why: guidance without a reason is refused and sent back to Claude. Tandem checks each level's shape too (for example, Intermediate guidance that contains finished code is refused, and so is a Beginner explanation of a part that is not in the code, or a Beginner location whose line does not match the file), so Claude cannot quietly give more or less help than you asked for. Claude explains each language on its own terms and does not compare it to other languages unless you ask.
 
-A step's language comes from its file's extension (`.rs` Rust, `.go` Go, `.ts`/`.tsx` TypeScript, `.js`/`.mjs` JavaScript, `.py` Python, `.java` Java, `.sh` Shell), or from the language Claude names for a command step. Settings lists those seven languages plus any other language that has a saved level. Guidance is stored per step and level: switching to a level you already had shows the stored guidance at once, and a new level asks Claude for new guidance.
+A step's language comes from its file's extension (`.rs` Rust, `.go` Go, `.ts`/`.tsx` TypeScript, `.js`/`.jsx`/`.mjs` JavaScript, `.py` Python, `.java` Java, `.swift` Swift, `.vue` Vue, `.svelte` Svelte, `.html` HTML, `.css`/`.scss`/`.less` CSS, `.sh` Shell), or from the language Claude names for a command step. Settings lists those twelve languages plus any other language that has a saved level. Guidance is stored per step and level: switching to a level you already had shows the stored guidance at once, and a new level asks Claude for new guidance.
 
 ## What Claude may do
 

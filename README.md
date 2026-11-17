@@ -36,6 +36,23 @@ Tandem keeps its state (open tabs, drafts, chat tasks) in `~/Library/Application
 
 The editor uses VS Code's macOS shortcuts: ⌘/ comments a line, ⌥↑/⌥↓ move it, ⌘D adds the next occurrence to the selection, ⌃G goes to a line, ⌘B and ⌥⌘B hide the file explorer and the chat. The search field in the title bar (or ⌘P) finds a file by name, and typing `>` there (or ⇧⌘P) lists every command with its shortcut. The full table is in [docs/tandem/local-use.md](docs/tandem/local-use.md).
 
+## Language tools
+
+Completion, hover, go to definition, references, symbols, formatting and the Problems list come from language servers already installed on your Mac. Tandem never installs them: Settings (⌘,) → **Language tools** shows what it found and, for anything missing, the exact command to install it. Each language's tools stay off until you trust the project and enable them, because they run with your user permissions. Their caches live in Tandem's state folder, not in the project.
+
+| Files | Server | Install |
+| --- | --- | --- |
+| Rust | rust-analyzer from the project's toolchain | `rustup component add rust-analyzer` |
+| Python | Pyright | `npm install -g pyright` |
+| Java | jdtls on Java 21 or newer | `brew install jdtls`, `brew install openjdk@21` |
+| Swift | SourceKit-LSP from Xcode or the Command Line Tools; Xcode projects also need xcode-build-server | `xcode-select --install`, `brew install xcode-build-server` |
+| JavaScript, TypeScript, JSX, TSX | the project's TypeScript 7 (tsgo), or typescript-language-server with the project's TypeScript 6 or older; else the global TypeScript | `npm install -g typescript`, `npm install -g typescript-language-server` |
+| Vue | @vue/language-server with typescript-language-server and the project's TypeScript 6 or older | `npm install -g @vue/language-server`, `npm install -g typescript-language-server` |
+| Svelte | svelte-language-server | `npm install -g svelte-language-server` |
+| HTML, CSS, SCSS, Less, JSON | vscode-langservers-extracted | `npm install -g vscode-langservers-extracted` |
+
+Vue files are highlighted with the HTML grammar. Java imports Maven and Gradle projects offline, so build once from the command line first. In an Xcode project, run the `xcode-build-server config` command Settings shows.
+
 ## Look and fonts
 
 Settings (⌘,) → **Appearance** has a window opacity slider (30–100%; it fades the whole window, text included, so you can see what is behind it) and a blur strength slider for what shows through (0 turns the blur off). Settings → **Fonts** sets the font and size of the editor, the terminal, the chat and the file explorer, with ligatures for the code fonts. The defaults are FiraCode Nerd Font for code and the system font for text; a font that is not installed is replaced by Menlo or the system font. Everything applies to all projects.
