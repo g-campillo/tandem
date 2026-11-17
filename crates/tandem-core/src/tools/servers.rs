@@ -1,6 +1,6 @@
 //! Language servers beyond Rust and Python: where Tandem looks, what it found and what is
 //! missing. Discovery inspects files only; it never runs a tool or an installer.
-use super::{file_hash, swift};
+use super::{file_hash, java, swift};
 use crate::{ToolKind, content_hash};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,12 @@ pub enum Launch {
         server: PathBuf,
         developer_dir: PathBuf,
         extra_path: Vec<PathBuf>,
+    },
+    /// `launcher` is jdtls's own start script, canonical; `java_home` is the Java 21 or newer
+    /// runtime it runs on, given to it as JAVA_HOME.
+    Jdtls {
+        launcher: PathBuf,
+        java_home: PathBuf,
     },
 }
 
@@ -87,7 +93,10 @@ impl From<anyhow::Error> for MissingTools {
 pub type Discover = fn(&Path, &ToolRoots) -> Result<KindTools, MissingTools>;
 
 /// Kinds served through this registry, in Settings order. Rust and Python keep their own discovery.
-pub const SERVER_KINDS: &[(ToolKind, Discover)] = &[(ToolKind::Swift, swift::discover)];
+pub const SERVER_KINDS: &[(ToolKind, Discover)] = &[
+    (ToolKind::Java, java::discover),
+    (ToolKind::Swift, swift::discover),
+];
 
 /// Runs the discovery of `kind`; `None` when the kind is not served through this registry.
 pub fn discover_kind(

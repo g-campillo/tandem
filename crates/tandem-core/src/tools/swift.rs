@@ -264,7 +264,9 @@ mod tests {
         std::fs::create_dir_all(roots.applications.join("Xcodes.txt")).unwrap();
         let tools = discover(&project(temp.path()), &roots).unwrap();
         assert_eq!(tools.label, "SourceKit-LSP (Xcode 16.4)");
-        let Launch::SourceKit { server: found, .. } = &tools.servers[0].launch;
+        let Launch::SourceKit { server: found, .. } = &tools.servers[0].launch else {
+            panic!("expected a SourceKit launch");
+        };
         assert_eq!(found, &server);
     }
 

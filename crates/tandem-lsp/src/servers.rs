@@ -69,6 +69,26 @@ pub fn server_config(
             config.ready_detail = format!("{} ready · indexes in Tandem's cache", server.title);
             config
         }
+        Launch::Jdtls {
+            launcher,
+            java_home,
+        } => {
+            let mut config = ServerConfig::new(&server.title, launcher, project, cache);
+            config.args = vec!["-data".into(), cache.join("workspace").into()];
+            config.path = vec![java_home.join("bin")];
+            config.env = vec![("JAVA_HOME".into(), java_home.into())];
+            let settings = json!({"java":{"import":{"generatesMetadataFilesAtProjectRoot":false,"gradle":{"enabled":true,"offline":{"enabled":true}},"maven":{"enabled":true,"offline":{"enabled":true}}},"maven":{"downloadSources":false},"eclipse":{"downloadSources":false},"format":{"enabled":true},"autobuild":{"enabled":true}}});
+            config.initialization_options = json!({ "settings": settings });
+            config.configuration = settings;
+            config.push_configuration = true;
+            // jdtls pushes diagnostics without versions.
+            config.diagnostics = DiagnosticMode::Settled;
+            // initialize takes seconds; Maven and Gradle imports and first answers can take longer.
+            config.start_timeout = Duration::from_secs(60);
+            config.request_timeout = Duration::from_secs(60);
+            config.ready_detail = "jdtls ready · Maven and Gradle import offline".into();
+            config
+        }
     }
 }
 
@@ -238,5 +258,75 @@ mod tests {
         assert!(config.initialization_options.is_null());
         assert!(!config.push_configuration);
         assert!(!config.resend_on_change);
+    }
+
+    #[test]
+    fn jdtls_config_keeps_its_workspace_in_the_cache() {
+        let launcher = PathBuf::from("/opt/homebrew/Cellar/jdtls/1.47.0/bin/jdtls");
+        let java_home = PathBuf::from("/Users/me/.sdkman/candidates/java/current");
+        let tools = tandem_core::ServerTools {
+            name: "jdtls".into(),
+            title: "jdtls 1.47.0".into(),
+            languages: vec!["java".into()],
+            launch: tandem_core::Launch::Jdtls {
+                launcher: launcher.clone(),
+                java_home: java_home.clone(),
+            },
+        };
+        let cache = Path::new("/state/language-cache/p/java/jdtls");
+        let config = server_config(&tools, Path::new("/work/app"), cache);
+        assert_eq!(config.name, "jdtls 1.47.0");
+        assert_eq!(config.program, launcher);
+        assert_eq!(
+            config.args,
+            vec![
+                OsString::from("-data"),
+                OsString::from(cache.join("workspace"))
+            ]
+        );
+        assert_eq!(config.project, PathBuf::from("/work/app"));
+        assert_eq!(config.cache, cache);
+        assert_eq!(config.path, vec![java_home.join("bin")]);
+        assert_eq!(
+            config.env,
+            vec![("JAVA_HOME".into(), OsString::from(&java_home))]
+        );
+        let settings = &config.configuration;
+        assert_eq!(
+            config.initialization_options,
+            json!({ "settings": settings })
+        );
+        assert_eq!(
+            settings.pointer("/java/import/generatesMetadataFilesAtProjectRoot"),
+            Some(&json!(false))
+        );
+        for build in ["gradle", "maven"] {
+            assert_eq!(
+                settings.pointer(&format!("/java/import/{build}/enabled")),
+                Some(&json!(true))
+            );
+            assert_eq!(
+                settings.pointer(&format!("/java/import/{build}/offline/enabled")),
+                Some(&json!(true))
+            );
+        }
+        assert_eq!(
+            settings.pointer("/java/maven/downloadSources"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            settings.pointer("/java/eclipse/downloadSources"),
+            Some(&json!(false))
+        );
+        assert_eq!(settings.pointer("/java/format/enabled"), Some(&json!(true)));
+        assert!(config.push_configuration);
+        assert!(!config.resend_on_change);
+        assert_eq!(config.diagnostics, DiagnosticMode::Settled);
+        assert_eq!(config.start_timeout, Duration::from_secs(60));
+        assert_eq!(config.request_timeout, Duration::from_secs(60));
+        assert_eq!(
+            config.ready_detail,
+            "jdtls ready · Maven and Gradle import offline"
+        );
     }
 }
