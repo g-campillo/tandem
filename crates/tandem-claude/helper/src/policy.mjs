@@ -343,6 +343,8 @@ function isBuild(tokens) {
     case 'gradle':
     case './gradlew':
       return ['test', 'build', 'check', 'compileJava'].includes(first);
+    case 'swift':
+      return first === 'build' || first === 'test';
     case 'make':
       return ['test', 'check', 'lint', 'build'].includes(first);
     default:
