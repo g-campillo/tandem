@@ -1,5 +1,7 @@
 //! Snippet bodies in the VS Code / TextMate syntax: parsing them and expanding them into
 //! the text to insert, with the byte ranges of their tab stops.
+pub mod session;
+
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 

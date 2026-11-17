@@ -65,6 +65,27 @@ impl Edit {
         new.push_str(&old[end..]);
         new
     }
+
+    /// Where `offset` (in the text before the edit) is after it. Offsets before the range
+    /// stay, offsets after it move by the length change, offsets inside it move to its start
+    /// plus at most the new length. The end of the range counts as after it, so an offset
+    /// at an insertion moves past the inserted text.
+    pub fn map_offset(&self, offset: usize) -> usize {
+        map_offset_across(&self.range, self.text.len(), offset)
+    }
+}
+
+/// `Edit::map_offset` for a replacement of `range` by `new_len` bytes.
+pub(crate) fn map_offset_across(range: &Range<usize>, new_len: usize, offset: usize) -> usize {
+    let end = range.end;
+    let start = range.start.min(end);
+    if offset < start {
+        offset
+    } else if offset >= end {
+        offset - (end - start) + new_len
+    } else {
+        start + (offset - start).min(new_len)
+    }
 }
 
 fn clamp(text: &str, offset: usize) -> usize {
@@ -275,6 +296,52 @@ mod tests {
             let edit = between(old, new);
             assert_eq!(edit.apply(old), new, "{old:?} -> {new:?}");
         }
+    }
+
+    fn replacement(range: Range<usize>, text: &str) -> Edit {
+        Edit {
+            range,
+            text: text.to_string(),
+            selection: 0..0,
+        }
+    }
+
+    #[test]
+    fn map_offset_keeps_offsets_before_the_range() {
+        let edit = replacement(4..7, "ab");
+        assert_eq!(edit.map_offset(0), 0);
+        assert_eq!(edit.map_offset(3), 3);
+        assert_eq!(edit.map_offset(4), 4);
+    }
+
+    #[test]
+    fn map_offset_moves_offsets_after_the_range_by_the_length_change() {
+        let shorter = replacement(4..7, "ab");
+        assert_eq!(shorter.map_offset(7), 6);
+        assert_eq!(shorter.map_offset(10), 9);
+        let longer = replacement(4..7, "abcde");
+        assert_eq!(longer.map_offset(7), 9);
+        assert_eq!(longer.map_offset(10), 12);
+    }
+
+    #[test]
+    fn map_offset_moves_offsets_inside_the_range_to_its_start_plus_at_most_the_new_length() {
+        let shorter = replacement(4..8, "ab");
+        assert_eq!(shorter.map_offset(5), 5);
+        assert_eq!(shorter.map_offset(6), 6);
+        assert_eq!(shorter.map_offset(7), 6);
+        let deletion = replacement(4..8, "");
+        assert_eq!(deletion.map_offset(6), 4);
+        let longer = replacement(4..8, "abcdef");
+        assert_eq!(longer.map_offset(7), 7);
+    }
+
+    #[test]
+    fn map_offset_moves_an_offset_at_an_insertion_after_it() {
+        let insertion = replacement(3..3, "xy");
+        assert_eq!(insertion.map_offset(2), 2);
+        assert_eq!(insertion.map_offset(3), 5);
+        assert_eq!(insertion.map_offset(4), 6);
     }
 
     #[test]
