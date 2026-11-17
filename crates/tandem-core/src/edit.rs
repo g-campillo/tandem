@@ -6,6 +6,7 @@ pub mod lines;
 pub mod select;
 pub mod snippet;
 pub mod syntax;
+pub mod tags;
 
 use std::ops::Range;
 

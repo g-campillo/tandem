@@ -1,6 +1,6 @@
 //! Tandem's IDE layer over the toolkit editor: the per-language editing rules, and the
-//! corrections made right after a keystroke. Every edit this layer makes to a buffer goes
-//! through [`Workspace::ide_replace`], one undo step each.
+//! corrections made right after a keystroke (indentation and tag closing). Every edit this
+//! layer makes to a buffer goes through [`Workspace::ide_replace`], one undo step each.
 mod rules;
 
 pub(super) use rules::register_language_rules;
@@ -9,6 +9,7 @@ use super::*;
 use gpui_kit::component::input::{InputEdit, Rope};
 use tandem_core::edit::Edit;
 use tandem_core::edit::indent::{self, IndentUnit};
+use tandem_core::edit::tags;
 
 /// The IDE state of each open tab, by the entity id of its editor.
 #[derive(Default)]
@@ -34,6 +35,23 @@ pub(super) fn single_edit(edits: &[(InputEdit, Rope)]) -> Option<(usize, usize, 
     };
     let inserted = text.try_slice(edit.start_byte..edit.new_end_byte).ok()?;
     Some((edit.start_byte, edit.old_end_byte, inserted.to_string()))
+}
+
+/// The correction for a single keystroke that inserted `inserted` at `start` (`text` is
+/// after it): the indentation fix if there is one, else the close tag after `>` or the
+/// completed close tag after `</`.
+fn typing_fix(
+    text: &str,
+    start: usize,
+    inserted: &str,
+    language: &str,
+    unit: IndentUnit,
+) -> Option<Edit> {
+    indent::after_typed(text, start, inserted, language, unit).or_else(|| match inserted {
+        ">" => tags::close_tag(text, start, language),
+        "/" => tags::complete_close_tag(text, start, language),
+        _ => None,
+    })
 }
 
 impl Workspace {
@@ -100,8 +118,9 @@ impl Workspace {
     }
 
     /// Corrects a single keystroke in the focused editor: the indentation after Enter, a
-    /// closing bracket alone on its line, a Python block keyword's colon. The correction
-    /// is its own undo step. Edits made by `ide_replace` are skipped.
+    /// closing bracket alone on its line, a Python block keyword's colon, the close tag
+    /// after an open tag's `>` and the name after `</`. The correction is its own undo
+    /// step. Edits made by `ide_replace` are skipped.
     fn ide_edits(
         &mut self,
         editor: &Entity<EditorState>,
@@ -133,7 +152,7 @@ impl Workspace {
         if *state.text() != text || state.selected_range() != (cursor..cursor) {
             return;
         }
-        if let Some(fix) = indent::after_typed(&text, start, &inserted, language, unit) {
+        if let Some(fix) = typing_fix(&text, start, &inserted, language, unit) {
             self.ide_replace(editor, &fix, window, cx);
         }
     }
@@ -150,8 +169,48 @@ impl Workspace {
 mod tests {
     // Explicit imports: `super::*` would bring in GPUI's `test` macro through `gpui_kit::*`
     // and shadow Rust's `#[test]`.
-    use super::single_edit;
+    use super::{single_edit, typing_fix};
     use gpui_kit::component::input::{InputEdit, Point as TextPoint, Rope};
+    use tandem_core::edit::indent::IndentUnit;
+
+    const FOUR: IndentUnit = IndentUnit {
+        width: 4,
+        hard_tabs: false,
+    };
+
+    /// Types `inserted` at the `|` of `marked` and returns the text after the typing fix
+    /// with `|` at the cursor; `None` when there is no fix.
+    fn fixed(marked: &str, inserted: &str, language: &str) -> Option<String> {
+        let start = marked.find('|').expect("a cursor marker");
+        let text = format!("{}{inserted}{}", &marked[..start], &marked[start + 1..]);
+        let edit = typing_fix(&text, start, inserted, language, FOUR)?;
+        let mut fixed = edit.apply(&text);
+        fixed.insert(edit.selection.start, '|');
+        Some(fixed)
+    }
+
+    #[test]
+    fn typing_fix_closes_a_tag_after_its_greater_than_sign() {
+        assert_eq!(fixed("<div|", ">", "html").as_deref(), Some("<div>|</div>"));
+        assert_eq!(fixed("<div|", ">", "rust"), None);
+    }
+
+    #[test]
+    fn typing_fix_completes_a_close_tag_after_a_slash() {
+        assert_eq!(
+            fixed("<section><p>a</p><|", "/", "html").as_deref(),
+            Some("<section><p>a</p></section>|")
+        );
+    }
+
+    #[test]
+    fn typing_fix_still_corrects_indentation() {
+        assert_eq!(
+            fixed("fn f() {\n    x();\n    |", "}", "rust").as_deref(),
+            Some("fn f() {\n    x();\n}|")
+        );
+        assert_eq!(fixed("<div>|", "x", "html"), None);
+    }
 
     /// The edit that turned `before` into `after` by replacing `start..old_end`.
     fn edit(before: &str, after: &str, start: usize, old_end: usize) -> (InputEdit, Rope) {
