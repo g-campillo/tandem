@@ -8,6 +8,7 @@ mod code_view;
 pub mod commands;
 mod fonts;
 mod hover;
+mod ide;
 mod look;
 mod pane_logic;
 mod panels;
@@ -28,7 +29,9 @@ pub use settings::runtime_status;
 use tools::Development;
 
 use anyhow::{Context as _, Result, anyhow};
-use gpui_kit::component::input::{EditorState, InputEditsEvent, InputEvent, InputState, Position};
+use gpui_kit::component::input::{
+    EditorState, InputEditsEvent, InputEvent, InputState, Position, TabSize,
+};
 use gpui_kit::*;
 use notify::Watcher as _;
 use std::collections::{HashMap, HashSet};
@@ -217,6 +220,7 @@ pub struct Workspace {
     diff: Option<Entity<EditorState>>,
     close_pending: bool,
     hover: Entity<hover::HoverTip>,
+    ide: ide::IdeUi,
     dev: Development,
     chat: ChatUi,
     settings: SettingsUi,
@@ -230,6 +234,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        ide::register_language_rules(cx);
         let appearance = crate::appearance::install(window, cx);
         window.set_window_title("Tandem");
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files · ⇧⌘E"));
@@ -303,6 +308,7 @@ impl Workspace {
             diff: None,
             close_pending: false,
             hover: cx.new(hover::HoverTip::new),
+            ide: ide::IdeUi::default(),
         };
         view.apply_window_look(window);
         view.apply_fonts(cx);
@@ -315,6 +321,7 @@ impl Workspace {
                         .update_in(cx, |view, window, cx| {
                             view.checkpoint_async(cx);
                             view.development_tick(window, cx);
+                            view.ide_tick(window, cx);
                             view.chat_tick(window, cx);
                             view.pane_tick(cx);
                             view.persist_look(cx);
@@ -596,9 +603,15 @@ impl Workspace {
             return;
         }
         let word_wrap = self.commands.word_wrap;
+        let language = document.language();
+        let unit = tandem_core::edit::indent::for_document(language, &document.text);
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
-                .language(document.language())
+                .language(language)
+                .tab_size(TabSize {
+                    tab_size: unit.width,
+                    hard_tabs: unit.hard_tabs,
+                })
                 .default_value(document.text.clone())
                 .soft_wrap(word_wrap)
         });
@@ -622,10 +635,11 @@ impl Workspace {
             instance: new_id(),
             language_bound: false,
             document,
-            editor,
+            editor: editor.clone(),
             saving: false,
             _changes: changes,
         });
+        self.attach_ide(&editor, language, unit, window, cx);
         self.active = Some(self.tabs.len() - 1);
         self.settings.open = false;
         self.diff = None;

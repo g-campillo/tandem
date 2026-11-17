@@ -6359,6 +6359,7 @@ dependencies = [
  "notify",
  "objc2 0.6.5",
  "raw-window-handle",
+ "regex",
  "serde_json",
  "smol",
  "tandem-claude",
