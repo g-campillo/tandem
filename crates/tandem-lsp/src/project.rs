@@ -463,7 +463,7 @@ impl ProjectSession {
             capabilities: Value::Null,
             collected_edits: None,
         };
-        let init = session.request("initialize", json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
+        let init = session.request("initialize", json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,"rootPath":config.project,
             "capabilities":client_capabilities(),
             "initializationOptions":{"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":config.cache},
                 "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":true}},"rustfmt":{"extraArgs":[]}}

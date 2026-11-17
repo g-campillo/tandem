@@ -10,6 +10,7 @@ use tandem_lsp::features::capabilities::ServerFeatures;
 use tandem_lsp::features::completion::{
     accept_item, completion_items, completion_params, word_start,
 };
+use tandem_lsp::features::edits::{relative_edits, workspace_edit};
 use tandem_lsp::features::highlights::document_highlights;
 use tandem_lsp::features::signature::{signature_help, signature_params, signature_view};
 use tandem_lsp::*;
@@ -163,7 +164,108 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
         "rust highlights",
         highlights(&manager, &mut docs, &lib).await,
     );
+    checks.record(
+        "rust rename",
+        rename(
+            &manager,
+            &mut docs,
+            project,
+            Rename {
+                file: "src/lib.rs",
+                needle: "fn total_area",
+                delta: "fn ".len(),
+                prepare: true,
+                files: &[("src/lib.rs", RUST_LIB)],
+            },
+        )
+        .await,
+    );
     manager.stop();
+}
+
+/// A rename of `total_area` to `sum_area` to check: where it is asked for (`delta` bytes
+/// into the first `needle` of `file`), whether to ask `textDocument/prepareRename` first,
+/// and every file the rename must edit (project-relative) with its text.
+struct Rename<'a> {
+    file: &'a str,
+    needle: &'a str,
+    delta: usize,
+    prepare: bool,
+    files: &'a [(&'a str, &'a str)],
+}
+
+/// Renaming `total_area` to `sum_area` gives a workspace edit that stays inside the
+/// project and edits exactly `check.files`, leaving no `total_area` in any of them. With
+/// `prepare`, the server first says the symbol can be renamed.
+async fn rename(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    project: &Path,
+    check: Rename<'_>,
+) -> Result<()> {
+    for (relative, text) in check.files {
+        set_text(manager, docs, &project.join(relative), text);
+    }
+    let file = project.join(check.file);
+    let text = check
+        .files
+        .iter()
+        .find(|(relative, _)| *relative == check.file)
+        .map(|(_, text)| *text)
+        .context("the renamed file is not among the files to check")?;
+    let mut params = at(text, check.needle, check.delta);
+    if check.prepare {
+        let prepared = retry(|| {
+            let params = params.clone();
+            let file = &file;
+            async move {
+                manager
+                    .request("textDocument/prepareRename", file, "fixture", text, params)
+                    .await
+            }
+        })
+        .await?;
+        ensure!(
+            !prepared.value.is_null(),
+            "the server says total_area can't be renamed"
+        );
+    }
+    params["newName"] = json!("sum_area");
+    let reply = retry(|| {
+        let params = params.clone();
+        let file = &file;
+        async move {
+            manager
+                .request("textDocument/rename", file, "fixture", text, params)
+                .await
+        }
+    })
+    .await?;
+    // Tandem's project root is canonical, as `Project::open` makes it.
+    let root = std::fs::canonicalize(project)?;
+    let edited = relative_edits(&root, workspace_edit(&reply.value)?)?;
+    let mut paths: Vec<&str> = edited.iter().map(|(path, _)| path.as_str()).collect();
+    let mut expected: Vec<&str> = check.files.iter().map(|(path, _)| *path).collect();
+    paths.sort();
+    expected.sort();
+    ensure!(
+        paths == expected,
+        "the rename edits {paths:?}, not {expected:?}"
+    );
+    for (path, edits) in &edited {
+        let original = check
+            .files
+            .iter()
+            .find(|(relative, _)| relative == path)
+            .map(|(_, text)| *text)
+            .context("an edited file is not among the files to check")?;
+        let renamed = apply_text_edits(original, edits)?;
+        ensure!(
+            !renamed.contains("total_area") && renamed.contains("sum_area"),
+            "renaming left {path} as:\n{renamed}"
+        );
+    }
+    Ok(())
 }
 
 /// With the cursor on `total` in `let mut total`, the server highlights at least three
@@ -405,6 +507,22 @@ async fn python_checks(project: &Path, checks: &mut Checks) {
             ],
             &[],
         ),
+    );
+    checks.record(
+        "python rename",
+        rename(
+            &manager,
+            &mut docs,
+            project,
+            Rename {
+                file: "shapes.py",
+                needle: "def total_area",
+                delta: "def ".len(),
+                prepare: false,
+                files: &[("main.py", PYTHON_MAIN), ("shapes.py", PYTHON_SHAPES)],
+            },
+        )
+        .await,
     );
     let probe = format!("{PYTHON_MAIN}\nfrom shapes import describe\n\nprint(describe(1.0, ))\n");
     checks.record(

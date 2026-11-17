@@ -1184,6 +1184,19 @@ mod tests {
     }
 
     #[test]
+    fn rename_symbol_is_f2_in_the_editor() {
+        let spec = commands()
+            .into_iter()
+            .find(|spec| spec.title == "Rename Symbol")
+            .expect("Rename Symbol is a registry command");
+        assert_eq!(spec.menu, MenuId::Code);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "F2");
+        assert_eq!(spec.keys, ["f2"]);
+        assert_eq!(spec.scope, KeyScope::Editor);
+    }
+
+    #[test]
     fn shortcut_finds_a_command_by_its_title() {
         assert_eq!(shortcut("Quick Open"), "⌘P");
         assert_eq!(shortcut("Toggle Panel"), "⌘J");

@@ -679,24 +679,8 @@ impl Workspace {
         }
         let epoch = self.epoch;
         let store = self.store.clone();
-        let operation = cx.background_spawn(async move {
-            validate_new_name(&path)?;
-            if let Some(mut draft) = store
-                .lock()
-                .map_err(|_| anyhow!("Recovery store unavailable"))?
-                .drafts(project.key())?
-                .into_iter()
-                .find(|d| d.path == path)
-            {
-                validate_import_path(&project, &draft.path)?;
-                draft.recovered = true;
-                draft.conflict = !(draft.base_hash.is_none()
-                    && !project.root.join(&draft.path).exists())
-                    && !matches!(project.disk_change(&draft), DiskChange::Unchanged);
-                return Ok(draft);
-            }
-            project.open_document(&path, new)
-        });
+        let operation =
+            cx.background_spawn(async move { load_document(&store, &project, &path, new) });
         let weak = cx.entity().downgrade();
         window.spawn(cx, async move |cx| {
             let result = operation.await;
@@ -1275,6 +1259,32 @@ impl Workspace {
         }
         rows
     }
+}
+
+/// The document at the project-relative `path` for a new tab: its unsaved draft from the
+/// recovery store when there is one, else the file read from disk (`new` allows a file
+/// that does not exist yet). Blocks on the disk and the store, so it runs in the background.
+fn load_document(
+    store: &Arc<Mutex<Store>>,
+    project: &Project,
+    path: &str,
+    new: bool,
+) -> Result<Document> {
+    validate_new_name(path)?;
+    if let Some(mut draft) = store
+        .lock()
+        .map_err(|_| anyhow!("Recovery store unavailable"))?
+        .drafts(project.key())?
+        .into_iter()
+        .find(|d| d.path == path)
+    {
+        validate_import_path(project, &draft.path)?;
+        draft.recovered = true;
+        draft.conflict = !(draft.base_hash.is_none() && !project.root.join(&draft.path).exists())
+            && !matches!(project.disk_change(&draft), DiskChange::Unchanged);
+        return Ok(draft);
+    }
+    project.open_document(path, new)
 }
 
 fn load_project(path: PathBuf, store: Arc<Mutex<Store>>) -> Result<LoadedProject> {

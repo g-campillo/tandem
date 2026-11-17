@@ -1,12 +1,15 @@
 //! Tandem's IDE layer over the toolkit editor: the per-language editing rules, the
 //! corrections made right after a keystroke (indentation and tag closing), Tandem's own
-//! completion list, the tab stops of inserted snippets, the parameter hints and the
-//! highlights of the symbol under the cursor. Every edit this layer makes to a buffer goes
-//! through [`Workspace::ide_replace`], one undo step each.
+//! completion list, the tab stops of inserted snippets, the parameter hints, the
+//! highlights of the symbol under the cursor, Rename Symbol and the language server's
+//! edits to several files. Every edit this layer makes to a buffer goes through
+//! [`Workspace::ide_replace`], one undo step each.
 mod complete;
+mod edits;
 mod highlights;
 mod icons;
 mod popup;
+mod rename;
 mod rules;
 mod signature;
 mod snippets;
@@ -53,6 +56,11 @@ pub(super) struct IdeUi {
     /// The search for the uses of the symbol under the cursor, waiting or in flight, with
     /// the editor it is for; dropping it cancels it.
     highlight_task: Option<(EntityId, Task<()>)>,
+    /// The rename box, while it is open.
+    rename: Option<rename::RenameState>,
+    /// The request of Rename Symbol in flight (the symbol to rename, or the rename itself);
+    /// dropping it cancels it.
+    renaming: Option<Task<()>>,
     /// What the key listeners may take, kept current with the popups.
     keys: Rc<Cell<KeyClaim>>,
 }
@@ -77,6 +85,7 @@ impl IdeUi {
                 .iter()
                 .find(|(_, tab)| tab.session.is_some())
                 .map(|(editor, _)| *editor),
+            rename: self.rename.as_ref().map(|rename| rename.editor_id),
         });
     }
 }
@@ -145,13 +154,19 @@ struct KeyClaim {
     hints: Option<EntityId>,
     /// The editor whose snippet is being filled in.
     session: Option<EntityId>,
+    /// The editor whose rename box is open.
+    rename: Option<EntityId>,
 }
 
 impl KeyClaim {
     /// Whether `ide_key` takes `key` pressed in `editor`: the completion list takes every
-    /// key but ⇧Tab, the parameter hints Escape, a snippet session Tab, ⇧Tab and Escape.
+    /// key but ⇧Tab, the rename box Escape and leaves the rest no key while it is open, the
+    /// parameter hints Escape, a snippet session Tab, ⇧Tab and Escape.
     fn takes(&self, editor: EntityId, key: IdeKey) -> bool {
         let list = self.list == Some(editor) && key != IdeKey::ShiftTab;
+        if self.rename == Some(editor) {
+            return list || key == IdeKey::Escape;
+        }
         let hints = self.hints == Some(editor) && key == IdeKey::Escape;
         let session = self.session == Some(editor)
             && matches!(key, IdeKey::Tab | IdeKey::ShiftTab | IdeKey::Escape);
@@ -161,6 +176,13 @@ impl KeyClaim {
     /// Whether `ide_key` has a popup to close in an editor other than `editor`.
     fn elsewhere(&self, editor: EntityId) -> bool {
         self.list.is_some_and(|list| list != editor)
+    }
+
+    /// Whether a key that reached the container of `editor` comes from one of its IDE
+    /// owners: the editor itself when `focused`, or its rename box, which sits inside the
+    /// container and has the focus while it is open.
+    fn inside(&self, editor: EntityId, focused: bool) -> bool {
+        focused || self.rename == Some(editor)
     }
 }
 
@@ -238,11 +260,11 @@ impl KeyRoute {
         if claim == KeyClaim::default() {
             return;
         }
-        let focused = self.focus.is_focused(window);
-        let stopped = focused && claim.takes(self.editor, key);
+        let inside = claim.inside(self.editor, self.focus.is_focused(window));
+        let stopped = inside && claim.takes(self.editor, key);
         if stopped {
             cx.stop_propagation();
-        } else if focused && !claim.elsewhere(self.editor) {
+        } else if inside && !claim.elsewhere(self.editor) {
             return;
         }
         let route = self.clone();
@@ -522,8 +544,9 @@ impl Workspace {
     }
 
     /// Handles a key while the editor container has focus; true when consumed. The
-    /// popups are asked in order: the completion list first, then the parameter hints, then
-    /// the snippet session.
+    /// popups are asked in order: the completion list first, then the rename box, which
+    /// leaves the others no key while it is open, then the parameter hints, then the
+    /// snippet session.
     pub(in crate::workspace) fn ide_key(
         &mut self,
         key: IdeKey,
@@ -535,9 +558,13 @@ impl Workspace {
             .map(|target| target.editor)
             .filter(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
             .map(|editor| editor.entity_id());
-        self.completion_key(key, focused, window, cx)
-            || self.signature_key(key, focused, cx)
-            || self.snippet_key(key, focused, window, cx)
+        if self.completion_key(key, focused, window, cx) {
+            return true;
+        }
+        if let Some(taken) = self.rename_key(key, window, cx) {
+            return taken;
+        }
+        self.signature_key(key, focused, cx) || self.snippet_key(key, focused, window, cx)
     }
 
     /// The IDE layer of `editor`, the active tab's editor on screen: its key listeners and
@@ -558,10 +585,16 @@ impl Workspace {
             .signature
             .as_ref()
             .filter(|hints| hints.editor_id == editor.entity_id() && hints.shown());
+        let rename = self
+            .ide
+            .rename
+            .as_ref()
+            .filter(|rename| rename.editor_id == editor.entity_id());
         let overlays = list
             .and_then(|list| popup::completion_list(list, editor, face, cx))
             .into_iter()
             .chain(hints.and_then(|hints| signature::signature_card(hints, editor, face, cx)))
+            .chain(rename.map(|rename| rename::rename_box(rename, editor, face, cx)))
             .collect();
         IdeLayer {
             workspace: cx.entity().downgrade(),
@@ -638,9 +671,9 @@ impl Workspace {
     }
 
     /// Forgets the tabs whose editor is gone, with their snippet sessions, closes a
-    /// completion list whose editor is gone and parameter hints whose editor is no longer
-    /// on screen, and refreshes the active tab's completion trigger characters from its
-    /// language server (none while language tools are off).
+    /// completion list whose editor is gone and parameter hints and a rename box whose
+    /// editor is no longer on screen, and refreshes the active tab's completion trigger
+    /// characters from its language server (none while language tools are off).
     pub(in crate::workspace) fn ide_tick(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ide
             .tabs
@@ -655,6 +688,7 @@ impl Workspace {
             self.close_completion(cx);
         }
         self.signature_tick(cx);
+        self.rename_tick(cx);
         let triggers = self
             .language_manager()
             .map(|manager| manager.capabilities().completion_triggers())
@@ -948,6 +982,60 @@ mod tests {
             assert!(both.takes(ours, key), "{key:?}");
         }
         assert!(!both.takes(ours, IdeKey::Enter));
+    }
+
+    #[test]
+    fn a_rename_box_takes_only_escape_in_its_own_editor() {
+        let (ours, other) = (EntityId::from(1), EntityId::from(2));
+        let rename = KeyClaim {
+            rename: Some(ours),
+            ..KeyClaim::default()
+        };
+        assert!(rename.takes(ours, IdeKey::Escape));
+        assert!(!rename.takes(other, IdeKey::Escape));
+        for key in [
+            IdeKey::Up,
+            IdeKey::Down,
+            IdeKey::PageUp,
+            IdeKey::PageDown,
+            IdeKey::Enter,
+            IdeKey::Tab,
+            IdeKey::ShiftTab,
+        ] {
+            assert!(!rename.takes(ours, key), "{key:?}");
+        }
+        // Leaving the box closes it, so there is nothing to close elsewhere.
+        assert!(!rename.elsewhere(other));
+    }
+
+    #[test]
+    fn a_rename_box_leaves_the_hints_and_the_session_no_key() {
+        let ours = EntityId::from(1);
+        let all = KeyClaim {
+            rename: Some(ours),
+            hints: Some(ours),
+            session: Some(ours),
+            ..KeyClaim::default()
+        };
+        assert!(all.takes(ours, IdeKey::Escape));
+        for key in [IdeKey::Tab, IdeKey::ShiftTab, IdeKey::Enter, IdeKey::Up] {
+            assert!(!all.takes(ours, key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn keys_of_the_rename_box_come_from_inside_its_editor() {
+        let (ours, other) = (EntityId::from(1), EntityId::from(2));
+        let rename = KeyClaim {
+            rename: Some(ours),
+            ..KeyClaim::default()
+        };
+        // The box has the focus while it is open; the editor does not.
+        assert!(rename.inside(ours, false));
+        assert!(!rename.inside(other, false));
+        assert!(rename.inside(other, true));
+        assert!(!KeyClaim::default().inside(ours, false));
+        assert!(KeyClaim::default().inside(ours, true));
     }
 
     #[test]

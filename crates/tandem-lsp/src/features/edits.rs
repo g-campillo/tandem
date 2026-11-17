@@ -89,6 +89,26 @@ pub fn command_edits(reply: &Value, file: &Path) -> Result<Vec<FileEdits>, EditR
     Ok(files.finish())
 }
 
+/// `files` with each path made relative to the project `root`, in the same order. A path
+/// that is not under `root`, or that climbs out of it with `..`, refuses the whole edit.
+pub fn relative_edits(
+    root: &Path,
+    files: Vec<FileEdits>,
+) -> Result<Vec<(String, Vec<TextEdit>)>, EditRefusal> {
+    files
+        .into_iter()
+        .map(|file| {
+            let relative = file
+                .path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|relative| tandem_core::normalized_relative(relative).ok())
+                .ok_or_else(|| EditRefusal::OutsideProject(file.path.display().to_string()))?;
+            Ok((relative, file.edits))
+        })
+        .collect()
+}
+
 /// Text edits gathered per file, in the order they were added.
 #[derive(Default)]
 struct Files(BTreeMap<PathBuf, Vec<TextEdit>>);
@@ -461,6 +481,49 @@ mod tests {
                 command_edits(&reply, Path::new("/project/lib.rs")),
                 Ok(vec![]),
                 "{result}"
+            );
+        }
+    }
+
+    #[test]
+    fn edits_inside_the_project_get_relative_paths() {
+        let files = vec![
+            file("/project/src/lib.rs", vec![edit(0, 0, 1, "a")]),
+            file("/project/main.py", vec![edit(1, 0, 0, "b")]),
+        ];
+        assert_eq!(
+            relative_edits(Path::new("/project"), files),
+            Ok(vec![
+                ("src/lib.rs".to_string(), vec![edit(0, 0, 1, "a")]),
+                ("main.py".to_string(), vec![edit(1, 0, 0, "b")]),
+            ])
+        );
+        assert_eq!(relative_edits(Path::new("/project"), vec![]), Ok(vec![]));
+    }
+
+    #[test]
+    fn an_edit_outside_the_project_refuses_every_file() {
+        for outside in ["/elsewhere/lib.rs", "/project-other/lib.rs", "/project"] {
+            let files = vec![
+                file("/project/src/lib.rs", vec![edit(0, 0, 1, "a")]),
+                file(outside, vec![edit(0, 0, 1, "b")]),
+            ];
+            assert_eq!(
+                relative_edits(Path::new("/project"), files),
+                Err(EditRefusal::OutsideProject(outside.into())),
+                "{outside}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_with_dot_dot_is_outside_the_project() {
+        for climbing in ["/project/../etc/hosts", "/project/src/../../etc/hosts"] {
+            let files = vec![file(climbing, vec![edit(0, 0, 1, "x")])];
+            assert_eq!(
+                relative_edits(Path::new("/project"), files),
+                Err(EditRefusal::OutsideProject(climbing.into())),
+                "{climbing}"
             );
         }
     }

@@ -23,6 +23,7 @@ while True:
     method=msg.get('method');ident=msg.get('id')
     if method=='initialize':
         record('client-capabilities.json',msg['params']['capabilities'])
+        record('roots.json',{'rootUri':msg['params'].get('rootUri'),'rootPath':msg['params'].get('rootPath')})
         send({'jsonrpc':'2.0','id':ident,'result':{'capabilities':{'renameProvider':{'prepareProvider':True},'completionProvider':{'triggerCharacters':['.',':'],'resolveProvider':True},'executeCommandProvider':{'commands':['test.apply']}}}})
     elif method=='workspace/symbol':
         record('symbol-params.json',msg['params'])
@@ -90,6 +91,21 @@ fn server_capabilities_are_exposed_while_the_server_runs() {
     assert_eq!(features.commands(), ["test.apply"]);
     manager.stop();
     wait_for(|| !manager.capabilities().is_known());
+}
+
+/// Pyright makes a workspace of the project only from `rootPath` (or workspace folders),
+/// not from `rootUri`; without one it renames in the open file alone.
+#[test]
+fn the_project_root_is_sent_as_a_uri_and_as_a_path() {
+    let (root, manager, _file) = fixture();
+    let sent = recorded(&root, "roots.json");
+    assert_eq!(
+        sent["rootUri"],
+        json!(file_uri(root.path()).unwrap()),
+        "{sent}"
+    );
+    assert_eq!(sent["rootPath"], json!(root.path()), "{sent}");
+    manager.stop();
 }
 
 #[test]

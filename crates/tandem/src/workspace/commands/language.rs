@@ -1,7 +1,7 @@
 //! Commands of the language features of the code editor, in the View, Go and Code menus.
 use super::*;
 
-actions!(tandem, [InsertSnippet, TriggerParameterHints]);
+actions!(tandem, [InsertSnippet, TriggerParameterHints, RenameSymbol]);
 
 /// The language commands of the View menu, listed after the others there.
 pub(super) fn view_specs() -> Vec<CommandSpec> {
@@ -26,6 +26,7 @@ pub(super) fn code_specs() -> Vec<CommandSpec> {
             &["cmd-shift-space"],
             Editor,
         ),
+        spec::<RenameSymbol>("Rename Symbol", Code, "F2", &["f2"], Editor),
     ]
 }
 
@@ -33,4 +34,5 @@ pub(super) fn code_specs() -> Vec<CommandSpec> {
 pub(super) fn install(cx: &mut App, window: AnyWindowHandle, view: &WeakEntity<Workspace>) {
     route::<InsertSnippet>(cx, window, view, |v, w, c| v.insert_snippet(w, c));
     route::<TriggerParameterHints>(cx, window, view, |v, w, c| v.trigger_signature_help(w, c));
+    route::<RenameSymbol>(cx, window, view, |v, w, c| v.rename_symbol(w, c));
 }
