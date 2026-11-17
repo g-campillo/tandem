@@ -1,9 +1,11 @@
 //! Pure text transformations behind the editor commands. Offsets are UTF-8 byte offsets on char boundaries. A line ends at '\n'; a '\r' right before it belongs to the line break.
 pub mod comment;
 pub mod fuzzy;
+pub mod indent;
 pub mod lines;
 pub mod select;
 pub mod snippet;
+pub mod syntax;
 
 use std::ops::Range;
 
