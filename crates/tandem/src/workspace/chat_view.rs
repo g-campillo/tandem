@@ -190,7 +190,9 @@ impl Workspace {
         (px(size), px((size - 1.).max(10.)), px((size - 2.).max(10.)))
     }
 
-    pub(super) fn chat_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The chat panel; `card_max` is the tallest the card above the composer may be, in
+    /// pixels.
+    pub(super) fn chat_panel(&self, card_max: f32, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
         let state = self.chat_state();
         let panel = div()
@@ -204,7 +206,7 @@ impl Workspace {
         match state {
             Some(state) => panel
                 .child(self.chat_body(&state, cx))
-                .children(self.build_card(&state, cx))
+                .children(self.build_card(&state, card_max, cx))
                 .child(self.chat_composer(&state, cx)),
             None => panel.child(
                 div()
@@ -832,8 +834,13 @@ impl Workspace {
     }
 
     /// The card pinned above the composer during Build: the open step, or the final check
-    /// once every step is finished.
-    fn build_card(&self, state: &ChatState, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// once every step is finished. It is at most `max_height` pixels tall.
+    fn build_card(
+        &self,
+        state: &ChatState,
+        max_height: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let (card, hover) = match view::step_card(state) {
             Some(card) => {
                 let hover = self.code_hover_card(&card, cx);
@@ -853,7 +860,7 @@ impl Workspace {
                 .flex_shrink_0()
                 .min_w_0()
                 .min_h_0()
-                .max_h(relative(0.45))
+                .max_h(px(max_height))
                 .p_2()
                 .border_t_1()
                 .border_color(p.border)
@@ -878,11 +885,11 @@ impl Workspace {
             Some(guidance) => self.guidance_view(&card, guidance, cx),
             None => self.unguided_view(&card, cx),
         };
+        // The title and the buttons stay put; the guidance between them scrolls.
         solid_section(div().id(("chat-step-card", index)), cx)
             .v_flex()
             .min_w_0()
             .min_h_0()
-            .overflow_y_scroll()
             .gap_2()
             .p_3()
             .border_1()
@@ -890,6 +897,7 @@ impl Workspace {
                 div()
                     .h_flex()
                     .flex_wrap()
+                    .flex_shrink_0()
                     .items_center()
                     .gap_2()
                     .min_w_0()
@@ -903,11 +911,20 @@ impl Workspace {
                         &weak,
                     )),
             )
-            .child(body)
+            .child(
+                div()
+                    .id(("chat-step-body", index))
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .child(body.flex_shrink_0()),
+            )
             .child(
                 div()
                     .h_flex()
                     .flex_wrap()
+                    .flex_shrink_0()
                     .gap_2()
                     .when(card.kind != StepKind::RunCommand, |d| {
                         d.child(
@@ -962,25 +979,27 @@ impl Workspace {
         let (_, small, _) = self.chat_sizes();
         let code = &self.look.fonts.chat_code;
         let unmatched = (!blocks.unmatched.is_empty()).then(|| {
+            // The part's name on its own line, its explanation under it.
             let rows = blocks.unmatched.iter().map(|item| {
                 div()
-                    .h_flex()
-                    .items_start()
-                    .gap_2()
+                    .v_flex()
+                    .gap_1()
                     .min_w_0()
                     .child(
-                        div()
-                            .flex_none()
-                            .max_w(relative(0.4))
-                            .px_1()
-                            .rounded(px(4.))
-                            .bg(p.content)
-                            .font_family(code.family.clone())
-                            .font_features(code.features.clone())
-                            .text_size(px(code.size))
-                            .child(item.part.clone()),
+                        div().h_flex().min_w_0().child(
+                            div()
+                                .max_w_full()
+                                .truncate()
+                                .px_1()
+                                .rounded(px(4.))
+                                .bg(p.content)
+                                .font_family(code.family.clone())
+                                .font_features(code.features.clone())
+                                .text_size(px(code.size))
+                                .child(item.part.clone()),
+                        ),
                     )
-                    .child(div().flex_1().min_w_0().child(item.explanation.clone()))
+                    .child(div().min_w_0().child(item.explanation.clone()))
             });
             div()
                 .v_flex()
@@ -1120,9 +1139,15 @@ impl Workspace {
             .gap_2()
             .p_3()
             .border_1()
-            .child(div().font_semibold().child("All steps are finished"))
             .child(
                 div()
+                    .flex_shrink_0()
+                    .font_semibold()
+                    .child("All steps are finished"),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
                     .text_size(small)
                     .text_color(p.secondary_foreground)
                     .child("Claude checks the \"done when\" criteria."),
@@ -1131,6 +1156,7 @@ impl Workspace {
                 div()
                     .h_flex()
                     .flex_wrap()
+                    .flex_shrink_0()
                     .gap_2()
                     .child(
                         compact_button(Button::new("chat-check-again"), "Check again")

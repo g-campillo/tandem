@@ -1,3 +1,4 @@
+use super::chat_logic::step_card_max_height;
 use super::chrome::file_icon_image;
 use super::chrome_logic::{file_icon, tab_labels, tab_name, tooltip};
 use super::commands::shortcut;
@@ -694,8 +695,9 @@ impl Render for Workspace {
             let files = self.sidebar_view(cx);
             self.pane_frame(Pane::Files, geometry.sidebar, files, cx)
         });
+        let card_max = step_card_max_height(f32::from(window.viewport_size().height));
         let chat = shown.chat.then(|| {
-            let chat = self.chat_panel(cx);
+            let chat = self.chat_panel(card_max, cx);
             self.pane_frame(Pane::Chat, geometry.utility, chat, cx)
         });
         // The activity bar sits on the window's edge beside the file tree.
