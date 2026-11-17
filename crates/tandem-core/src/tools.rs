@@ -4,6 +4,7 @@ mod servers;
 mod svelte;
 mod swift;
 mod typescript;
+mod vue;
 mod web;
 pub use servers::*;
 

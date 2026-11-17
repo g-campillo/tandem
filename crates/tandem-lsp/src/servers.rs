@@ -1,6 +1,7 @@
 //! How Tandem launches each language server it runs: program, arguments, environment and settings.
 use crate::{DiagnosticMode, ServerConfig};
 use serde_json::{Value, json};
+use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 use tandem_core::{Launch, NodeServer};
@@ -128,6 +129,55 @@ pub fn server_config(
             config.request_timeout = Duration::from_secs(30);
             config
         }
+        Launch::Vue {
+            node,
+            server: script,
+            tsdk,
+            ts_node,
+            ts_server,
+            plugin_location,
+        } => {
+            // Without --tsdk the Vue server loads its own peer TypeScript, which npm resolves to
+            // TypeScript 7, and that has no JavaScript API.
+            let mut tsdk_arg = OsString::from("--tsdk=");
+            tsdk_arg.push(tsdk);
+            let mut config = ServerConfig::new(&server.title, node, project, cache);
+            config.args = vec![script.into(), "--stdio".into(), tsdk_arg];
+            config.path = node.parent().map(Path::to_path_buf).into_iter().collect();
+            config.initialization_options = json!({"typescript": {"tsdk": tsdk}});
+            config.diagnostics = DiagnosticMode::Settled;
+            config.start_timeout = Duration::from_secs(30);
+            config.request_timeout = Duration::from_secs(30);
+            config.ready_detail = format!("{} ready", server.title);
+            // The Vue server asks this one for type information through tsserver/request, and
+            // its answers for the script are merged with the Vue server's.
+            let mut companion = ServerConfig::new(
+                "typescript-language-server (Vue)",
+                ts_node,
+                project,
+                cache.join("typescript"),
+            );
+            companion.args = vec![ts_server.into(), "--stdio".into()];
+            companion.path = ts_node
+                .parent()
+                .map(Path::to_path_buf)
+                .into_iter()
+                .collect();
+            companion.initialization_options = json!({
+                "tsserver": {"path": tsdk.join("tsserver.js")},
+                "disableAutomaticTypingAcquisition": true,
+                "plugins": [{
+                    "name": "@vue/typescript-plugin",
+                    "location": plugin_location,
+                    "languages": ["vue"],
+                }],
+            });
+            companion.diagnostics = DiagnosticMode::Settled;
+            companion.start_timeout = Duration::from_secs(30);
+            companion.request_timeout = Duration::from_secs(30);
+            config.companion = Some(Box::new(companion));
+            config
+        }
     }
 }
 
@@ -201,7 +251,6 @@ fn typescript_settings() -> Value {
 mod tests {
     use super::*;
     use crate::DiagnosticMode;
-    use std::ffi::OsString;
     use std::path::PathBuf;
 
     #[test]
@@ -616,6 +665,86 @@ mod tests {
         assert_eq!(config.start_timeout, Duration::from_secs(30));
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.ready_detail, "svelte-language-server 0.17.21 ready");
+    }
+
+    #[test]
+    fn vue_config_has_a_typescript_companion_with_the_plugin() {
+        let tsdk = PathBuf::from("/work/app/node_modules/typescript/lib");
+        let vue = PathBuf::from("/n/lib/node_modules/@vue/language-server");
+        let tools = tandem_core::ServerTools {
+            name: "vue".into(),
+            title: "Vue 3.3.14 with TypeScript 5.9.3 (project)".into(),
+            languages: vec!["vue".into()],
+            launch: tandem_core::Launch::Vue {
+                node: "/n/bin/node".into(),
+                server: vue.join("bin/vue-language-server.js"),
+                tsdk: tsdk.clone(),
+                ts_node: "/t/bin/node".into(),
+                ts_server: "/t/lib/node_modules/typescript-language-server/lib/cli.mjs".into(),
+                plugin_location: vue.clone(),
+            },
+        };
+        let cache = Path::new("/state/language-cache/p/vue/vue");
+        let config = server_config(&tools, Path::new("/work/app"), cache);
+        assert_eq!(config.name, "Vue 3.3.14 with TypeScript 5.9.3 (project)");
+        assert_eq!(config.program, PathBuf::from("/n/bin/node"));
+        assert_eq!(
+            config.args,
+            vec![
+                OsString::from(vue.join("bin/vue-language-server.js")),
+                OsString::from("--stdio"),
+                OsString::from("--tsdk=/work/app/node_modules/typescript/lib"),
+            ]
+        );
+        assert_eq!(config.project, PathBuf::from("/work/app"));
+        assert_eq!(config.cache, cache);
+        assert_eq!(config.path, vec![PathBuf::from("/n/bin")]);
+        assert!(config.env.is_empty());
+        assert_eq!(
+            config.initialization_options,
+            json!({"typescript": {"tsdk": "/work/app/node_modules/typescript/lib"}})
+        );
+        assert_eq!(config.diagnostics, DiagnosticMode::Settled);
+        assert_eq!(config.start_timeout, Duration::from_secs(30));
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(
+            config.ready_detail,
+            "Vue 3.3.14 with TypeScript 5.9.3 (project) ready"
+        );
+
+        let companion = config
+            .companion
+            .expect("Vue runs with a TypeScript companion");
+        assert_eq!(companion.name, "typescript-language-server (Vue)");
+        assert_eq!(companion.program, PathBuf::from("/t/bin/node"));
+        assert_eq!(
+            companion.args,
+            vec![
+                OsString::from("/t/lib/node_modules/typescript-language-server/lib/cli.mjs"),
+                OsString::from("--stdio"),
+            ]
+        );
+        assert_eq!(companion.project, PathBuf::from("/work/app"));
+        // Inside the Vue server's cache, never in the project.
+        assert_eq!(companion.cache, cache.join("typescript"));
+        assert_eq!(companion.path, vec![PathBuf::from("/t/bin")]);
+        assert!(companion.env.is_empty());
+        assert_eq!(
+            companion.initialization_options,
+            json!({
+                "tsserver": {"path": "/work/app/node_modules/typescript/lib/tsserver.js"},
+                "disableAutomaticTypingAcquisition": true,
+                "plugins": [{
+                    "name": "@vue/typescript-plugin",
+                    "location": "/n/lib/node_modules/@vue/language-server",
+                    "languages": ["vue"],
+                }],
+            })
+        );
+        assert_eq!(companion.diagnostics, DiagnosticMode::Settled);
+        assert_eq!(companion.start_timeout, Duration::from_secs(30));
+        assert_eq!(companion.request_timeout, Duration::from_secs(30));
+        assert!(companion.companion.is_none());
     }
 
     #[test]

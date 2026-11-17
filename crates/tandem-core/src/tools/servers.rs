@@ -1,6 +1,6 @@
 //! Language servers beyond Rust and Python: where Tandem looks, what it found and what is
 //! missing. Discovery inspects files only; it never runs a tool or an installer.
-use super::{file_hash, java, svelte, swift, typescript, web};
+use super::{file_hash, java, svelte, swift, typescript, vue, web};
 use crate::{ToolKind, content_hash};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -59,6 +59,19 @@ pub enum Launch {
         node: PathBuf,
         script: PathBuf,
         server: NodeServer,
+    },
+    /// @vue/language-server under `node`, with typescript-language-server under `ts_node` as its
+    /// TypeScript companion. `server` is `bin/vue-language-server.js`; `tsdk` is the project's
+    /// TypeScript `lib` folder, holding `typescript.js` and `tsserver.js`; `ts_server` is
+    /// typescript-language-server's `lib/cli.mjs`; `plugin_location` is the folder `X` such that
+    /// `X/node_modules/@vue/typescript-plugin` exists.
+    Vue {
+        node: PathBuf,
+        server: PathBuf,
+        tsdk: PathBuf,
+        ts_node: PathBuf,
+        ts_server: PathBuf,
+        plugin_location: PathBuf,
     },
 }
 
@@ -126,6 +139,7 @@ pub const SERVER_KINDS: &[(ToolKind, Discover)] = &[
     (ToolKind::Java, java::discover),
     (ToolKind::Swift, swift::discover),
     (ToolKind::TypeScript, typescript::discover),
+    (ToolKind::Vue, vue::discover),
     (ToolKind::Svelte, svelte::discover),
     (ToolKind::Web, web::discover),
 ];

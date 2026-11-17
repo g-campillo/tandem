@@ -1,3 +1,4 @@
+use crate::companion::{MERGED, merge_replies, relay_request, relay_response};
 use crate::legacy::read_frame;
 use crate::utf16_position;
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -42,11 +43,15 @@ pub struct ServerConfig {
     pub start_timeout: Duration,
     /// How long any other request may take before the server is restarted.
     pub request_timeout: Duration,
+    /// A second server run beside this one as a pair (Vue's TypeScript companion): it receives the
+    /// same documents, answers the tsserver requests this server relays, and its answers are merged
+    /// with this server's. Either exiting restarts both.
+    pub companion: Option<Box<ServerConfig>>,
 }
 impl ServerConfig {
     /// Defaults: ready_detail "{name} ready", no args/path/env, initialization_options null,
     /// configuration {}, push_configuration false, resend_on_change false, capabilities {},
-    /// diagnostics Versioned, start and request timeouts 20 s.
+    /// diagnostics Versioned, start and request timeouts 20 s, no companion.
     pub fn new(
         name: impl Into<String>,
         program: impl Into<PathBuf>,
@@ -71,6 +76,7 @@ impl ServerConfig {
             diagnostics: DiagnosticMode::Versioned,
             start_timeout: Duration::from_secs(20),
             request_timeout: Duration::from_secs(20),
+            companion: None,
         }
     }
 }
@@ -370,17 +376,13 @@ fn worker(
                     session.sync_documents(&request.stamp.documents, request.stamp.sequence)?;
                     let mut params = request.params.clone();
                     params["textDocument"] = json!({"uri": file_uri(&request.file)?});
-                    let value = if request.method == "textDocument/diagnostic" {
-                        session.diagnostics(&request.file, params, &request.cancelled, &stopped)?
-                    } else {
-                        session.request(
-                            &request.method,
-                            params,
-                            session.request_timeout,
-                            &request.cancelled,
-                            &stopped,
-                        )?
-                    };
+                    let value = session.answer(
+                        &request.method,
+                        &request.file,
+                        params,
+                        &request.cancelled,
+                        &stopped,
+                    )?;
                     ensure!(
                         shared.lock().unwrap().sequence == request.stamp.sequence,
                         "Language response superseded by edits"
@@ -434,11 +436,23 @@ struct ProjectSession {
     latest_push: BTreeMap<PathBuf, (Value, Instant)>,
     version_counter: i32,
     synced_sequence: u64,
+    /// The server paired with this one (Vue's TypeScript companion), started and stopped with it.
+    companion: Option<Box<ProjectSession>>,
+    /// On a companion: the main server's tsserver request id for each forwarded request's id.
+    relay: BTreeMap<u64, Value>,
+    /// On a companion: tsserver/response params waiting to be sent to the main server.
+    outbox: Vec<Value>,
 }
 
 impl ProjectSession {
     fn start(config: &ServerConfig, stopped: &AtomicBool) -> Result<Self> {
         std::fs::create_dir_all(&config.cache)?;
+        // The companion is ready before the main server can relay its first tsserver request.
+        let companion = config
+            .companion
+            .as_deref()
+            .map(|companion| Self::start(companion, stopped).map(Box::new))
+            .transpose()?;
         let mut command = Command::new(&config.program);
         command.args(&config.args);
         command.env_clear();
@@ -511,6 +525,9 @@ impl ProjectSession {
             latest_push: BTreeMap::new(),
             version_counter: 0,
             synced_sequence: u64::MAX,
+            companion,
+            relay: BTreeMap::new(),
+            outbox: vec![],
         };
         let mut capabilities = client_capabilities();
         merge_json(&mut capabilities, &config.capabilities);
@@ -565,6 +582,9 @@ impl ProjectSession {
         self.send(json!({"jsonrpc":"2.0","method":method,"params":params}))
     }
     fn sync_documents(&mut self, documents: &[LanguageDocument], sequence: u64) -> Result<()> {
+        if let Some(companion) = &mut self.companion {
+            companion.sync_documents(documents, sequence)?;
+        }
         let changed = self.documents.len() != documents.len()
             || documents.iter().any(|d| {
                 self.documents
@@ -647,6 +667,7 @@ impl ProjectSession {
     ) -> Result<Value> {
         let deadline = Instant::now() + self.request_timeout.min(Duration::from_secs(10));
         loop {
+            self.pump_companion()?;
             // A dynamic registration can arrive while waiting.
             if self.pull_diagnostics {
                 return self.request(
@@ -698,11 +719,11 @@ impl ProjectSession {
         cancel: &AtomicBool,
         stop: &AtomicBool,
     ) -> Result<Value> {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
+        let id = self.start_request(method, params)?;
         let deadline = Instant::now() + timeout;
         loop {
+            // The server may be waiting for a tsserver request relayed to the companion.
+            self.pump_companion()?;
             if Instant::now() >= deadline {
                 self.closed = true;
                 return Err(TimedOut.into());
@@ -742,9 +763,12 @@ impl ProjectSession {
                 }
             }
         }
-        Ok(())
+        self.pump_companion()
     }
     fn handle_message(&mut self, message: Value) -> Result<()> {
+        if self.relay(&message)? {
+            return Ok(());
+        }
         if message["method"] == "textDocument/publishDiagnostics"
             && let Some(uri) = message["params"]["uri"].as_str()
             && let Ok(path) = uri_path(uri)
@@ -790,6 +814,9 @@ impl ProjectSession {
         Ok(())
     }
     fn stop(&mut self) {
+        if let Some(companion) = &mut self.companion {
+            companion.stop();
+        }
         if self.input.take().is_none() {
             return;
         }
@@ -807,6 +834,110 @@ impl ProjectSession {
 impl Drop for ProjectSession {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Answering Tandem's requests, and running a companion beside the main server.
+impl ProjectSession {
+    /// Answers one request from Tandem. With a companion, the methods in MERGED are asked of both
+    /// servers and their answers merged; a companion error leaves the main server's answer alone.
+    fn answer(
+        &mut self,
+        method: &str,
+        file: &Path,
+        params: Value,
+        cancel: &AtomicBool,
+        stop: &AtomicBool,
+    ) -> Result<Value> {
+        if self.companion.is_none() || !MERGED.contains(&method) {
+            return self.answer_alone(method, file, params, cancel, stop);
+        }
+        let main = self.answer_alone(method, file, params.clone(), cancel, stop)?;
+        let companion = self
+            .companion
+            .as_mut()
+            .map(|companion| companion.answer_alone(method, file, params, cancel, stop));
+        // Answers to relayed requests the companion received while answering.
+        self.pump_companion()?;
+        Ok(match companion {
+            Some(Ok(companion)) => merge_replies(method, main, companion),
+            _ => main,
+        })
+    }
+    /// This server's own answer: diagnostics through `diagnostics`, anything else through `request`.
+    fn answer_alone(
+        &mut self,
+        method: &str,
+        file: &Path,
+        params: Value,
+        cancel: &AtomicBool,
+        stop: &AtomicBool,
+    ) -> Result<Value> {
+        if method == "textDocument/diagnostic" {
+            self.diagnostics(file, params, cancel, stop)
+        } else {
+            self.request(method, params, self.request_timeout, cancel, stop)
+        }
+    }
+    /// Sends a request without waiting for its answer and returns its id.
+    fn start_request(&mut self, method: &str, params: Value) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
+        Ok(id)
+    }
+    /// Relays tsserver requests between the main server and its companion; returns whether
+    /// `message` was part of a relay. On the main session, a `tsserver/request` notification is
+    /// forwarded to the companion as typescript-language-server's `typescript.tsserverRequest`
+    /// command, or answered at once with a null body when there is no companion to ask. On the
+    /// companion, the answer to a forwarded request waits in the outbox for `pump_companion`.
+    fn relay(&mut self, message: &Value) -> Result<bool> {
+        if message["method"] == "tsserver/request" && message.get("id").is_none() {
+            let Some((id, command, args)) = relay_request(&message["params"]) else {
+                return Ok(true);
+            };
+            let forwarded = self.companion.as_mut().is_some_and(|companion| {
+                let params = json!({"command":"typescript.tsserverRequest",
+                    "arguments":[command,args,{"isAsync":true,"lowPriority":true}]});
+                companion
+                    .start_request("workspace/executeCommand", params)
+                    .map(|forwarded| companion.relay.insert(forwarded, id.clone()))
+                    .is_ok()
+            });
+            if !forwarded {
+                self.notify("tsserver/response", relay_response(id, Value::Null))?;
+            }
+            return Ok(true);
+        }
+        if message.get("method").is_none()
+            && let Some(id) = message["id"].as_u64().and_then(|id| self.relay.remove(&id))
+        {
+            // An error answer has no result, and so no body.
+            let body = message["result"]["body"].clone();
+            self.outbox.push(relay_response(id, body));
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    /// Handles what the companion sent, without waiting, then sends its answers to relayed
+    /// requests to the main server. A companion that exited or broke closes this session too, so
+    /// the pair restarts together.
+    fn pump_companion(&mut self) -> Result<()> {
+        let Some(companion) = self.companion.as_mut() else {
+            return Ok(());
+        };
+        if companion.drain().is_err() {
+            companion.closed = true;
+        }
+        let exited = companion.closed || companion.child.try_wait().ok().flatten().is_some();
+        let answers = std::mem::take(&mut companion.outbox);
+        if exited {
+            self.closed = true;
+        }
+        for answer in answers {
+            self.notify("tsserver/response", answer)?;
+        }
+        Ok(())
     }
 }
 
