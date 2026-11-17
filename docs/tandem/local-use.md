@@ -21,9 +21,9 @@ From a terminal, the app's executable also takes options: `tandem [FOLDER] [--st
 ## First run
 
 1. **Node.js.** Install Node.js 20 or newer, for example with nvm or Homebrew. Tandem looks on `PATH`, then in nvm's installs (newest first), then at `/opt/homebrew/bin/node` and `/usr/local/bin/node`. An app opened from the Finder or the Dock gets a minimal `PATH`, so a Node.js installed anywhere else is found only when you start Tandem from a shell that has it on `PATH`.
-2. **Open a project** with ⌘O, **Recent**, or a folder argument. The chat panel, on the right unless you swapped the panes, starts Claude (`Starting Claude…`).
+2. **Open a project** with ⌘O or **Open Folder…** on the welcome screen, with **File → Recent Projects** (⌃R), or with a folder argument. The chat panel, on the right unless you swapped the panes, starts Claude (`Starting Claude…`).
 3. **Sign in.** If Claude Code is not signed in, the chat shows `Sign in to Claude` with a command. Copy it, run it in Terminal (it is `claude auth login` for the copy of Claude Code inside Tandem), sign in with your Claude subscription, then press **Reconnect**. Tandem never sees your credentials; Claude Code keeps them.
-4. **Settings** (⌘,) shows the connection (`Connected · <subscription> · Claude Code <version>`), the Node.js and helper in use, the **Use my Claude Code setup** switch, the help level per language, the **Layout** switch, the Rust and Python tools, and the recovery folder. Press ⌘, again or **Close Settings** to return to the code.
+4. **Settings** (⌘, or the gear at the bottom of the activity bar) shows the connection (`Connected · <subscription> · Claude Code <version>`), the Node.js and helper in use, the **Use my Claude Code setup** switch, the help level per language, the **Layout** switch, **Appearance** (window opacity and blur), **Fonts** (the font of each pane), the Rust and Python tools, and the recovery folder. Press ⌘, again or the close icon at the top of Settings to return to the code.
 
 When Claude cannot be used, the chat says why and offers **Reconnect**: `Claude is unavailable` (for example Node.js or the helper is missing), `Claude subscription required` (Claude Code is set up for an API key or another provider; Tandem only works with a Claude subscription), or `Claude stopped`. If your plan's usage limit is reached, the turn ends with `Your Claude plan's usage limit was reached. Try again later.` Your work is kept in every case, and Tandem never switches to API billing.
 
@@ -31,25 +31,27 @@ When Claude cannot be used, the chat says why and offers **Reconnect**: `Claude 
 
 ## Using the chat
 
-- **Discuss.** Type in the composer at the bottom of the chat (⌘L focuses it; Enter sends, Shift+Enter adds a line). Claude reads your code and researches; short lines such as `↳ read src/cli.rs` show what it looked at. It does not change files.
+- **Discuss.** Type in the composer at the bottom of the chat (⌘L focuses it; Enter or the arrow button sends, Shift+Enter adds a line). Claude reads your code and researches; short lines such as `↳ read src/cli.rs` show what it looked at. It does not change files.
 - **Plan.** Claude proposes a plan card with the goal, the "done when" criteria and small steps. Ask for changes in the chat, then choose **I'll write it** (you write the code, Claude guides) or **You do it** (Claude builds it).
 - **Guided build.** The active step is pinned above the composer. It shows what to do and why, the code (Beginner) or pseudocode (Intermediate), and explanations of its parts, shown when you point at a part. **Copy** copies the code or command, **Open file** opens the step's file (at the Beginner level at the line of the change, with the lines to replace or remove selected), and **Open Terminal** opens the terminal for a command step. Write the step, then press **Check my work** (⌥⌘C). A pass moves to the next step and Claude prepares its guidance; otherwise the verdict card lists what to fix, and why. Change the help level with `Help: <level> ▾` on the card or in Settings.
 - **Takeover.** **Do it for me** lets Claude do the active step, and **Build the rest for me** every remaining step. Tandem first saves your unsaved files, because Claude edits the files on disk. While Claude works the editor is read-only and ⌘. stops it. Afterwards a card lists each file Claude created, modified or deleted, with **Keep** and **Undo** (and **Keep all**, **Undo all**). Undo cannot restore ignored files, such as anything in `target/` or `node_modules/`, or files over 2 MiB.
-- **Permissions.** The **Permissions** button under the composer chooses **Ask** (the chat shows a command Tandem does not allow by itself with **Allow** and **Deny**), **Auto** (Claude Code asks only about risky actions) or **Bypass** (nothing asks, and Claude may edit project files in any turn; outside a takeover there is no Undo for that).
+- **Permissions.** The **Permissions** button under the composer, or the same control at the right of the status bar, chooses **Ask** (the chat shows a command Tandem does not allow by itself with **Allow** and **Deny**), **Auto** (Claude Code asks only about risky actions) or **Bypass** (nothing asks, and Claude may edit project files in any turn; outside a takeover there is no Undo for that).
 - **Tasks.** The task button in the chat header lists the project's tasks and **New task** (also in the **Chat** menu). The **Model** and **Effort** buttons under the composer choose the Claude model and effort for the next message.
-- **Stop.** ⌘. or **Stop** in the composer interrupts Claude at any time.
+- **Stop.** While Claude works, the composer's arrow button becomes a square stop button. ⌘. or that button interrupts Claude at any time.
 
 ## Editor basics
 
-Open a folder with ⌘O, **Recent**, or a folder argument; Tandem reopens the last project on the next start. Files open in tabs (at most 32), each with its own undo history while it is open. Unsaved changes are checkpointed in the recovery profile without saving the project file, and come back after a restart (`Recovered unsaved draft · Review before saving.`). **Changes** (⇧⌘D) compares a buffer with the file on disk; **Use Disk Version** is explicit and undoable in that session. When a file changed on disk under your edits, your draft is kept for comparison, and **Save Copy** (⇧⌘S) saves it elsewhere. Files must be UTF-8 text up to 2 MiB.
+Open a folder with ⌘O, **File → Recent Projects** (⌃R), or a folder argument; Tandem reopens the last project on the next start. Files open in tabs (at most 32), each with its own undo history while it is open. Unsaved changes are checkpointed in the recovery profile without saving the project file, and come back after a restart (`Recovered unsaved draft · Review before saving.`). **Compare with Disk** (⇧⌘D, or its icon at the right end of the tab bar) compares a buffer with the file on disk; **Use Disk Version** is explicit and undoable in that session. When a file changed on disk under your edits, your draft is kept for comparison, and **Save Copy** (⇧⌘S) saves it elsewhere. Files must be UTF-8 text up to 2 MiB.
 
-The panel below the editor has two tabs: **Terminal**, a basic interactive `/bin/sh` in the project folder with 2,000 lines of scrollback, started only when you open it, and **Problems**, the language tools' diagnostics and navigation results. Rust (rust-analyzer) and Python (Pyright) tools are enabled per project in Settings → **Language tools**, after a notice that they run with your user permissions; enable them only for projects you trust.
+The window follows VS Code's layout. The title bar holds the traffic lights, the command center (a search field in the middle) and, on the right, three switches that show and hide the file explorer, the panel below the editor and the chat. The activity bar on the window's edge beside the file tree has **Explorer**, **Search**, **Chat**, **Problems**, **Terminal** and, at the bottom, **Settings**; it moves with the file tree when the panes are swapped. Explorer and Search hide the file tree when it already shows their view; the others show and hide what they name. Tabs show a file icon, a dot for unsaved changes and a close button when you point at them, with **Save** and **Compare with Disk** at the right end of the tab bar; point at a tab to see the file's path. The breadcrumbs above the editor show the file's path and, with language tools on, the symbol the cursor is in. The status bar shows the git branch, the open file's errors and warnings (click for **Problems**), the cursor position (click for **Go to Line**), the line count, the language and the permission mode (click to change it). The file tree, the chat and the panel below the editor are floating panels with rounded corners; the editor sits flat between them. Point at an icon to see its name and, when it has one, its shortcut.
+
+The panel below the editor has two tabs: **Terminal**, a basic interactive `/bin/sh` in the project folder with 2,000 lines of scrollback, started only when you open it, and **Problems**, the language tools' diagnostics and navigation results. The bin icon in the panel's header stops the terminal, and the close icon hides the panel (⌘J). Rust (rust-analyzer) and Python (Pyright) tools are enabled per project in Settings → **Language tools**, after a notice that they run with your user permissions; enable them only for projects you trust.
 
 The file tree is on the left of the editor and the chat on the right. **View → Swap File Tree and Chat**, or the switch under Settings → **Layout**, puts the chat on the left and the file tree on the right; choose it again to swap back. Drag the divider between the editor and a pane to resize that pane, and double-click the divider to return the pane to its default width. The file tree can be 160 to 600 pixels wide and the chat 280 to 900, and the editor always keeps at least 360, so in a small window a pane can be narrower than you set it until the window grows again. Each pane keeps its width when the panes are swapped. The layout is the same for every project and is saved in the state folder, so it survives a restart.
 
 With language tools on, rest the pointer on a name in the editor to see a tooltip: its signature, highlighted like the code in the editor, above its documentation. An error or a warning shows in the same tooltip, in a block of its own colour, as soon as the pointer is on the underlined text. The tooltip opens only while the pointer is on that text itself, never from the empty space beside a line, and closes when the pointer leaves it. Move the pointer onto the tooltip to scroll it or to select and copy its text (⌘C); a click or a scroll outside it, or any other key, closes it.
 
-Tandem follows VS Code's macOS shortcuts. The command palette (⇧⌘P or F1) lists every command with its shortcut; type to filter and press Enter to run one. The same commands are in the File, Edit, Selection, View and Go menus. ⌘/ comments with the marker of the file's language, placed before the first character of the line; with several lines selected it uses their smallest indentation, and it uncomments when every line is already commented. Sort Lines, Transform to Uppercase/Lowercase and Select Line have no shortcut and are run from the palette or the menus. Four keys differ from VS Code because Tandem already used them: ⌘L focuses the chat, ⌘. stops Claude, ⌥⌘C is Check my work and ⇧⌘D compares with disk. With several cursors, the line commands (comment, move, copy, delete) act on the first cursor only. Fold regions with the arrows in the gutter; ⌥⌘] and ⌘K ⌘J unfold.
+Tandem follows VS Code's macOS shortcuts. **Quick Open** is a dialog in the middle of the window: press ⌘P or click the command center, type part of a file's name and press Enter to open it. The command palette (⇧⌘P or F1) is the same dialog with `>` typed first: it lists every command with its shortcut; type to filter and press Enter to run one. The file explorer keeps its own filter field, which ⇧⌘E shows and focuses. The same commands are in the File, Edit, Selection, View and Go menus. ⌘/ comments with the marker of the file's language, placed before the first character of the line; with several lines selected it uses their smallest indentation, and it uncomments when every line is already commented. Sort Lines, Transform to Uppercase/Lowercase and Select Line have no shortcut and are run from the palette or the menus. Four keys differ from VS Code because Tandem already used them: ⌘L focuses the chat, ⌘. stops Claude, ⌥⌘C is Check my work and ⇧⌘D compares with disk. With several cursors, the line commands (comment, move, copy, delete) act on the first cursor only. Fold regions with the arrows in the gutter; ⌥⌘] and ⌘K ⌘J unfold.
 
 | Action | Shortcut |
 | --- | --- |
@@ -83,11 +85,31 @@ Tandem follows VS Code's macOS shortcuts. The command palette (⇧⌘P or F1) li
 | Word wrap / full screen | ⌥Z / ⌃⌘F |
 | Unfold / unfold all | ⌥⌘] / ⌘K ⌘J |
 | Compare with disk | ⇧⌘D |
-| Text size | ⌘= / ⌘− |
+| Editor text size, for all projects | ⌘= / ⌘− |
 | Format buffer / references / document symbols | ⇧⌥F / ⇧F12 / ⇧⌘O |
 | Check my work | ⌥⌘C |
 | Stop Claude | ⌘. |
 | Settings | ⌘, |
+
+## Appearance and fonts
+
+Settings (⌘,) → **Appearance** has two sliders. The window changes while you drag.
+
+- **Window opacity** (30–100%, 100 by default) fades the whole window, text, panels and popups included, so you can see what is behind it. It stops at 30% so the window cannot disappear. The traffic lights do not fade.
+- **Background blur** (0–100, 50 by default) softens what shows through the window. At 0 the blur is off and what is behind the window shows sharp. If your Mac does not let Tandem set the blur strength, Settings says `This Mac does not let Tandem set the blur strength, so Tandem uses the standard macOS blur: any strength above 0 turns it on.`
+
+Settings → **Fonts** has one block per pane. Each font list shows every installed font and can be searched; sizes are whole pixels from 10 to 30.
+
+- **Editor:** font (FiraCode Nerd Font by default), size (14) and ligatures (on).
+- **Terminal:** font (FiraCode Nerd Font Mono), size (12) and ligatures (on).
+- **Chat:** text font for messages and cards (the system font), code font for code blocks, inline code and the step card's code (FiraCode Nerd Font), one size (13; code is drawn one pixel smaller) and ligatures in code (on).
+- **File explorer:** font (the system font) and size (13).
+
+Ligatures draw pairs such as `->`, `!=` and `>=` as one sign in fonts that have them, such as FiraCode; the switch turns the OpenType features `calt` and `liga` on or off, as VS Code does. A saved font that is no longer installed is replaced by Menlo for code (the editor, the terminal and chat code) and by the system font for text (chat text and the file explorer). Settings then shows a warning such as `FiraCode Nerd Font is not installed, so the editor uses Menlo.`, and the font list shows `<font> (not installed)`.
+
+⌘= and ⌘− change the editor's text size in every project, and the editor's size slider under Fonts moves with them. The text size a project had before is no longer used.
+
+The appearance and the fonts are the same for every project. They are saved in the state folder with the other preferences, so they survive a restart.
 
 ## Health, recovery and rollback
 

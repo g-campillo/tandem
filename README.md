@@ -34,7 +34,11 @@ Tandem keeps its state (open tabs, drafts, chat tasks) in `~/Library/Application
 
 ## Editor commands
 
-The editor uses VS Code's macOS shortcuts: ⌘/ comments a line, ⌥↑/⌥↓ move it, ⌘D adds the next occurrence to the selection, ⌃G goes to a line, ⌘B and ⌥⌘B hide the file explorer and the chat. ⇧⌘P opens the command palette, which lists every command with its shortcut. The full table is in [docs/tandem/local-use.md](docs/tandem/local-use.md).
+The editor uses VS Code's macOS shortcuts: ⌘/ comments a line, ⌥↑/⌥↓ move it, ⌘D adds the next occurrence to the selection, ⌃G goes to a line, ⌘B and ⌥⌘B hide the file explorer and the chat. The search field in the title bar (or ⌘P) finds a file by name, and typing `>` there (or ⇧⌘P) lists every command with its shortcut. The full table is in [docs/tandem/local-use.md](docs/tandem/local-use.md).
+
+## Look and fonts
+
+Settings (⌘,) → **Appearance** has a window opacity slider (30–100%; it fades the whole window, text included, so you can see what is behind it) and a blur strength slider for what shows through (0 turns the blur off). Settings → **Fonts** sets the font and size of the editor, the terminal, the chat and the file explorer, with ligatures for the code fonts. The defaults are FiraCode Nerd Font for code and the system font for text; a font that is not installed is replaced by Menlo or the system font. Everything applies to all projects.
 
 ## Help levels
 

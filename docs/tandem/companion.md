@@ -34,7 +34,7 @@ Claude
 │ [Build the rest for me]                       │
 └───────────────────────────────────────────────┘
 [ Message Claude…                              ]
-  Model ▾  Effort ▾  Permissions: Ask ▾     Send
+  Model ▾  Effort ▾  Permissions: Ask ▾      [↑]
 ```
 
 Each project has its own list of tasks. The task button in the chat header lists them as `<title> · <phase>` and offers `New task` (also in the **Chat** menu). A task is titled after your first message, and after the plan's goal once there is a plan. `New task` does nothing while the current task is still empty, and you cannot switch tasks while Claude is working.
@@ -86,7 +86,7 @@ A takeover lets Claude do the work itself, by editing files and running commands
 - **Do it for me** (step card): only the active step. Claude does it, records it as done, and stops; the plan moves to the next step and Claude prepares its guidance, so you continue writing.
 - **Build the rest for me** (step card), **You do it** (plan card) and **Fix it for me** (final card): every remaining step, in order. When the steps are done, Claude checks the "done when" criteria, fixes what fails, and reports the result. If Claude needs a decision from you, it stops and asks in the chat; your answer lets it continue the same takeover.
 
-A note appears in the transcript as Claude finishes each step (`Step <n> done: …`). Before Claude starts, Tandem saves your unsaved buffers, because Claude edits the files on disk. It closes new tabs that were never saved and are still empty, so no empty files are created. It does not start when a save is still running, when an unsaved buffer's file changed on disk, or when an unsaved buffer is read-only; the status bar says why. A note in the chat lists the files Tandem saved. While Claude works, the editor is read-only, saving is paused, and the toolbar shows `Claude is editing files · ⌘. stops`.
+A note appears in the transcript as Claude finishes each step (`Step <n> done: …`). Before Claude starts, Tandem saves your unsaved buffers, because Claude edits the files on disk. It closes new tabs that were never saved and are still empty, so no empty files are created. It does not start when a save is still running, when an unsaved buffer's file changed on disk, or when an unsaved buffer is read-only; the status bar says why. A note in the chat lists the files Tandem saved. While Claude works, the editor is read-only, saving is paused, and the title bar shows `Claude is editing files · ⌘. stops`.
 
 When the takeover turn ends, a card `Claude changed <n> file(s)` lists every file that differs from before, each marked `Created`, `Modified` or `Deleted`:
 
@@ -134,7 +134,7 @@ Tandem runs every Claude turn under one of four policies. Discussing and plannin
 
 ### Permissions
 
-The **Permissions** button next to Model and Effort, and the same control in Settings (⌘,) → **Claude**, chooses how often Claude asks before it acts:
+The **Permissions** button next to Model and Effort, and the same control in Settings (⌘,) → **Claude** and in the status bar, chooses how often Claude asks before it acts:
 
 - **Ask** (the default). Tandem asks you, with an Allow/Deny card, before a command it does not allow by itself.
 - **Auto.** Claude Code's auto mode: its safety check lets routine actions run and asks only about risky ones, with the same card. Tandem's own rules add no cards.
@@ -220,7 +220,7 @@ Each task has its own Claude Code session. Only the active task's session is ope
 
 If Claude Code can no longer find the session, Tandem starts a new one and opens your next message with a short recap: the goal, the plan's steps marked done or active, and the last six messages. Tandem's own transcript is not affected.
 
-**Stop** (⌘. or the composer's **Stop** button) interrupts the running turn and notes `Stopped.` in the chat. A turn interrupted by a restart or a crash is never replayed.
+**Stop** (⌘. or the composer's square stop button) interrupts the running turn and notes `Stopped.` in the chat. A turn interrupted by a restart or a crash is never replayed.
 
 ## Architecture
 
@@ -263,7 +263,7 @@ The reference conversation in `crates/tandem-claude/helper/test/fixtures/contrac
 
 **`tandem-core`** holds the domain and storage: `chat` (tasks, plans, guidance, checks, change sets, preferences, and the rules that validate plans and guidance), `breakdown` (where explained parts occur in code), the chat store, and `takeover` (snapshot, diff, keep, undo).
 
-**Storage.** The state folder holds `workspace.sqlite` at schema 6. Next to the editor's tables (`workspace`, `draft`, `settings`, `project_tools`), schema 6 adds `chat_task` (one row per task with its phase, mode, plan, current step and session id), `chat_selection` (the selected task per project), `chat_item` (the transcript), `chat_guidance` (guidance per task, step and level) and `chat_change_set` (each takeover's files and decisions). Guidance is stored as JSON; `where` and `location` are optional fields, so guidance saved by earlier versions still loads. Preferences are saved in `settings` under `chat_prefs`, and the pane layout (which side the file tree and the chat are on, and their widths) under `pane_layout`. Upgrading an older database first writes a backup next to it; tables from the earlier Codex-based design stay in an upgraded database untouched, and their tasks are not shown.
+**Storage.** The state folder holds `workspace.sqlite` at schema 6. Next to the editor's tables (`workspace`, `draft`, `settings`, `project_tools`), schema 6 adds `chat_task` (one row per task with its phase, mode, plan, current step and session id), `chat_selection` (the selected task per project), `chat_item` (the transcript), `chat_guidance` (guidance per task, step and level) and `chat_change_set` (each takeover's files and decisions). Guidance is stored as JSON; `where` and `location` are optional fields, so guidance saved by earlier versions still loads. Preferences are saved in `settings` under `chat_prefs`, and the pane layout (which side the file tree and the chat are on, and their widths) under `pane_layout`. The window's opacity and blur and the font of each pane are saved in `settings` under `appearance`. Upgrading an older database first writes a backup next to it; tables from the earlier Codex-based design stay in an upgraded database untouched, and their tasks are not shown.
 
 ## Environment switches
 
