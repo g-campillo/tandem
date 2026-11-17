@@ -14,6 +14,7 @@ mod panels;
 mod panes;
 mod provider;
 mod settings;
+mod settings_languages;
 mod settings_look;
 mod tools;
 mod view;
@@ -363,10 +364,7 @@ impl Workspace {
         // that snapshot a fresh sequence so an older background write loses.
         if changed {
             self.generation = self.generation.saturating_add(1);
-            if let Some(manager) = &self.dev.language {
-                manager.invalidate();
-            }
-            if let Some(manager) = &self.dev.python_language {
+            for (_, manager) in self.dev.managers() {
                 manager.invalidate();
             }
         }

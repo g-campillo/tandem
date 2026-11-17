@@ -2,10 +2,11 @@ mod servers;
 mod swift;
 pub use servers::*;
 
-use crate::content_hash;
+use crate::{ToolKind, content_hash};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -65,11 +66,42 @@ pub struct RustTools {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProjectTools {
     pub trusted_fingerprint: Option<String>,
-    pub recipe_grants: std::collections::BTreeMap<String, String>,
+    pub recipe_grants: BTreeMap<String, String>,
     #[serde(default)]
     pub python_trusted_fingerprint: Option<String>,
     #[serde(default)]
     pub python_interpreter: Option<PathBuf>,
+    /// Trusted fingerprints of the registry kinds (`SERVER_KINDS`). Rust and Python keep their
+    /// own fields so older records stay readable.
+    #[serde(default)]
+    pub trusted: BTreeMap<ToolKind, String>,
+}
+
+impl ProjectTools {
+    /// The fingerprint `kind` is trusted with, if any.
+    pub fn trust(&self, kind: ToolKind) -> Option<&String> {
+        match kind {
+            ToolKind::Rust => self.trusted_fingerprint.as_ref(),
+            ToolKind::Python => self.python_trusted_fingerprint.as_ref(),
+            _ => self.trusted.get(&kind),
+        }
+    }
+
+    /// Trusts `kind` with `fingerprint`; `None` withdraws the trust.
+    pub fn set_trust(&mut self, kind: ToolKind, fingerprint: Option<String>) {
+        match kind {
+            ToolKind::Rust => self.trusted_fingerprint = fingerprint,
+            ToolKind::Python => self.python_trusted_fingerprint = fingerprint,
+            _ => match fingerprint {
+                Some(fingerprint) => {
+                    self.trusted.insert(kind, fingerprint);
+                }
+                None => {
+                    self.trusted.remove(&kind);
+                }
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,7 +117,7 @@ pub struct PythonTools {
 }
 impl PythonTools {
     pub fn environment_fingerprint(&self) -> Result<String> {
-        let mut metadata = std::collections::BTreeMap::new();
+        let mut metadata = BTreeMap::new();
         let configuration = self.environment.join("pyvenv.cfg");
         if configuration.exists() {
             metadata.insert(
@@ -410,5 +442,40 @@ mod tests {
         assert!(!named_toolchain("../../outside"));
         assert!(!named_toolchain(".."));
         assert!(named_toolchain("1.100.0-aarch64-apple-darwin"));
+    }
+
+    #[test]
+    fn project_tools_trust_maps_kinds() {
+        let mut tools = ProjectTools::default();
+        tools.set_trust(ToolKind::Rust, Some("r".into()));
+        tools.set_trust(ToolKind::Python, Some("p".into()));
+        tools.set_trust(ToolKind::Swift, Some("s".into()));
+        assert_eq!(tools.trusted_fingerprint.as_deref(), Some("r"));
+        assert_eq!(tools.python_trusted_fingerprint.as_deref(), Some("p"));
+        assert_eq!(
+            tools.trusted,
+            BTreeMap::from([(ToolKind::Swift, "s".to_string())])
+        );
+        assert_eq!(tools.trust(ToolKind::Rust).map(String::as_str), Some("r"));
+        assert_eq!(tools.trust(ToolKind::Python).map(String::as_str), Some("p"));
+        assert_eq!(tools.trust(ToolKind::Swift).map(String::as_str), Some("s"));
+        assert_eq!(tools.trust(ToolKind::Java), None);
+
+        let saved = serde_json::to_value(&tools).unwrap();
+        assert_eq!(saved["trusted"], serde_json::json!({"swift": "s"}));
+        assert_eq!(saved["trusted_fingerprint"], "r");
+        assert_eq!(saved["python_trusted_fingerprint"], "p");
+
+        tools.set_trust(ToolKind::Swift, None);
+        tools.set_trust(ToolKind::Rust, None);
+        assert!(tools.trusted.is_empty());
+        assert_eq!(tools.trust(ToolKind::Swift), None);
+        assert_eq!(tools.trusted_fingerprint, None);
+        assert_eq!(tools.python_trusted_fingerprint.as_deref(), Some("p"));
+
+        let old: ProjectTools =
+            serde_json::from_str(r#"{"trusted_fingerprint":"a","recipe_grants":{}}"#).unwrap();
+        assert_eq!(old.trust(ToolKind::Rust).map(String::as_str), Some("a"));
+        assert!(old.trusted.is_empty());
     }
 }
