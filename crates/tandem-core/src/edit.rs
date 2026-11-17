@@ -68,14 +68,20 @@ impl Edit {
 
     /// Where `offset` (in the text before the edit) is after it. Offsets before the range
     /// stay, offsets after it move by the length change, offsets inside it move to its start
-    /// plus at most the new length. The end of the range counts as after it, so an offset
-    /// at an insertion moves past the inserted text.
+    /// plus at most the new length, back to a char boundary of the new text. The end of the
+    /// range counts as after it, so an offset at an insertion moves past the inserted text.
     pub fn map_offset(&self, offset: usize) -> usize {
-        map_offset_across(&self.range, self.text.len(), offset)
+        let start = self.range.start.min(self.range.end);
+        if (start..self.range.end).contains(&offset) {
+            start + self.text.floor_char_boundary(offset - start)
+        } else {
+            map_offset_across(&self.range, self.text.len(), offset)
+        }
     }
 }
 
-/// `Edit::map_offset` for a replacement of `range` by `new_len` bytes.
+/// `Edit::map_offset` for a replacement of `range` by `new_len` bytes. Without the new
+/// text, an offset inside the range can end up inside one of its characters.
 pub(crate) fn map_offset_across(range: &Range<usize>, new_len: usize, offset: usize) -> usize {
     let end = range.end;
     let start = range.start.min(end);
@@ -334,6 +340,15 @@ mod tests {
         assert_eq!(deletion.map_offset(6), 4);
         let longer = replacement(4..8, "abcdef");
         assert_eq!(longer.map_offset(7), 7);
+    }
+
+    #[test]
+    fn map_offset_keeps_an_offset_inside_the_range_on_a_char_boundary_of_the_new_text() {
+        // "é" and "ñ" are two bytes each: 5 would be inside "é".
+        let multibyte = replacement(4..8, "éñ");
+        assert_eq!(multibyte.map_offset(5), 4);
+        assert_eq!(multibyte.map_offset(6), 6);
+        assert_eq!(multibyte.map_offset(7), 6);
     }
 
     #[test]

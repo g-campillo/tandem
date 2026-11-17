@@ -5,7 +5,9 @@ use crate::edit::{Edit, map_offset_across};
 use std::ops::Range;
 
 /// The tab stops of a snippet in the document. Offsets are bytes in the document. Every
-/// stop has at least one range; `span` is the whole inserted snippet.
+/// stop has at least one range; `span` is the whole inserted snippet. `final_offset` (where
+/// `$0` is) can end up inside a character when multibyte text replaces the text around
+/// it; `advance` moves it back to the char boundary before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnippetSession {
     stops: Vec<Stop>,
@@ -123,7 +125,12 @@ impl SnippetSession {
     pub fn advance(&self, text: &str, forward: bool) -> Advance {
         let (edit, mut session) = self.mirrored(text);
         let (selection, next) = if forward && self.active + 1 >= self.stops.len() {
-            (session.final_offset..session.final_offset, None)
+            let edited = edit.as_ref().map(|edit| edit.apply(text));
+            let end = edited
+                .as_deref()
+                .unwrap_or(text)
+                .floor_char_boundary(session.final_offset);
+            (end..end, None)
         } else {
             session.active = if forward {
                 self.active + 1
@@ -317,6 +324,7 @@ mod tests {
     use std::collections::HashMap;
 
     /// A document holding a snippet session, edited the way the editor edits it.
+    #[derive(Clone)]
     struct Buffer {
         text: String,
         session: SnippetSession,
@@ -677,6 +685,99 @@ mod tests {
         assert_eq!(buffer.stops(), vec![(1, vec!["email"]), (2, vec![""])]);
         assert_eq!(buffer.session.ranges()[1], (26..26, false));
         assert_eq!(buffer.session.span, 0..28);
+    }
+
+    #[test]
+    fn the_final_selection_stays_on_a_char_boundary_after_multibyte_text_replaces_it() {
+        let (mut buffer, _) = insert("", 0, "fn ${1:name}($2) {\n\t$0\n}");
+        assert!(buffer.type_over(12..15, "é"));
+        assert_eq!(buffer.text, "fn name() {\né");
+        buffer.advance(true);
+        let (selection, _, going_on) = buffer.advance(true);
+        assert_eq!((selection, going_on), (12..12, false));
+
+        // The same when a picked choice replaces the text around the final offset.
+        let (buffer, _) = insert("", 0, "${1:a$0b}");
+        let (edit, session, _) = buffer.session.replace_active("éé");
+        let text = edit.apply(&buffer.text);
+        let advance = session.advance(&text, true);
+        assert_eq!((advance.selection, advance.next), (0..0, None));
+    }
+
+    /// Asserts that `range` lies in `text` on char boundaries.
+    fn assert_on_boundaries(text: &str, range: &Range<usize>, what: &str) {
+        assert!(
+            range.start <= range.end
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end),
+            "{what}: {range:?} in {text:?}"
+        );
+    }
+
+    impl Buffer {
+        /// Tabs through every stop to the end, checking that every edit, selection and
+        /// range stays on char boundaries of the text it belongs to.
+        fn tab_to_the_end_on_boundaries(&mut self, forward_first: bool) {
+            let mut forward = forward_first;
+            for _ in 0..=self.session.stops.len() {
+                let before = self.text.clone();
+                let (selection, edit, going_on) = self.advance(forward);
+                if let Some(edit) = &edit {
+                    assert_on_boundaries(&before, &edit.range, "mirror edit");
+                }
+                assert_on_boundaries(&self.text, &selection, "selection");
+                if !going_on {
+                    return;
+                }
+                for (range, _) in self.session.ranges() {
+                    assert_on_boundaries(&self.text, &range, "stop range");
+                }
+                forward = true;
+            }
+            panic!("Tab never left the snippet in {:?}", self.text);
+        }
+    }
+
+    #[test]
+    fn every_user_edit_keeps_edits_and_selections_on_char_boundaries() {
+        let bodies = [
+            "fn ${1:name}($2) {\n\t$0\n}",
+            "${1:a$0b} $1 ${2:é}",
+            "${1:foo ${2:bär}}$0 $2",
+        ];
+        for body in bodies {
+            let (buffer, _) = insert("éé", 2, body);
+            let text = &buffer.text;
+            let boundaries: Vec<usize> = (0..=text.len())
+                .filter(|i| text.is_char_boundary(*i))
+                .collect();
+            for &start in &boundaries {
+                for &end in boundaries.iter().filter(|end| **end >= start) {
+                    for new in ["", "x", "é", "ñé"] {
+                        let mut edited = buffer.clone();
+                        if !edited.type_over(start..end, new) {
+                            continue;
+                        }
+                        for forward_first in [true, false] {
+                            edited.clone().tab_to_the_end_on_boundaries(forward_first);
+                        }
+                        if let Some(edit) = edited.session.finish(&edited.text) {
+                            assert_on_boundaries(&edited.text, &edit.range, "finish edit");
+                            let after = edit.apply(&edited.text);
+                            assert_on_boundaries(&after, &edit.selection, "finish selection");
+                        }
+                        let (edit, session, selection) = edited.session.replace_active("ñé");
+                        assert_on_boundaries(&edited.text, &edit.range, "choice edit");
+                        let mut chosen = Buffer {
+                            text: edit.apply(&edited.text),
+                            session,
+                        };
+                        assert_on_boundaries(&chosen.text, &selection, "choice selection");
+                        chosen.tab_to_the_end_on_boundaries(true);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
