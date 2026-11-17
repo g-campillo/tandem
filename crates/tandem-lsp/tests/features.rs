@@ -15,6 +15,7 @@ def send(value):
     body=json.dumps(value).encode();sys.stdout.buffer.write(('Content-Length: %d\r\n\r\n'%len(body)).encode()+body);sys.stdout.buffer.flush()
 def record(name,value):
     (root/(name+'.tmp')).write_text(json.dumps(value));(root/(name+'.tmp')).rename(root/name)
+command=None
 while True:
     line=sys.stdin.buffer.readline()
     if not line: break
@@ -29,6 +30,18 @@ while True:
     elif method=='textDocument/hover':
         record('hover-params.json',msg['params'])
         send({'jsonrpc':'2.0','id':ident,'result':None})
+    elif method=='workspace/executeCommand':
+        command=ident;uri=msg['params']['arguments'][0]
+        edit_id=9100 if msg['params']['command']=='test.apply' else 9200
+        send({'jsonrpc':'2.0','id':edit_id,'method':'workspace/applyEdit','params':{'edit':{'changes':{uri:[{'range':{'start':{'line':0,'character':3},'end':{'line':0,'character':7}},'newText':'x'}]}}}})
+    elif ident==9100 and method is None:
+        record('applied.json',msg['result']['applied'])
+        send({'jsonrpc':'2.0','id':command,'result':{'done':True}})
+    elif ident==9200 and method is None:
+        send({'jsonrpc':'2.0','id':command,'error':{'code':-32603,'message':'Command failed'}})
+        send({'jsonrpc':'2.0','id':9201,'method':'workspace/applyEdit','params':{'edit':{}}})
+    elif ident==9201 and method is None:
+        record('late-applied.json',msg['result']['applied'])
     elif ident is not None and method is not None:
         send({'jsonrpc':'2.0','id':ident,'result':None})
 "#).unwrap();
@@ -124,5 +137,49 @@ fn only_text_document_requests_name_the_document() {
         params.pointer("/textDocument/uri"),
         Some(&json!(file_uri(&file).unwrap()))
     );
+    manager.stop();
+}
+
+#[test]
+fn a_running_command_may_apply_edits_and_they_come_back_with_its_result() {
+    let (root, manager, file) = fixture();
+    let uri = file_uri(&file).unwrap();
+    let reply = smol::block_on(manager.request(
+        "workspace/executeCommand",
+        &file,
+        "test",
+        "fn main() {}",
+        json!({"command": "test.apply", "arguments": [uri]}),
+    ))
+    .unwrap();
+    let edit = json!({"range": {"start": {"line": 0, "character": 3},
+        "end": {"line": 0, "character": 7}}, "newText": "x"});
+    assert_eq!(
+        reply.value,
+        json!({"result": {"done": true}, "edits": [{"changes": {uri: [edit]}}]})
+    );
+    assert_eq!(recorded(&root, "applied.json"), json!(true));
+    let files = features::edits::command_edits(&reply.value, &file).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, file);
+    assert_eq!(
+        apply_text_edits("fn main() {}", &files[0].edits).unwrap(),
+        "fn x() {}"
+    );
+    manager.stop();
+}
+
+#[test]
+fn edits_after_a_failed_command_are_denied() {
+    let (root, manager, file) = fixture();
+    let failed = smol::block_on(manager.request(
+        "workspace/executeCommand",
+        &file,
+        "test",
+        "fn main() {}",
+        json!({"command": "test.fail", "arguments": [file_uri(&file).unwrap()]}),
+    ));
+    assert!(failed.is_err());
+    assert_eq!(recorded(&root, "late-applied.json"), json!(false));
     manager.stop();
 }

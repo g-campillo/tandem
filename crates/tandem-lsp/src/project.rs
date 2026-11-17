@@ -330,6 +330,14 @@ fn worker(
                             &request.cancelled,
                             &stopped,
                         )?
+                    } else if request.method == "workspace/executeCommand" {
+                        // The command was chosen by the user, so the edits it asks for while
+                        // it runs are collected and returned with its result.
+                        session.collected_edits = Some(Vec::new());
+                        let value =
+                            session.request(&request.method, params, &request.cancelled, &stopped);
+                        let edits = session.collected_edits.take().unwrap_or_default();
+                        json!({"result": value?, "edits": edits})
                     } else {
                         session.request(&request.method, params, &request.cancelled, &stopped)?
                     };
@@ -370,6 +378,9 @@ struct ProjectSession {
     version_counter: i32,
     synced_sequence: u64,
     capabilities: Value,
+    /// The `workspace/applyEdit` edits received while a `workspace/executeCommand` runs;
+    /// `None` when no command runs, and then such edits are denied.
+    collected_edits: Option<Vec<Value>>,
 }
 
 impl ProjectSession {
@@ -450,6 +461,7 @@ impl ProjectSession {
             configuration:config.python.as_ref().map(|p|json!({"python":{"pythonPath":p.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":false}},"pyright":{"disableOrganizeImports":true}})).unwrap_or(json!({})),
             diagnostic_versions:BTreeMap::new(),version_counter:0,synced_sequence:u64::MAX,
             capabilities: Value::Null,
+            collected_edits: None,
         };
         let init = session.request("initialize", json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
             "capabilities":client_capabilities(),
@@ -655,7 +667,13 @@ impl ProjectSession {
         }
         if message.get("method").is_some() && message.get("id").is_some() {
             match message["method"].as_str() {
-                    Some("workspace/applyEdit")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"applied":false,"failureReason":"Source edits require an explicit editor action"}}))?,
+                    Some("workspace/applyEdit")=>match &mut self.collected_edits {
+                        Some(list)=>{
+                            list.push(message["params"]["edit"].clone());
+                            self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"applied":true}}))?
+                        }
+                        None=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"applied":false,"failureReason":"Source edits require an explicit editor action"}}))?,
+                    },
                     Some("window/workDoneProgress/create"|"client/registerCapability")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?,
                     Some("workspace/configuration")=>{
                         let values=message["params"]["items"].as_array().map(|items|items.iter().map(|item|item["section"].as_str().map(|s|s.split('.').fold(&self.configuration,|value,key|&value[key]).clone()).unwrap_or_else(||self.configuration.clone())).collect::<Vec<_>>()).unwrap_or_default();
