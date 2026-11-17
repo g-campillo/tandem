@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use lsp_types::{Diagnostic, Position, TextEdit};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -11,18 +12,69 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+/// How to launch one language server and what to tell it. Built by `rust_server`, `python_server`, ...
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
-    pub binary: PathBuf,
-    pub toolchain: PathBuf,
+    /// Shown in health text: "rust-analyzer", "Pyright", ...
+    pub name: String,
+    /// Health detail once the server is ready.
+    pub ready_detail: String,
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    /// Directories put on PATH before /usr/bin:/bin:/usr/sbin:/sbin.
+    pub path: Vec<PathBuf>,
+    /// Set after the HOME/USER/LOGNAME/LANG/LC_ALL/TMPDIR allow-list.
+    pub env: Vec<(String, OsString)>,
     pub project: PathBuf,
+    /// Tandem-owned cache folder, created before start; never inside the project.
     pub cache: PathBuf,
-    pub python: Option<PythonServer>,
+    pub initialization_options: Value,
+    /// Answers workspace/configuration; also sent as didChangeConfiguration after `initialized` when `push_configuration`.
+    pub configuration: Value,
+    pub push_configuration: bool,
+    /// Send every open document again with a new version whenever the workspace sequence changes (Pyright).
+    pub resend_on_change: bool,
+    /// The `languageId` every document is opened with.
+    pub language_id: String,
 }
-#[derive(Clone, Debug)]
-pub struct PythonServer {
-    pub script: PathBuf,
-    pub interpreter: PathBuf,
+impl ServerConfig {
+    /// Defaults: ready_detail "{name} ready", no args/path/env, initialization_options null,
+    /// configuration {}, push_configuration false, resend_on_change false, language_id "plain_text".
+    pub fn new(
+        name: impl Into<String>,
+        program: impl Into<PathBuf>,
+        project: impl Into<PathBuf>,
+        cache: impl Into<PathBuf>,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            ready_detail: format!("{name} ready"),
+            name,
+            program: program.into(),
+            args: vec![],
+            path: vec![],
+            env: vec![],
+            project: project.into(),
+            cache: cache.into(),
+            initialization_options: Value::Null,
+            configuration: json!({}),
+            push_configuration: false,
+            resend_on_change: false,
+            language_id: "plain_text".into(),
+        }
+    }
+}
+
+/// PATH for a server: the configured directories, then the system ones. Never an empty entry,
+/// which would put the project folder (the server's working directory) on PATH.
+fn search_path(directories: &[PathBuf]) -> OsString {
+    let mut path = OsString::new();
+    for directory in directories {
+        path.push(directory);
+        path.push(":");
+    }
+    path.push("/usr/bin:/bin:/usr/sbin:/sbin");
+    path
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,12 +150,7 @@ impl LanguageManager {
             sequence: 0,
             health: LanguageHealth {
                 state: "starting".into(),
-                detail: if config.python.is_some() {
-                    "Starting Pyright"
-                } else {
-                    "Starting rust-analyzer"
-                }
-                .into(),
+                detail: format!("Starting {}", config.name),
                 restarts: 0,
             },
         }));
@@ -238,16 +285,7 @@ fn worker(
                     let sequence = shared.lock().unwrap().sequence;
                     if started.sync_documents(&documents, sequence).is_ok() {
                         session = Some(started);
-                        health(
-                            &shared,
-                            "ready",
-                            if config.python.is_some() {
-                                "Pyright ready · selected local interpreter"
-                            } else {
-                                "rust-analyzer ready · build scripts and proc macros off"
-                            },
-                            retries,
-                        );
+                        health(&shared, "ready", config.ready_detail.as_str(), retries);
                     } else {
                         retries += 1;
                         next_restart = Instant::now() + Duration::from_secs(1);
@@ -349,7 +387,8 @@ struct ProjectSession {
     documents: BTreeMap<PathBuf, OpenDocument>,
     pull_diagnostics: bool,
     closed: bool,
-    language: &'static str,
+    language_id: String,
+    resend_on_change: bool,
     configuration: Value,
     diagnostic_versions: BTreeMap<PathBuf, (i32, Value)>,
     version_counter: i32,
@@ -359,27 +398,19 @@ struct ProjectSession {
 impl ProjectSession {
     fn start(config: &ServerConfig, stopped: &AtomicBool) -> Result<Self> {
         std::fs::create_dir_all(&config.cache)?;
-        let mut command = Command::new(&config.binary);
-        if let Some(python) = &config.python {
-            command.arg(&python.script).arg("--stdio");
-        }
+        let mut command = Command::new(&config.program);
+        command.args(&config.args);
         command.env_clear();
         for name in ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR"] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
         }
+        command.env("PATH", search_path(&config.path));
+        for (name, value) in &config.env {
+            command.env(name, value);
+        }
         command
-            .env(
-                "PATH",
-                format!(
-                    "{}:/usr/bin:/bin:/usr/sbin:/sbin",
-                    config.toolchain.join("bin").display()
-                ),
-            )
-            .env("RUSTC", config.toolchain.join("bin/rustc"))
-            .env("RUSTDOC", config.toolchain.join("bin/rustdoc"))
-            .env("CARGO_NET_OFFLINE", "true")
             .current_dir(&config.project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -430,15 +461,19 @@ impl ProjectSession {
             documents: BTreeMap::new(),
             pull_diagnostics: false,
             closed: false,
-            language:if config.python.is_some(){"python"}else{"rust"},
-            configuration:config.python.as_ref().map(|p|json!({"python":{"pythonPath":p.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":false}},"pyright":{"disableOrganizeImports":true}})).unwrap_or(json!({})),
-            diagnostic_versions:BTreeMap::new(),version_counter:0,synced_sequence:u64::MAX,
+            language_id: config.language_id.clone(),
+            resend_on_change: config.resend_on_change,
+            configuration: config.configuration.clone(),
+            diagnostic_versions: BTreeMap::new(),
+            version_counter: 0,
+            synced_sequence: u64::MAX,
         };
-        let init = session.request("initialize", json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
-            "capabilities":client_capabilities(),
-            "initializationOptions":{"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":config.cache},
-                "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":false}},"rustfmt":{"extraArgs":[]}}
-        }), &AtomicBool::new(false), stopped)?;
+        let mut initialize = json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
+            "capabilities":client_capabilities()});
+        if !config.initialization_options.is_null() {
+            initialize["initializationOptions"] = config.initialization_options.clone();
+        }
+        let init = session.request("initialize", initialize, &AtomicBool::new(false), stopped)?;
         ensure!(
             init.pointer("/capabilities/positionEncoding")
                 .is_none_or(|v| v == "utf-16"),
@@ -448,7 +483,7 @@ impl ProjectSession {
             .pointer("/capabilities/diagnosticProvider")
             .is_some_and(|v| !v.is_null());
         session.notify("initialized", json!({}))?;
-        if config.python.is_some() {
+        if config.push_configuration {
             session.notify(
                 "workspace/didChangeConfiguration",
                 json!({"settings":session.configuration}),
@@ -474,8 +509,7 @@ impl ProjectSession {
                     .get(&d.path)
                     .is_none_or(|old| old.text != d.text || old.instance != d.instance)
             });
-        let force_versions =
-            self.language == "python" && (changed || self.synced_sequence != sequence);
+        let force_versions = self.resend_on_change && (changed || self.synced_sequence != sequence);
         if changed || force_versions {
             self.diagnostic_versions.clear();
         }
@@ -521,7 +555,7 @@ impl ProjectSession {
                         .version_counter
                         .checked_add(1)
                         .context("Language document version exhausted")?;
-                    self.notify("textDocument/didOpen",json!({"textDocument":{"uri":file_uri(&document.path)?,"languageId":self.language,"version":self.version_counter,"text":document.text.as_ref()}}))?;
+                    self.notify("textDocument/didOpen",json!({"textDocument":{"uri":file_uri(&document.path)?,"languageId":self.language_id,"version":self.version_counter,"text":document.text.as_ref()}}))?;
                     self.documents.insert(
                         document.path.clone(),
                         OpenDocument {
@@ -778,6 +812,19 @@ mod tests {
         assert_eq!(
             capabilities.pointer("/textDocument/completion/completionItem/snippetSupport"),
             Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn search_path_puts_configured_folders_before_the_system_ones() {
+        assert_eq!(
+            search_path(&[PathBuf::from("/a/bin"), PathBuf::from("/b/bin")]),
+            OsString::from("/a/bin:/b/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        );
+        // No leading empty entry, which would mean the server's working directory.
+        assert_eq!(
+            search_path(&[]),
+            OsString::from("/usr/bin:/bin:/usr/sbin:/sbin")
         );
     }
 

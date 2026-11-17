@@ -1,0 +1,154 @@
+//! How Tandem launches each language server it runs: program, arguments, environment and settings.
+use crate::ServerConfig;
+use serde_json::json;
+use std::path::Path;
+
+/// rust-analyzer from the project's toolchain, offline, with build scripts and proc macros off.
+pub fn rust_server(tools: &tandem_core::RustTools, project: &Path, cache: &Path) -> ServerConfig {
+    let bin = tools.toolchain.join("bin");
+    let mut config = ServerConfig::new("rust-analyzer", &tools.rust_analyzer, project, cache);
+    config.ready_detail = "rust-analyzer ready · build scripts and proc macros off".into();
+    config.language_id = "rust".into();
+    config.env = vec![
+        ("RUSTC".into(), bin.join("rustc").into()),
+        ("RUSTDOC".into(), bin.join("rustdoc").into()),
+        ("CARGO_NET_OFFLINE".into(), "true".into()),
+    ];
+    config.path = vec![bin];
+    config.initialization_options = json!({"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":cache},
+        "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":false}},"rustfmt":{"extraArgs":[]}});
+    config
+}
+
+/// Pyright under Node, analysing open files with the selected interpreter.
+/// `None` when Node or the Pyright script was not found.
+pub fn python_server(
+    tools: &tandem_core::PythonTools,
+    project: &Path,
+    cache: &Path,
+) -> Option<ServerConfig> {
+    let (node, script) = (tools.node.as_ref()?, tools.server.as_ref()?);
+    let mut config = ServerConfig::new("Pyright", node, project, cache);
+    config.ready_detail = "Pyright ready · selected local interpreter".into();
+    config.language_id = "python".into();
+    config.args = vec![script.into(), "--stdio".into()];
+    config.path = vec![tools.prefix.join("bin")];
+    config.configuration = json!({"python":{"pythonPath":tools.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":false}},"pyright":{"disableOrganizeImports":true}});
+    config.push_configuration = true;
+    config.resend_on_change = true;
+    Some(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn rust_server_keeps_today_s_settings() {
+        let toolchain = PathBuf::from("/home/me/.rustup/toolchains/1.100.0-aarch64-apple-darwin");
+        let tools = tandem_core::RustTools {
+            toolchain: toolchain.clone(),
+            rust_analyzer: toolchain.join("bin/rust-analyzer"),
+            cargo: toolchain.join("bin/cargo"),
+            rustc: toolchain.join("bin/rustc"),
+            rustfmt: toolchain.join("bin/rustfmt"),
+            label: "Rust 1.100.0".into(),
+            fingerprint: "f".into(),
+        };
+        let config = rust_server(
+            &tools,
+            Path::new("/work/app"),
+            Path::new("/state/cache/rust"),
+        );
+        assert_eq!(config.name, "rust-analyzer");
+        assert_eq!(config.program, toolchain.join("bin/rust-analyzer"));
+        assert!(config.args.is_empty());
+        assert_eq!(config.project, PathBuf::from("/work/app"));
+        assert_eq!(config.cache, PathBuf::from("/state/cache/rust"));
+        assert_eq!(config.path, vec![toolchain.join("bin")]);
+        assert_eq!(
+            config.env,
+            vec![
+                ("RUSTC".into(), OsString::from(toolchain.join("bin/rustc"))),
+                (
+                    "RUSTDOC".into(),
+                    OsString::from(toolchain.join("bin/rustdoc"))
+                ),
+                ("CARGO_NET_OFFLINE".into(), OsString::from("true")),
+            ]
+        );
+        assert_eq!(
+            config.initialization_options.pointer("/cargo/targetDir"),
+            Some(&json!("/state/cache/rust"))
+        );
+        assert_eq!(
+            config.initialization_options.pointer("/procMacro/enable"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            config.initialization_options.pointer("/cargo/extraArgs"),
+            Some(&json!(["--locked", "--offline"]))
+        );
+        assert_eq!(config.language_id, "rust");
+        assert_eq!(
+            config.ready_detail,
+            "rust-analyzer ready · build scripts and proc macros off"
+        );
+        assert_eq!(config.configuration, json!({}));
+        assert!(!config.push_configuration);
+        assert!(!config.resend_on_change);
+    }
+
+    #[test]
+    fn python_server_runs_pyright_with_the_interpreter() {
+        let mut tools = tandem_core::PythonTools {
+            interpreter: "/work/app/.venv/bin/python".into(),
+            executable: "/opt/python/bin/python3.13".into(),
+            prefix: "/opt/node".into(),
+            environment: "/work/app/.venv".into(),
+            node: Some("/opt/node/bin/node".into()),
+            server: Some("/opt/node/lib/pyright/langserver.index.js".into()),
+            label: "Python 3.13".into(),
+            fingerprint: "f".into(),
+        };
+        let config = python_server(&tools, Path::new("/work/app"), Path::new("/state/py"))
+            .expect("Node and Pyright are present");
+        assert_eq!(config.name, "Pyright");
+        assert_eq!(config.program, PathBuf::from("/opt/node/bin/node"));
+        assert_eq!(
+            config.args,
+            vec![
+                OsString::from("/opt/node/lib/pyright/langserver.index.js"),
+                OsString::from("--stdio")
+            ]
+        );
+        assert_eq!(config.path, vec![PathBuf::from("/opt/node/bin")]);
+        assert!(config.env.is_empty());
+        assert_eq!(
+            config.configuration.pointer("/python/pythonPath"),
+            Some(&json!("/work/app/.venv/bin/python"))
+        );
+        assert_eq!(
+            config
+                .configuration
+                .pointer("/python/analysis/diagnosticMode"),
+            Some(&json!("openFilesOnly"))
+        );
+        assert!(config.push_configuration);
+        assert!(config.resend_on_change);
+        assert!(config.initialization_options.is_null());
+        assert_eq!(config.language_id, "python");
+        assert_eq!(
+            config.ready_detail,
+            "Pyright ready · selected local interpreter"
+        );
+
+        tools.node = None;
+        assert!(python_server(&tools, Path::new("/work/app"), Path::new("/state/py")).is_none());
+        tools.node = Some("/opt/node/bin/node".into());
+        tools.server = None;
+        assert!(python_server(&tools, Path::new("/work/app"), Path::new("/state/py")).is_none());
+    }
+}

@@ -12,8 +12,8 @@ lsp-types = "0.97.0"
 url = "2.5"
 async-channel = "2"
 libc.workspace = true
+tandem-core = { path = "../tandem-core" }
 
 [dev-dependencies]
 tempfile = "3"
 smol = "2"
-tandem-core = { path = "../tandem-core" }

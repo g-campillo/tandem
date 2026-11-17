@@ -4,7 +4,7 @@ use super::*;
 
 use serde_json::{Value, json};
 use std::rc::Rc;
-use tandem_lsp::{LanguageDocument, LanguageManager, LanguageStamp, ServerConfig};
+use tandem_lsp::{LanguageDocument, LanguageManager, LanguageStamp};
 
 #[derive(Clone)]
 pub struct Navigation {
@@ -176,28 +176,18 @@ impl Workspace {
         if let Some(tools) = &self.dev.rust
             && self.dev.settings.trusted_fingerprint.as_ref() == Some(&tools.fingerprint)
         {
-            self.dev.language = Some(LanguageManager::start(ServerConfig {
-                python: None,
-                binary: tools.rust_analyzer.clone(),
-                toolchain: tools.toolchain.clone(),
-                project: project.root.clone(),
-                cache: cache.join("rust"),
-            }));
+            self.dev.language = Some(LanguageManager::start(tandem_lsp::rust_server(
+                tools,
+                &project.root,
+                &cache.join("rust"),
+            )));
         }
         if let Some(tools) = &self.dev.python
             && self.dev.settings.python_trusted_fingerprint.as_ref() == Some(&tools.fingerprint)
-            && let (Some(node), Some(script)) = (&tools.node, &tools.server)
+            && let Some(config) =
+                tandem_lsp::python_server(tools, &project.root, &cache.join("python"))
         {
-            self.dev.python_language = Some(LanguageManager::start(ServerConfig {
-                binary: node.clone(),
-                toolchain: tools.prefix.clone(),
-                project: project.root.clone(),
-                cache: cache.join("python"),
-                python: Some(tandem_lsp::PythonServer {
-                    script: script.clone(),
-                    interpreter: tools.interpreter.clone(),
-                }),
-            }));
+            self.dev.python_language = Some(LanguageManager::start(config));
         }
         self.dev.diagnostic_key.clear();
         if let Some(watcher) = self._watcher.as_mut()

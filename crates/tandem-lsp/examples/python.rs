@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tandem_lsp::*;
@@ -18,16 +18,9 @@ async fn run() -> Result<()> {
     let library_text = "def unsaved_double(value: int) -> int:\n    return value + value\n";
     let main_text = "from helper import unsaved_double\nvalue: int = unsaved_double(21)\nmessage = 'hello'\nmessage.upper()\n";
     let tools = tandem_core::PythonTools::discover(&root, None)?;
-    let manager = LanguageManager::start(ServerConfig {
-        binary: tools.node.unwrap(),
-        toolchain: tools.prefix,
-        project: root.clone(),
-        cache: root.join("cache"),
-        python: Some(PythonServer {
-            script: tools.server.unwrap(),
-            interpreter: tools.interpreter,
-        }),
-    });
+    let manager = LanguageManager::start(
+        python_server(&tools, &root, &root.join("cache")).context("Pyright is not installed")?,
+    );
     let mut docs = vec![
         LanguageDocument {
             path: library.clone(),
