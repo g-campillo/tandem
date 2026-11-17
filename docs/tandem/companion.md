@@ -37,7 +37,7 @@ Claude
   Model ▾  Effort ▾  Permissions: Ask ▾      [↑]
 ```
 
-Each project has its own list of tasks. The task button in the chat header lists them as `<title> · <phase>` and offers `New task` (also in the **Chat** menu). A task is titled after your first message, and after the plan's goal once there is a plan. `New task` does nothing while the current task is still empty, and you cannot switch tasks while Claude is working.
+Each project has its own list of tasks. The task button in the chat header shows the active task's title (`Tasks` when there is none) with a border and a `▾`; its menu offers `New task` (also in the **Chat** menu) and lists the tasks as `<title> · <phase>`. A task is titled after your first message, and after the plan's goal once there is a plan. `New task` does nothing while the current task is still empty, and you cannot switch tasks while Claude is working.
 
 ### Discuss
 

@@ -3,7 +3,9 @@
 
 use std::ops::Range;
 use tandem_claude::view::{BlockKind, OpenJump};
-use tandem_core::chat::{CheckResult, EditAction, Finding, HELP_LANGUAGES, Placement, locate};
+use tandem_core::chat::{
+    CheckResult, EditAction, Finding, HELP_LANGUAGES, Phase, Placement, locate,
+};
 
 /// The tabs of the panel below the editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +74,26 @@ pub fn check_title(result: &CheckResult) -> String {
         (Some(step), false) => format!("Step {} needs changes", step + 1),
         (None, true) => "The task meets its \"done when\" criteria".into(),
         (None, false) => "Not done yet".into(),
+    }
+}
+
+/// The name of a task's phase, as the task menu shows it.
+pub fn phase_name(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Discuss => "Discuss",
+        Phase::Plan => "Plan",
+        Phase::Build => "Build",
+        Phase::Done => "Done",
+    }
+}
+
+/// The accessible name of the task button in the chat header, given the active task's
+/// title and phase: it says the button opens the task menu and, because the header shows
+/// no phase, which phase the task is in.
+pub fn task_menu_name(task: Option<(&str, Phase)>) -> String {
+    match task {
+        Some((title, phase)) => format!("Task menu: {title} ({})", phase_name(phase)),
+        None => "Task menu".to_owned(),
     }
 }
 
@@ -308,6 +330,32 @@ pub fn takeover_save_plan(tabs: &[TabFacts]) -> SavePlan {
 mod tests {
     use super::*;
     use tandem_core::chat::EditLocation;
+
+    #[test]
+    fn task_menu_name_names_the_menu_the_task_and_its_phase() {
+        let cases = [
+            (
+                Some(("New task", Phase::Discuss)),
+                "Task menu: New task (Discuss)",
+            ),
+            (
+                Some(("Add a --json flag to the CLI", Phase::Plan)),
+                "Task menu: Add a --json flag to the CLI (Plan)",
+            ),
+            (
+                Some(("Fix the parser", Phase::Build)),
+                "Task menu: Fix the parser (Build)",
+            ),
+            (
+                Some(("Fix the parser", Phase::Done)),
+                "Task menu: Fix the parser (Done)",
+            ),
+            (None, "Task menu"),
+        ];
+        for (task, expected) in cases {
+            assert_eq!(task_menu_name(task), expected, "{task:?}");
+        }
+    }
 
     #[test]
     fn step_card_max_height_is_45_percent_of_the_chat_and_at_least_160() {

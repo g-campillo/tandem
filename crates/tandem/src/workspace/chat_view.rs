@@ -1,6 +1,6 @@
 //! The chat panel beside the editor: header, connection notice, transcript, the card of the
 //! step being built, and composer.
-use super::chat_logic::{check_title, finding_label};
+use super::chat_logic::{check_title, finding_label, phase_name, task_menu_name};
 use super::chrome_logic::tooltip;
 use super::commands::shortcut;
 use super::panels::code_note;
@@ -28,15 +28,6 @@ use tandem_core::chat::{
 
 const NO_PROJECT: &str = "Open a folder to start a task with Claude.";
 const IGNORED_NOT_TRACKED: &str = "Files in ignored folders (like target/ or node_modules/) aren't tracked, so Undo can't restore them.";
-
-fn phase_name(phase: Phase) -> &'static str {
-    match phase {
-        Phase::Discuss => "Discuss",
-        Phase::Plan => "Plan",
-        Phase::Build => "Build",
-        Phase::Done => "Done",
-    }
-}
 
 /// A menu item handler that sends `command` to the companion.
 fn on_command(
@@ -268,6 +259,12 @@ impl Workspace {
             .task
             .as_ref()
             .map_or_else(|| "Tasks".to_owned(), |task| task.title.clone());
+        let name = task_menu_name(
+            state
+                .task
+                .as_ref()
+                .map(|task| (task.title.as_str(), task.phase)),
+        );
         let tasks: Vec<(String, String, bool)> = state
             .tasks
             .iter()
@@ -280,8 +277,11 @@ impl Workspace {
             })
             .collect();
         let weak = cx.entity().downgrade();
+        // The default variant's border and fill and the caret make it read as a button
+        // that opens a menu, not as text.
         wrapping_button(Button::new("chat-task"), title)
-            .ghost()
+            .accessibility_label(name)
+            .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let menu = menu
                     .item(
