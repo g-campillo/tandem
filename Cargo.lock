@@ -6353,6 +6353,7 @@ name = "tandem"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "gpui-kit",
  "libc",
  "lsp-types",

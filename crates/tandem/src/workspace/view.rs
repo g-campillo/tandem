@@ -450,6 +450,9 @@ impl Workspace {
                     .child("⌘P opens files · ⌘N creates a file · ⌘S saves")
                     .children(recent),
             );
+        let ide = editor
+            .as_ref()
+            .map(|editor| self.ide_layer(editor, &face, cx));
         let editor_block = div()
             .v_flex()
             .flex_1()
@@ -563,6 +566,7 @@ impl Workspace {
                                     .text_size(px(face.size)),
                             )
                             .child(self.hover.clone())
+                            .when_some(ide, |d, layer| layer.apply(d))
                         })
                         .when(self.active.is_none(), |d| d.child(empty))
                     }),
