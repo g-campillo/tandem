@@ -6,6 +6,7 @@ pub mod breakdown;
 pub mod chat;
 mod chat_store;
 pub mod edit;
+pub mod editor_prefs;
 pub mod git;
 pub mod layout;
 pub mod takeover;
