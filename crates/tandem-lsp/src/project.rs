@@ -55,6 +55,7 @@ struct Shared {
     documents: BTreeMap<PathBuf, LanguageDocument>,
     sequence: u64,
     health: LanguageHealth,
+    capabilities: Value,
 }
 struct Request {
     method: String,
@@ -106,6 +107,7 @@ impl LanguageManager {
                 .into(),
                 restarts: 0,
             },
+            capabilities: Value::Null,
         }));
         let stopped = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::sync_channel(32);
@@ -131,6 +133,12 @@ impl LanguageManager {
     }
     pub fn health(&self) -> LanguageHealth {
         self.0.shared.lock().unwrap().health.clone()
+    }
+    /// The running server's capabilities; unknown before it is ready and after it stops.
+    pub fn capabilities(&self) -> crate::features::capabilities::ServerFeatures {
+        crate::features::capabilities::ServerFeatures(
+            self.0.shared.lock().unwrap().capabilities.clone(),
+        )
     }
     pub fn is_current(&self, stamp: &LanguageStamp) -> bool {
         !self.0.stopped.load(Ordering::Relaxed)
@@ -218,6 +226,7 @@ fn worker(
             session = None;
             retries += 1;
             next_restart = Instant::now() + Duration::from_secs(retries.min(3) as u64);
+            shared.lock().unwrap().capabilities = Value::Null;
             health(
                 &shared,
                 "restarting",
@@ -237,6 +246,7 @@ fn worker(
                         .collect::<Vec<_>>();
                     let sequence = shared.lock().unwrap().sequence;
                     if started.sync_documents(&documents, sequence).is_ok() {
+                        shared.lock().unwrap().capabilities = started.capabilities.clone();
                         session = Some(started);
                         health(
                             &shared,
@@ -256,6 +266,7 @@ fn worker(
                 Err(error) => {
                     retries += 1;
                     next_restart = Instant::now() + Duration::from_secs(retries as u64);
+                    shared.lock().unwrap().capabilities = Value::Null;
                     health(
                         &shared,
                         if retries < 3 { "restarting" } else { "failed" },
@@ -271,6 +282,7 @@ fn worker(
                 session = None;
                 retries = 0;
                 next_restart = Instant::now();
+                shared.lock().unwrap().capabilities = Value::Null;
                 health(&shared, "starting", "Restarting language tools", 0);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -307,7 +319,9 @@ fn worker(
                         .context("Language server is not ready; retry when connected")?;
                     session.sync_documents(&request.stamp.documents, request.stamp.sequence)?;
                     let mut params = request.params.clone();
-                    params["textDocument"] = json!({"uri": file_uri(&request.file)?});
+                    if request.method.starts_with("textDocument/") {
+                        params["textDocument"] = json!({"uri": file_uri(&request.file)?});
+                    }
                     let value = if request.method == "textDocument/diagnostic"
                         && !session.pull_diagnostics
                     {
@@ -333,6 +347,7 @@ fn worker(
         }
     }
     drop(session);
+    shared.lock().unwrap().capabilities = Value::Null;
     health(&shared, "stopped", "Language tools stopped", retries);
 }
 
@@ -354,6 +369,7 @@ struct ProjectSession {
     diagnostic_versions: BTreeMap<PathBuf, (i32, Value)>,
     version_counter: i32,
     synced_sequence: u64,
+    capabilities: Value,
 }
 
 impl ProjectSession {
@@ -433,12 +449,14 @@ impl ProjectSession {
             language:if config.python.is_some(){"python"}else{"rust"},
             configuration:config.python.as_ref().map(|p|json!({"python":{"pythonPath":p.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":false}},"pyright":{"disableOrganizeImports":true}})).unwrap_or(json!({})),
             diagnostic_versions:BTreeMap::new(),version_counter:0,synced_sequence:u64::MAX,
+            capabilities: Value::Null,
         };
         let init = session.request("initialize", json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
             "capabilities":client_capabilities(),
             "initializationOptions":{"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":config.cache},
                 "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":false}},"rustfmt":{"extraArgs":[]}}
         }), &AtomicBool::new(false), stopped)?;
+        session.capabilities = init.get("capabilities").cloned().unwrap_or(Value::Null);
         ensure!(
             init.pointer("/capabilities/positionEncoding")
                 .is_none_or(|v| v == "utf-16"),
@@ -672,8 +690,10 @@ impl Drop for ProjectSession {
 /// What Tandem tells a language server it supports. Hover text is asked for as Markdown,
 /// so that signatures arrive in fenced code blocks the editor can highlight.
 fn client_capabilities() -> Value {
-    json!({"general":{"positionEncodings":["utf-16"]},"workspace":{"configuration":true},
-        "textDocument":{"completion":{"completionItem":{"snippetSupport":false}},"definition":{"linkSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"publishDiagnostics":{"versionSupport":true},"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}})
+    let mut capabilities = json!({"general":{"positionEncodings":["utf-16"]},"workspace":{"configuration":true},
+        "textDocument":{"completion":{"completionItem":{"snippetSupport":false}},"definition":{"linkSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"publishDiagnostics":{"versionSupport":true},"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}});
+    crate::features::capabilities::extend_client_capabilities(&mut capabilities);
+    capabilities
 }
 pub fn file_uri(path: &Path) -> Result<String> {
     Ok(url::Url::from_file_path(path)
@@ -777,7 +797,7 @@ mod tests {
         );
         assert_eq!(
             capabilities.pointer("/textDocument/completion/completionItem/snippetSupport"),
-            Some(&json!(false))
+            Some(&json!(true))
         );
     }
 

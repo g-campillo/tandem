@@ -3,3 +3,4 @@ mod legacy;
 pub use legacy::{Session, utf16_position};
 mod project;
 pub use project::*;
+pub mod features;
