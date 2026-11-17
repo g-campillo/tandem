@@ -1,9 +1,15 @@
 //! Live check of the IDE features against the installed rust-analyzer and Pyright.
-//! Run from the repository root: `cargo run -p tandem-lsp --example features [rust|python]`.
+//! Run from the repository root:
+//! `cargo run -p tandem-lsp --example features [rust|python] [--with-autoimport]`.
 use anyhow::{Context, Result, bail, ensure};
+use lsp_types::{CompletionItem, InsertTextFormat};
 use serde_json::{Value, json};
-use std::{future::Future, path::Path, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, path::Path, sync::Arc, time::Duration};
+use tandem_core::edit::indent::language_default;
 use tandem_lsp::features::capabilities::ServerFeatures;
+use tandem_lsp::features::completion::{
+    accept_item, completion_items, completion_params, word_start,
+};
 use tandem_lsp::*;
 
 const RUST_LIB: &str = r#"pub trait Shape {
@@ -59,16 +65,25 @@ fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    let (rust, python) = match std::env::args().nth(1).as_deref() {
-        None => (true, true),
-        Some("rust") => (true, false),
-        Some("python") => (false, true),
-        Some(other) => bail!("Unknown argument {other}; pass rust, python or nothing"),
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // rust-analyzer offers import completions only once Tandem switches them on.
+    let with_autoimport = arguments
+        .iter()
+        .any(|argument| argument == "--with-autoimport");
+    arguments.retain(|argument| argument != "--with-autoimport");
+    let (rust, python) = match arguments.as_slice() {
+        [] => (true, true),
+        [only] if only == "rust" => (true, false),
+        [only] if only == "python" => (false, true),
+        other => bail!(
+            "Unknown arguments {}; pass rust, python or nothing, and optionally --with-autoimport",
+            other.join(" ")
+        ),
     };
     let root = std::env::current_dir()?.join(".tandem-local/ide-features");
     let mut checks = Checks::default();
     if rust {
-        rust_checks(&root.join("rust"), &mut checks).await;
+        rust_checks(&root.join("rust"), with_autoimport, &mut checks).await;
     }
     if python {
         python_checks(&root.join("python"), &mut checks).await;
@@ -100,14 +115,14 @@ impl Checks {
     }
 }
 
-async fn rust_checks(project: &Path, checks: &mut Checks) {
+async fn rust_checks(project: &Path, with_autoimport: bool, checks: &mut Checks) {
     let lib = project.join("src/lib.rs");
     let started = async {
         write_rust_fixture(project)?;
         start(rust_config(project)?, &[(&lib, RUST_LIB)]).await
     }
     .await;
-    let (manager, _docs) = match started {
+    let (manager, mut docs) = match started {
         Ok(started) => started,
         Err(error) => return checks.record("rust start", Err(error)),
     };
@@ -134,7 +149,142 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
             ],
         ),
     );
+    checks.record(
+        "rust completion_snippet",
+        completion_snippet(&manager, &mut docs, &lib).await,
+    );
+    if with_autoimport {
+        checks.record(
+            "rust completion_autoimport",
+            completion_autoimport(&manager, &mut docs, &lib).await,
+        );
+    }
     manager.stop();
+}
+
+/// Completing `total_ar` offers `total_area` as a snippet, and accepting it inserts the
+/// call with the cursor inside its parentheses.
+async fn completion_snippet(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    lib: &Path,
+) -> Result<()> {
+    let text = format!("{RUST_LIB}\npub fn probe() -> f64 {{\n    total_ar\n}}\n");
+    set_text(manager, docs, lib, &text);
+    let cursor = text.rfind("total_ar").unwrap() + "total_ar".len();
+    let items = completion_until(manager, lib, &text, cursor, |item| {
+        item.label.starts_with("total_area")
+    })
+    .await?;
+    let item = items
+        .iter()
+        .find(|item| item.label.starts_with("total_area"))
+        .context("rust-analyzer offered no total_area completion")?;
+    ensure!(
+        item.insert_text_format == Some(InsertTextFormat::SNIPPET),
+        "the total_area completion is not a snippet: {:?}",
+        item.insert_text_format
+    );
+    let plan = accept_item(
+        &text,
+        cursor,
+        cursor,
+        word_start(&text, cursor, "rust"),
+        item,
+        &HashMap::new(),
+        language_default("rust"),
+    )?;
+    let new = plan.edit.apply(&text);
+    let open = new
+        .rfind("total_area(")
+        .context("accepting total_area inserted no call")?
+        + "total_area".len();
+    let close = open + new[open..].find(')').context("the call is not closed")?;
+    ensure!(
+        open < plan.selection.start && plan.selection.end <= close,
+        "the selection {:?} is not inside the parentheses at {open}..{close} of {:?}",
+        plan.selection,
+        &new[open..=close]
+    );
+    Ok(())
+}
+
+/// Completing `HashMa` offers `HashMap` from std; once resolved it carries the import,
+/// and accepting it adds the `use` line along with the name.
+async fn completion_autoimport(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    lib: &Path,
+) -> Result<()> {
+    let text = format!("{RUST_LIB}\npub fn probe() {{\n    let map = HashMa\n}}\n");
+    set_text(manager, docs, lib, &text);
+    let cursor = text.rfind("HashMa").unwrap() + "HashMa".len();
+    let is_import =
+        |item: &CompletionItem| item.label.starts_with("HashMap") && item.data.is_some();
+    let items = completion_until(manager, lib, &text, cursor, is_import).await?;
+    let item = items
+        .into_iter()
+        .find(is_import)
+        .context("rust-analyzer offered no HashMap import completion")?;
+    let resolved = manager
+        .request(
+            "completionItem/resolve",
+            lib,
+            "fixture",
+            &text,
+            serde_json::to_value(&item)?,
+        )
+        .await?;
+    let resolved: CompletionItem = serde_json::from_value(resolved.value)?;
+    ensure!(
+        resolved
+            .additional_text_edits
+            .as_ref()
+            .is_some_and(|edits| !edits.is_empty()),
+        "the resolved HashMap completion has no additional edits"
+    );
+    let plan = accept_item(
+        &text,
+        cursor,
+        cursor,
+        word_start(&text, cursor, "rust"),
+        &resolved,
+        &HashMap::new(),
+        language_default("rust"),
+    )?;
+    let new = plan.edit.apply(&text);
+    ensure!(
+        new.contains("use std::collections::HashMap;") && new.contains("let map = HashMap"),
+        "accepting HashMap gave:\n{new}"
+    );
+    Ok(())
+}
+
+/// The completion items at `cursor`, asked for until one of them satisfies `wanted`.
+async fn completion_until(
+    manager: &LanguageManager,
+    file: &Path,
+    text: &str,
+    cursor: usize,
+    wanted: impl Fn(&CompletionItem) -> bool,
+) -> Result<Vec<CompletionItem>> {
+    let params = completion_params(text, cursor, None, &[], false)?;
+    let wanted = &wanted;
+    let reply = retry(|| {
+        let params = params.clone();
+        async move {
+            let mut reply = manager
+                .request("textDocument/completion", file, "fixture", text, params)
+                .await?;
+            // A reply without the wanted item counts as no answer, so it is asked again.
+            if !completion_items(reply.value.clone())?.0.iter().any(wanted) {
+                reply.value = Value::Null;
+            }
+            Ok(reply)
+        }
+    })
+    .await?;
+    Ok(completion_items(reply.value)?.0)
 }
 
 async fn python_checks(project: &Path, checks: &mut Checks) {
@@ -298,7 +448,6 @@ fn set_text(manager: &LanguageManager, docs: &mut Vec<LanguageDocument>, path: &
 
 /// Repeats `request` until the server answers with something other than `null` or `[]`
 /// (up to 40 tries, 250 ms apart), and returns the last attempt.
-#[allow(dead_code)] // The feature checks of later tasks use it.
 async fn retry<F, R>(mut request: F) -> Result<LanguageReply>
 where
     F: FnMut() -> R,
