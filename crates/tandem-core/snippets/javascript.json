@@ -1,0 +1,12 @@
+{
+	"Require": {
+		"prefix": "require",
+		"body": "const ${1:name} = require(\"${2:module}\");",
+		"description": "Loads a CommonJS module."
+	},
+	"Module exports": {
+		"prefix": "exports",
+		"body": ["module.exports = {", "\t$0", "};"],
+		"description": "Sets the CommonJS module's exports."
+	}
+}

@@ -1,0 +1,79 @@
+{
+	"Function": {
+		"prefix": "func",
+		"body": ["func ${1:name}($2) -> ${3:Void} {", "\t$0", "}"],
+		"description": "A function with a return type."
+	},
+	"Class": {
+		"prefix": "class",
+		"body": ["class ${1:Name} {", "\t$0", "}"],
+		"description": "A class."
+	},
+	"Struct": {
+		"prefix": "struct",
+		"body": ["struct ${1:Name} {", "\t$0", "}"],
+		"description": "A struct."
+	},
+	"Enum": {
+		"prefix": "enum",
+		"body": ["enum ${1:Name} {", "\tcase ${2:value}", "}"],
+		"description": "An enum with one case."
+	},
+	"Protocol": {
+		"prefix": "protocol",
+		"body": ["protocol ${1:Name} {", "\t$0", "}"],
+		"description": "A protocol."
+	},
+	"Extension": {
+		"prefix": "extension",
+		"body": ["extension ${1:Type} {", "\t$0", "}"],
+		"description": "An extension of a type."
+	},
+	"Initializer": {
+		"prefix": "init",
+		"body": ["init($1) {", "\t$0", "}"],
+		"description": "An initializer."
+	},
+	"If": {
+		"prefix": "if",
+		"body": ["if ${1:condition} {", "\t$0", "}"],
+		"description": "An if statement."
+	},
+	"If let": {
+		"prefix": "iflet",
+		"body": ["if let ${1:value} = ${2:optional} {", "\t$0", "}"],
+		"description": "Unwraps an optional with if let."
+	},
+	"Guard let": {
+		"prefix": "guard",
+		"body": ["guard let ${1:value} = ${2:optional} else {", "\t${3:return}", "}"],
+		"description": "Unwraps an optional with guard let."
+	},
+	"For loop": {
+		"prefix": "for",
+		"body": ["for ${1:item} in ${2:items} {", "\t$0", "}"],
+		"description": "A for loop over a sequence."
+	},
+	"Switch": {
+		"prefix": "switch",
+		"body": [
+			"switch ${1:value} {",
+			"case ${2:pattern}:",
+			"\t$0",
+			"default:",
+			"\tbreak",
+			"}"
+		],
+		"description": "A switch statement with a default case."
+	},
+	"Do catch": {
+		"prefix": "do",
+		"body": ["do {", "\t$1", "} catch {", "\t$0", "}"],
+		"description": "A do statement with a catch clause."
+	},
+	"Print": {
+		"prefix": "print",
+		"body": "print($1)",
+		"description": "Prints to standard output."
+	}
+}

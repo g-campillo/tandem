@@ -1,0 +1,69 @@
+{
+	"Media query": {
+		"prefix": "media",
+		"body": ["@media (${1:max-width: 768px}) {", "\t$0", "}"],
+		"description": "A media query."
+	},
+	"Flexbox": {
+		"prefix": "flex",
+		"body": [
+			"display: flex;",
+			"justify-content: ${1|center,flex-start,flex-end,space-between,space-around|};",
+			"align-items: ${2|center,flex-start,flex-end,stretch|};"
+		],
+		"description": "A flex container with its alignment."
+	},
+	"Grid": {
+		"prefix": "grid",
+		"body": [
+			"display: grid;",
+			"grid-template-columns: ${1:repeat(3, 1fr)};",
+			"gap: ${2:1rem};"
+		],
+		"description": "A grid container with its columns and gap."
+	},
+	"Root variables": {
+		"prefix": "root",
+		"body": [":root {", "\t--${1:name}: ${2:value};", "}"],
+		"description": "Custom properties on the root element."
+	},
+	"Variable": {
+		"prefix": "var",
+		"body": "var(--${1:name})",
+		"description": "Reads a custom property."
+	},
+	"Keyframes": {
+		"prefix": "keyframes",
+		"body": [
+			"@keyframes ${1:name} {",
+			"\tfrom {",
+			"\t\t$2",
+			"\t}",
+			"\tto {",
+			"\t\t$0",
+			"\t}",
+			"}"
+		],
+		"description": "An animation's keyframes."
+	},
+	"Font face": {
+		"prefix": "fontface",
+		"body": [
+			"@font-face {",
+			"\tfont-family: \"${1:Name}\";",
+			"\tsrc: url(\"${2:font.woff2}\") format(\"woff2\");",
+			"}"
+		],
+		"description": "A web font."
+	},
+	"Transition": {
+		"prefix": "transition",
+		"body": "transition: ${1:all} ${2:200ms} ${3:ease};",
+		"description": "A transition."
+	},
+	"Import": {
+		"prefix": "import",
+		"body": "@import url(\"${1:file.css}\");",
+		"description": "Imports another stylesheet."
+	}
+}

@@ -1,0 +1,79 @@
+{
+	"Function": {
+		"prefix": "def",
+		"body": ["def ${1:name}($2):", "\t${3:pass}"],
+		"description": "A function."
+	},
+	"Async function": {
+		"prefix": "adef",
+		"body": ["async def ${1:name}($2):", "\t${3:pass}"],
+		"description": "An async function."
+	},
+	"Class": {
+		"prefix": "class",
+		"body": ["class ${1:Name}:", "\tdef __init__(self$2):", "\t\t${3:pass}"],
+		"description": "A class with an initializer."
+	},
+	"If": {
+		"prefix": "if",
+		"body": ["if ${1:condition}:", "\t${2:pass}"],
+		"description": "An if statement."
+	},
+	"If main": {
+		"prefix": "ifmain",
+		"body": ["if __name__ == \"__main__\":", "\t${1:main()}"],
+		"description": "Runs code when the file is run as a script."
+	},
+	"For loop": {
+		"prefix": "for",
+		"body": ["for ${1:item} in ${2:items}:", "\t${3:pass}"],
+		"description": "A for loop over an iterable."
+	},
+	"While loop": {
+		"prefix": "while",
+		"body": ["while ${1:condition}:", "\t${2:pass}"],
+		"description": "A while loop."
+	},
+	"Try": {
+		"prefix": "try",
+		"body": ["try:", "\t${1:pass}", "except ${2:Exception} as ${3:error}:", "\t${4:raise}"],
+		"description": "A try statement with an except clause."
+	},
+	"With": {
+		"prefix": "with",
+		"body": ["with ${1:expression} as ${2:name}:", "\t${3:pass}"],
+		"description": "A with statement."
+	},
+	"Dataclass": {
+		"prefix": "dataclass",
+		"body": ["@dataclass", "class ${1:Name}:", "\t${2:field}: ${3:int}"],
+		"description": "A dataclass with one field."
+	},
+	"Property": {
+		"prefix": "property",
+		"body": ["@property", "def ${1:name}(self):", "\treturn self._$1"],
+		"description": "A read-only property."
+	},
+	"Test": {
+		"prefix": "test",
+		"body": ["def test_${1:name}():", "\t${2:assert True}"],
+		"description": "A test function."
+	},
+	"Main function": {
+		"prefix": "main",
+		"body": [
+			"def main():",
+			"\t${1:pass}",
+			"",
+			"",
+			"if __name__ == \"__main__\":",
+			"\tmain()"
+		],
+		"description": "A main function and the code that runs it."
+	},
+	"Lambda": {
+		"prefix": "lambda",
+		"body": "lambda ${1:args}: ${2:expression}",
+		"description": "A lambda expression."
+	}
+}

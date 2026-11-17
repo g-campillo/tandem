@@ -1,0 +1,95 @@
+{
+	"Console log": {
+		"prefix": "log",
+		"body": "console.log($1);",
+		"description": "Logs to the console."
+	},
+	"Function": {
+		"prefix": "function",
+		"body": ["function ${1:name}($2) {", "\t$0", "}"],
+		"description": "A function declaration."
+	},
+	"Arrow function": {
+		"prefix": "arrow",
+		"body": ["const ${1:name} = ($2) => {", "\t$0", "};"],
+		"description": "An arrow function assigned to a constant."
+	},
+	"Async function": {
+		"prefix": "async",
+		"body": ["async function ${1:name}($2) {", "\t$0", "}"],
+		"description": "An async function declaration."
+	},
+	"If": {
+		"prefix": "if",
+		"body": ["if (${1:condition}) {", "\t$0", "}"],
+		"description": "An if statement."
+	},
+	"If else": {
+		"prefix": "ifelse",
+		"body": ["if (${1:condition}) {", "\t$2", "} else {", "\t$0", "}"],
+		"description": "An if statement with an else branch."
+	},
+	"For loop": {
+		"prefix": "for",
+		"body": ["for (let ${1:i} = 0; $1 < ${2:array}.length; $1++) {", "\t$0", "}"],
+		"description": "A for loop over an array's indexes."
+	},
+	"For of loop": {
+		"prefix": "forof",
+		"body": ["for (const ${1:item} of ${2:items}) {", "\t$0", "}"],
+		"description": "A for loop over the values of an iterable."
+	},
+	"For in loop": {
+		"prefix": "forin",
+		"body": ["for (const ${1:key} in ${2:object}) {", "\t$0", "}"],
+		"description": "A for loop over the keys of an object."
+	},
+	"While loop": {
+		"prefix": "while",
+		"body": ["while (${1:condition}) {", "\t$0", "}"],
+		"description": "A while loop."
+	},
+	"Try catch": {
+		"prefix": "try",
+		"body": ["try {", "\t$1", "} catch (${2:error}) {", "\t$0", "}"],
+		"description": "A try statement with a catch clause."
+	},
+	"Switch": {
+		"prefix": "switch",
+		"body": [
+			"switch (${1:value}) {",
+			"\tcase ${2:value}:",
+			"\t\t$0",
+			"\t\tbreak;",
+			"\tdefault:",
+			"\t\tbreak;",
+			"}"
+		],
+		"description": "A switch statement with a default case."
+	},
+	"Import": {
+		"prefix": "import",
+		"body": "import { $2 } from \"${1:module}\";",
+		"description": "Imports names from a module."
+	},
+	"Class": {
+		"prefix": "class",
+		"body": ["class ${1:Name} {", "\tconstructor($2) {", "\t\t$0", "\t}", "}"],
+		"description": "A class with a constructor."
+	},
+	"Timeout": {
+		"prefix": "timeout",
+		"body": ["setTimeout(() => {", "\t$0", "}, ${1:1000});"],
+		"description": "Runs code after a delay."
+	},
+	"Describe": {
+		"prefix": "describe",
+		"body": ["describe(\"${1:subject}\", () => {", "\t$0", "});"],
+		"description": "A group of tests."
+	},
+	"It": {
+		"prefix": "it",
+		"body": ["it(\"${1:does something}\", () => {", "\t$0", "});"],
+		"description": "A test."
+	}
+}
