@@ -10,6 +10,7 @@ use tandem_lsp::features::capabilities::ServerFeatures;
 use tandem_lsp::features::completion::{
     accept_item, completion_items, completion_params, word_start,
 };
+use tandem_lsp::features::highlights::document_highlights;
 use tandem_lsp::features::signature::{signature_help, signature_params, signature_view};
 use tandem_lsp::*;
 
@@ -158,7 +159,54 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
         "rust signature",
         signature(&manager, &mut docs, &lib, &probe).await,
     );
+    checks.record(
+        "rust highlights",
+        highlights(&manager, &mut docs, &lib).await,
+    );
     manager.stop();
+}
+
+/// With the cursor on `total` in `let mut total`, the server highlights at least three
+/// uses of `total`, one of them a write.
+async fn highlights(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    lib: &Path,
+) -> Result<()> {
+    set_text(manager, docs, lib, RUST_LIB);
+    let params = at(RUST_LIB, "let mut total", "let mut ".len());
+    let reply = retry(|| {
+        let params = params.clone();
+        async move {
+            manager
+                .request(
+                    "textDocument/documentHighlight",
+                    lib,
+                    "fixture",
+                    RUST_LIB,
+                    params,
+                )
+                .await
+        }
+    })
+    .await?;
+    let found = document_highlights(RUST_LIB, &reply.value);
+    ensure!(
+        found.len() >= 3,
+        "{} highlight(s) of total, not at least 3: {found:?}",
+        found.len()
+    );
+    ensure!(
+        found.iter().any(|(_, write)| *write),
+        "no highlight of total is a write: {found:?}"
+    );
+    ensure!(
+        found
+            .iter()
+            .all(|(range, _)| &RUST_LIB[range.clone()] == "total"),
+        "a highlight is not total: {found:?}"
+    );
+    Ok(())
 }
 
 /// In `text`, the parameter hints right after `describe(1.0, ` describe `describe` with
@@ -512,7 +560,6 @@ where
 }
 
 /// Position parameters for `delta` bytes after the first `needle` in `text`.
-#[allow(dead_code)] // The feature checks of later tasks use it.
 fn at(text: &str, needle: &str, delta: usize) -> Value {
     position_params(text, text.find(needle).unwrap() + delta).unwrap()
 }

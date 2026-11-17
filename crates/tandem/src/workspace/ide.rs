@@ -1,8 +1,10 @@
 //! Tandem's IDE layer over the toolkit editor: the per-language editing rules, the
 //! corrections made right after a keystroke (indentation and tag closing), Tandem's own
-//! completion list, the tab stops of inserted snippets and the parameter hints. Every edit
-//! this layer makes to a buffer goes through [`Workspace::ide_replace`], one undo step each.
+//! completion list, the tab stops of inserted snippets, the parameter hints and the
+//! highlights of the symbol under the cursor. Every edit this layer makes to a buffer goes
+//! through [`Workspace::ide_replace`], one undo step each.
 mod complete;
+mod highlights;
 mod icons;
 mod popup;
 mod rules;
@@ -15,9 +17,10 @@ use super::fonts::Face;
 use super::*;
 use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InputEdit, MoveDown, MovePageDown, MovePageUp, MoveUp,
-    OutdentInline, RangeDecorationCollection, Rope,
+    OutdentInline, OverviewRulerDecorationCollection, RangeDecorationCollection, Rope,
 };
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use tandem_core::edit::Edit;
@@ -47,6 +50,9 @@ pub(super) struct IdeUi {
     signature: Option<signature::SignatureState>,
     /// Counts the parameter hints shown, so each reply's documentation starts afresh.
     hints: u64,
+    /// The search for the uses of the symbol under the cursor, waiting or in flight, with
+    /// the editor it is for; dropping it cancels it.
+    highlight_task: Option<(EntityId, Task<()>)>,
     /// What the key listeners may take, kept current with the popups.
     keys: Rc<Cell<KeyClaim>>,
 }
@@ -89,6 +95,12 @@ struct TabIde {
     session: Option<SnippetSession>,
     /// Where the snippet's tab stops are drawn, created on first use.
     placeholders: Option<RangeDecorationCollection>,
+    /// Where the uses of the symbol under the cursor are drawn, in the text and on the
+    /// scrollbar, created on first use.
+    highlights: Option<(RangeDecorationCollection, OverviewRulerDecorationCollection)>,
+    /// The selection when the highlights last followed the cursor, so a move can be told
+    /// from a redraw and from an edit.
+    highlight_selection: Range<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -387,12 +399,14 @@ impl Workspace {
             if matches!(event, InputEvent::Blur) {
                 view.completion_blurred(editor, cx);
                 view.signature_blurred(editor, cx);
+                view.highlights_blurred(editor, cx);
             }
         });
         let moved = cx.observe(editor, |view, editor, cx| {
             view.completion_moved(&editor, cx);
             view.snippet_moved(&editor, cx);
             view.signature_moved(&editor, cx);
+            view.highlight_moved(&editor, cx);
         });
         let triggers = Rc::new(RefCell::new(Vec::new()));
         let source = Rc::new(complete::CompletionSource {
@@ -414,6 +428,8 @@ impl Workspace {
                 triggers,
                 session: None,
                 placeholders: None,
+                highlights: None,
+                highlight_selection: editor.read(cx).selected_range(),
                 _subscriptions: vec![edits, blur, moved],
             },
         );
@@ -556,10 +572,11 @@ impl Workspace {
         }
     }
 
-    /// Follows a user edit: keeps the snippet session in step with it, corrects a single
+    /// Follows an edit: any edit clears the highlights of the symbol under the cursor. A
+    /// user edit also keeps the snippet session in step with it, corrects a single
     /// keystroke (see `typing_correction`) as its own undo step, then keeps the completion
-    /// list and the parameter hints in step with the text. Edits made by `ide_replace` are
-    /// skipped.
+    /// list and the parameter hints in step with the text; edits made by `ide_replace` skip
+    /// that.
     fn ide_edits(
         &mut self,
         editor: &Entity<EditorState>,
@@ -567,6 +584,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.highlights_edited(editor, cx);
         let Some(tab) = self.ide.tabs.get_mut(&editor.entity_id()) else {
             return;
         };
