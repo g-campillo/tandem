@@ -120,8 +120,9 @@ pub fn server_config(
             config.path = node.parent().map(Path::to_path_buf).into_iter().collect();
             (config.initialization_options, config.configuration) = node_settings(*kind);
             config.push_configuration = true;
-            // These servers pull diagnostics when the client declares textDocument.diagnostic, as
-            // Tandem does; `Settled` covers a push fallback.
+            // The HTML, CSS and JSON servers pull diagnostics when the client declares
+            // textDocument.diagnostic, as Tandem does; svelte-language-server pushes them without
+            // versions. `Settled` takes either.
             config.diagnostics = DiagnosticMode::Settled;
             config.start_timeout = Duration::from_secs(30);
             config.request_timeout = Duration::from_secs(30);
@@ -146,6 +147,9 @@ fn node_settings(server: NodeServer) -> (Value, Value) {
             json!({"provideFormatter":true,"handledSchemaProtocols":["file"]}),
             json!({"json":{"validate":{"enable":true},"format":{"enable":true},"schemas":[]}}),
         ),
+        // Its defaults: checks with its own TypeScript, formats with its bundled
+        // prettier-plugin-svelte, and pushes diagnostics without versions, which `Settled` takes.
+        NodeServer::Svelte => (json!({}), json!({})),
     }
 }
 
@@ -575,6 +579,43 @@ mod tests {
             json.configuration,
             json!({"json":{"validate":{"enable":true},"format":{"enable":true},"schemas":[]}})
         );
+    }
+
+    #[test]
+    fn svelte_config_uses_settled_diagnostics() {
+        let script = PathBuf::from("/n/lib/node_modules/svelte-language-server/bin/server.js");
+        let tools = tandem_core::ServerTools {
+            name: "svelte".into(),
+            title: "svelte-language-server 0.17.21".into(),
+            languages: vec!["svelte".into()],
+            launch: tandem_core::Launch::Node {
+                node: "/n/bin/node".into(),
+                script: script.clone(),
+                server: NodeServer::Svelte,
+            },
+        };
+        let cache = Path::new("/state/language-cache/p/svelte/svelte");
+        let config = server_config(&tools, Path::new("/work/app"), cache);
+        assert_eq!(config.name, "svelte-language-server 0.17.21");
+        assert_eq!(config.program, PathBuf::from("/n/bin/node"));
+        assert_eq!(
+            config.args,
+            vec![OsString::from(script), OsString::from("--stdio")]
+        );
+        assert_eq!(config.project, PathBuf::from("/work/app"));
+        assert_eq!(config.cache, cache);
+        assert_eq!(config.path, vec![PathBuf::from("/n/bin")]);
+        assert!(config.env.is_empty());
+        assert_eq!(config.initialization_options, json!({}));
+        assert_eq!(config.configuration, json!({}));
+        assert!(config.push_configuration);
+        assert!(!config.resend_on_change);
+        assert_eq!(config.capabilities, json!({}));
+        // svelte-language-server pushes diagnostics without versions.
+        assert_eq!(config.diagnostics, DiagnosticMode::Settled);
+        assert_eq!(config.start_timeout, Duration::from_secs(30));
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.ready_detail, "svelte-language-server 0.17.21 ready");
     }
 
     #[test]

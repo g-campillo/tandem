@@ -1,6 +1,7 @@
 mod java;
 mod node;
 mod servers;
+mod svelte;
 mod swift;
 mod typescript;
 mod web;

@@ -1,6 +1,6 @@
 //! Language servers beyond Rust and Python: where Tandem looks, what it found and what is
 //! missing. Discovery inspects files only; it never runs a tool or an installer.
-use super::{file_hash, java, swift, typescript, web};
+use super::{file_hash, java, svelte, swift, typescript, web};
 use crate::{ToolKind, content_hash};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,8 @@ pub enum NodeServer {
     Css,
     /// vscode-langservers-extracted's JSON server, which also serves JSON with Comments.
     Json,
+    /// svelte-language-server, with the TypeScript and prettier-plugin-svelte it brings along.
+    Svelte,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +126,7 @@ pub const SERVER_KINDS: &[(ToolKind, Discover)] = &[
     (ToolKind::Java, java::discover),
     (ToolKind::Swift, swift::discover),
     (ToolKind::TypeScript, typescript::discover),
+    (ToolKind::Svelte, svelte::discover),
     (ToolKind::Web, web::discover),
 ];
 
