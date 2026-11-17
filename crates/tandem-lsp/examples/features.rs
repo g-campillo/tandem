@@ -1,6 +1,6 @@
 //! Live check of the IDE features against the installed rust-analyzer and Pyright.
 //! Run from the repository root:
-//! `cargo run -p tandem-lsp --example features [rust|python] [--with-autoimport]`.
+//! `cargo run -p tandem-lsp --example features [rust|python]`.
 use anyhow::{Context, Result, bail, ensure};
 use lsp_types::{CompletionItem, InsertTextFormat};
 use serde_json::{Value, json};
@@ -65,25 +65,20 @@ fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
-    // rust-analyzer offers import completions only once Tandem switches them on.
-    let with_autoimport = arguments
-        .iter()
-        .any(|argument| argument == "--with-autoimport");
-    arguments.retain(|argument| argument != "--with-autoimport");
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
     let (rust, python) = match arguments.as_slice() {
         [] => (true, true),
         [only] if only == "rust" => (true, false),
         [only] if only == "python" => (false, true),
         other => bail!(
-            "Unknown arguments {}; pass rust, python or nothing, and optionally --with-autoimport",
+            "Unknown arguments {}; pass rust, python or nothing",
             other.join(" ")
         ),
     };
     let root = std::env::current_dir()?.join(".tandem-local/ide-features");
     let mut checks = Checks::default();
     if rust {
-        rust_checks(&root.join("rust"), with_autoimport, &mut checks).await;
+        rust_checks(&root.join("rust"), &mut checks).await;
     }
     if python {
         python_checks(&root.join("python"), &mut checks).await;
@@ -115,7 +110,7 @@ impl Checks {
     }
 }
 
-async fn rust_checks(project: &Path, with_autoimport: bool, checks: &mut Checks) {
+async fn rust_checks(project: &Path, checks: &mut Checks) {
     let lib = project.join("src/lib.rs");
     let started = async {
         write_rust_fixture(project)?;
@@ -153,12 +148,10 @@ async fn rust_checks(project: &Path, with_autoimport: bool, checks: &mut Checks)
         "rust completion_snippet",
         completion_snippet(&manager, &mut docs, &lib).await,
     );
-    if with_autoimport {
-        checks.record(
-            "rust completion_autoimport",
-            completion_autoimport(&manager, &mut docs, &lib).await,
-        );
-    }
+    checks.record(
+        "rust completion_autoimport",
+        completion_autoimport(&manager, &mut docs, &lib).await,
+    );
     manager.stop();
 }
 

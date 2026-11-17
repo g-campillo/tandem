@@ -38,6 +38,8 @@ pub(super) struct IdeUi {
     snippet_errors: HashSet<String>,
     /// Counts the completion lists opened, so each one's documentation starts afresh.
     lists: u64,
+    /// An accepted completion waiting for its details; dropping it cancels it.
+    accepting: Option<Task<()>>,
     /// What the key listeners may take, kept current with the popups.
     keys: Rc<Cell<KeyClaim>>,
 }

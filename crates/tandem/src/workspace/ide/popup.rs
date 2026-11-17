@@ -138,8 +138,7 @@ pub(super) fn completion_list(
         .map(|row| (row.candidate, &list.candidates[row.candidate]));
     let details = selected.and_then(|(candidate, entry)| match entry.source {
         Source::Server(item) => list
-            .items
-            .get(item)
+            .item(item)
             .and_then(|item| details(item, list.serial, candidate, cx)),
         _ => None,
     });

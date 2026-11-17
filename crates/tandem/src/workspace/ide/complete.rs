@@ -4,7 +4,9 @@
 use super::*;
 use gpui_kit::component::input::{CompletionProvider, Rope};
 use lsp_types::{CompletionContext, CompletionItem, CompletionResponse, CompletionTriggerKind};
+use std::time::Duration;
 use tandem_core::edit::snippet::library::{self, SnippetDef};
+use tandem_core::edit::syntax::likely_in_string_or_comment;
 use tandem_lsp::features::completion::{Candidate, Ranked, Source};
 
 /// The most entries a list ranks.
@@ -15,6 +17,12 @@ pub(super) const VISIBLE_ROWS: usize = 12;
 const PAGE_ROWS: isize = 12;
 /// The height of a row, which is also one row of wheel movement.
 pub(super) const ROW_HEIGHT: f32 = 22.;
+/// How long the selection rests on a server entry before its details are asked for.
+const DETAILS_DELAY: Duration = Duration::from_millis(120);
+/// How long accepting a server entry waits for its details (the import it adds) at most.
+const ACCEPT_WAIT: Duration = Duration::from_millis(800);
+/// The client command of an entry that asks for the list again at the new cursor.
+const TRIGGER_SUGGEST: &str = "editor.action.triggerSuggest";
 
 /// Answers the toolkit's completion requests for one tab's editor, for the life of the
 /// tab: with nothing, so the toolkit's own list never opens, while it asks the workspace
@@ -70,7 +78,11 @@ pub(in crate::workspace) struct CompletionState {
     /// The cursor when the entries were asked for.
     request_cursor: usize,
     /// The language server's entries.
-    pub(super) items: Vec<CompletionItem>,
+    items: Vec<CompletionItem>,
+    /// Server entries whose details came since the list opened, by their index in `items`.
+    resolved: HashMap<usize, CompletionItem>,
+    /// The entry whose details are asked for, and that request; dropping it cancels it.
+    resolving: Option<(usize, Task<()>)>,
     snippets: Vec<SnippetDef>,
     /// Everything the list can offer, from the server's entries and the snippets.
     pub(super) candidates: Vec<Candidate>,
@@ -101,6 +113,8 @@ impl CompletionState {
             word_start,
             request_cursor: cursor,
             items: Vec::new(),
+            resolved: HashMap::new(),
+            resolving: None,
             snippets: Vec::new(),
             candidates: Vec::new(),
             ranked: Vec::new(),
@@ -124,6 +138,20 @@ impl CompletionState {
     fn start(&self) -> usize {
         list_start(&self.candidates, self.word_start)
     }
+
+    /// The server entry at `index` in `items`, with its details once they came.
+    pub(super) fn item(&self, index: usize) -> Option<&CompletionItem> {
+        self.resolved.get(&index).or_else(|| self.items.get(index))
+    }
+
+    /// The index in `items` of the selected row's entry, when it is the server's.
+    fn selected_item(&self) -> Option<usize> {
+        let row = self.ranked.get(self.selected)?;
+        match self.candidates.get(row.candidate)?.source {
+            Source::Server(index) => Some(index),
+            Source::Snippet(_) | Source::Choice(_) => None,
+        }
+    }
 }
 
 /// What a list is asked for: the editor's text and cursor at that moment, and how.
@@ -144,7 +172,8 @@ impl Workspace {
     /// Opens or refines the completion list of `editor` after the toolkit asked for
     /// completions: typing `typed` asked, or the user did (`invoked`). A word character
     /// typed into a complete list for the same word only ranks it again; anything else
-    /// asks again.
+    /// asks again, except a word character typed inside a string or a comment, which
+    /// opens nothing there.
     pub(in crate::workspace) fn completion_requested(
         &mut self,
         editor: EntityId,
@@ -177,6 +206,17 @@ impl Workspace {
         };
         if refine {
             self.refresh_completion(cx);
+            return;
+        }
+        // A list asked for again because it was incomplete goes on wherever it opened.
+        if !retrigger
+            && !should_auto_request(
+                invoked,
+                typed,
+                word_char,
+                likely_in_string_or_comment(&text, cursor, target.language),
+            )
+        {
             return;
         }
         let asked = Asked {
@@ -456,10 +496,133 @@ impl Workspace {
         }
     }
 
-    /// Tells the key listeners whether the list is on screen, and redraws.
+    /// Tells the key listeners whether the list is on screen, asks for the selected
+    /// entry's details, and redraws.
     fn completion_changed(&mut self, cx: &mut Context<Self>) {
         self.ide.sync_keys();
+        self.resolve_selected(cx);
         cx.notify();
+    }
+
+    /// Asks for the details of the selected server entry once the selection has rested on
+    /// it for a moment, when it came without documentation and the server resolves
+    /// entries. A newer selection cancels the older request.
+    fn resolve_selected(&mut self, cx: &mut Context<Self>) {
+        let resolves = self
+            .ide_target()
+            .and_then(|target| target.manager)
+            .is_some_and(|manager| resolves_entries(&manager));
+        let Some(list) = self.ide.completion.as_mut() else {
+            return;
+        };
+        let wanted = list.selected_item().filter(|&index| {
+            selection_wants_details(
+                &list.items[index],
+                list.resolved.contains_key(&index),
+                resolves,
+            )
+        });
+        let Some(index) = wanted else {
+            list.resolving = None;
+            return;
+        };
+        if list
+            .resolving
+            .as_ref()
+            .is_some_and(|(resolving, _)| *resolving == index)
+        {
+            return;
+        }
+        let serial = list.serial;
+        let task = cx.spawn(async move |view, cx| {
+            smol::Timer::after(DETAILS_DELAY).await;
+            let request = view.update(cx, |view, cx| view.resolve_listed(serial, index, cx));
+            let Ok(Some(request)) = request else {
+                return;
+            };
+            let reply = request.await;
+            view.update(cx, |view, cx| {
+                view.completion_resolved(serial, index, reply, cx)
+            })
+            .ok();
+        });
+        list.resolving = Some((index, task));
+    }
+
+    /// The request for the details of entry `index` of the list numbered `serial`, while
+    /// that list is open.
+    fn resolve_listed(
+        &mut self,
+        serial: u64,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<CompletionItem>>> {
+        let list = self
+            .ide
+            .completion
+            .as_ref()
+            .filter(|list| list.serial == serial)?;
+        let (editor, item) = (list.editor_id, list.items.get(index)?.clone());
+        self.resolve_completion(editor, &item, cx)
+    }
+
+    /// Keeps the details of entry `index` for the list numbered `serial`, so the
+    /// documentation beside the list shows them and accepting the entry uses them. A
+    /// failed request leaves the entry as it was, to be asked for again.
+    fn completion_resolved(
+        &mut self,
+        serial: u64,
+        index: usize,
+        reply: Result<CompletionItem>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(list) = self
+            .ide
+            .completion
+            .as_mut()
+            .filter(|list| list.serial == serial)
+        else {
+            return;
+        };
+        // This runs inside the request's own task; dropping its handle lets it finish.
+        if list
+            .resolving
+            .as_ref()
+            .is_some_and(|(resolving, _)| *resolving == index)
+        {
+            list.resolving = None;
+        }
+        if let Ok(item) = reply {
+            list.resolved.insert(index, item);
+            cx.notify();
+        }
+    }
+
+    /// Asks the language server of the active tab for the details of `item` listed in
+    /// `editor` (its documentation, and the edits it adds, such as an import); `None` when
+    /// that tab is not on screen or its server does not resolve entries. The details
+    /// describe the entry rather than the text, so they hold after an edit made while
+    /// they were asked for.
+    fn resolve_completion(
+        &mut self,
+        editor: EntityId,
+        item: &CompletionItem,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<CompletionItem>>> {
+        let target = self
+            .ide_target()
+            .filter(|target| target.editor.entity_id() == editor)?;
+        let manager = target.manager.filter(resolves_entries)?;
+        let params = serde_json::to_value(item).ok()?;
+        self.sync_language(cx);
+        let text = target.editor.read(cx).text().to_string();
+        let (file, instance) = (target.file, target.instance);
+        Some(cx.background_spawn(async move {
+            let reply = manager
+                .request("completionItem/resolve", &file, &instance, &text, params)
+                .await?;
+            Ok(serde_json::from_value(reply.value)?)
+        }))
     }
 
     /// Handles a key for the completion list of the `focused` editor: Up and Down move the
@@ -502,6 +665,7 @@ impl Workspace {
         };
         list.selected = selected;
         list.top = visible_top(selected, list.top, len, VISIBLE_ROWS);
+        self.resolve_selected(cx);
         cx.notify();
         true
     }
@@ -522,8 +686,10 @@ impl Workspace {
     }
 
     /// Accepts the row at `index`: a server entry through `completion::accept_item`, a
-    /// snippet through `accept_snippet`. The edit is one undo step the toolkit does not
-    /// see as typing; the selection then goes where the entry says.
+    /// snippet through `accept_snippet`. A server entry that may still lack the edits it
+    /// adds (an import) waits up to `ACCEPT_WAIT` for its details when the server resolves
+    /// entries, and goes in as it is when they do not come in time. Accepting again
+    /// replaces an entry still waiting.
     pub(super) fn accept_completion(
         &mut self,
         index: usize,
@@ -533,6 +699,7 @@ impl Workspace {
         let Some(list) = self.ide.completion.take() else {
             return;
         };
+        self.ide.accepting = None;
         self.completion_changed(cx);
         let Some(candidate) = list
             .ranked
@@ -547,8 +714,79 @@ impl Workspace {
         else {
             return;
         };
+        let (insertion, wait) = match candidate.source {
+            Source::Server(index) => {
+                let cached = list.resolved.get(&index);
+                let item = resolved_item(cached, &list.items[index]);
+                let resolves = target.manager.as_ref().is_some_and(resolves_entries);
+                let wait = accept_waits_for_details(&item, cached.is_some(), resolves);
+                (Insertion::Item(Box::new(item)), wait)
+            }
+            Source::Snippet(snippet) => (
+                Insertion::Snippet(list.snippets[snippet].body.clone()),
+                false,
+            ),
+            // A snippet's choices are offered only while its session runs.
+            Source::Choice(_) => return,
+        };
+        let start = list.start();
+        let at = {
+            let state = target.editor.read(cx);
+            AcceptedAt {
+                start,
+                request_cursor: list.request_cursor,
+                cursor: state.cursor(),
+                prefix: text_before(state.text(), start),
+            }
+        };
+        let mut accepted = Accepted {
+            editor: list.editor_id,
+            word_start: list.word_start,
+            at,
+            insertion,
+        };
+        let details = match &accepted.insertion {
+            Insertion::Item(item) if wait => self.resolve_completion(accepted.editor, item, cx),
+            _ => None,
+        };
+        let Some(details) = details else {
+            self.insert_accepted(accepted, window, cx);
+            return;
+        };
+        self.ide.accepting = Some(cx.spawn_in(window, async move |view, cx| {
+            let timeout = async {
+                smol::Timer::after(ACCEPT_WAIT).await;
+                None
+            };
+            // On a timeout the request is dropped, which cancels it.
+            let resolved = smol::future::or(async { details.await.ok() }, timeout).await;
+            if let (Some(resolved), Insertion::Item(item)) = (resolved, &mut accepted.insertion) {
+                **item = resolved;
+            }
+            view.update_in(cx, |view, window, cx| {
+                view.insert_accepted(accepted, window, cx)
+            })
+            .ok();
+        }));
+    }
+
+    /// Puts an accepted entry into its editor, planned with the editor's text and cursor
+    /// at this moment. Nothing happens when that editor is no longer the active tab's on
+    /// screen or the accepted word is gone (see `AcceptedAt::still_applies`). The edit is
+    /// one undo step the toolkit does not see as typing; the selection then goes where
+    /// the entry says, and an entry that asks for the list again gets it at the new cursor.
+    fn insert_accepted(&mut self, accepted: Accepted, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self
+            .ide_target()
+            .filter(|target| target.editor.entity_id() == accepted.editor)
+        else {
+            return;
+        };
         let (text, cursor, selection) = {
             let state = target.editor.read(cx);
+            if !accepted.at.still_applies(state.text(), state.cursor()) {
+                return;
+            }
             let text = state.text().to_string();
             let selection = text
                 .get(state.selected_range())
@@ -556,27 +794,34 @@ impl Workspace {
                 .to_string();
             (text, state.cursor(), selection)
         };
+        // A list opened while the entry waited is about the word the entry replaces.
+        if self
+            .ide
+            .completion
+            .as_ref()
+            .is_some_and(|list| list.editor_id == accepted.editor)
+        {
+            self.close_completion(cx);
+        }
         let variables = self.snippet_variables(&target, &text, cursor, &selection, cx);
-        let plan = match candidate.source {
-            Source::Server(item) => completion::accept_item(
+        let plan = match &accepted.insertion {
+            Insertion::Item(item) => completion::accept_item(
                 &text,
                 cursor,
-                list.request_cursor,
-                list.word_start,
-                &list.items[item],
+                accepted.at.request_cursor,
+                accepted.word_start,
+                item,
                 &variables,
                 target.unit,
             ),
-            Source::Snippet(snippet) => Ok(completion::accept_snippet(
+            Insertion::Snippet(body) => Ok(completion::accept_snippet(
                 &text,
                 cursor,
-                list.word_start,
-                &list.snippets[snippet].body,
+                accepted.word_start,
+                body,
                 &variables,
                 target.unit,
             )),
-            // A snippet's choices are offered only while its session runs.
-            Source::Choice(_) => return,
         };
         let plan = match plan {
             Ok(plan) => plan,
@@ -595,6 +840,24 @@ impl Workspace {
         target.editor.update(cx, |editor, cx| {
             editor.set_selected_range(plan.selection.clone(), cx)
         });
+        if plan
+            .command
+            .is_some_and(|command| command.command == TRIGGER_SUGGEST)
+        {
+            self.suggest_again(accepted.editor, window, cx);
+        }
+    }
+
+    /// Opens the list of `editor` at its cursor as ⌃Space does, once the edit just made
+    /// there has been handled, as the toolkit's own requests are.
+    fn suggest_again(&mut self, editor: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |view, cx| {
+            view.update_in(cx, |view, window, cx| {
+                view.completion_requested(editor, None, true, window, cx)
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The snippets of `language`: the user's first, then the built-in ones they leave. A
@@ -612,6 +875,96 @@ impl Workspace {
         }
         library::merged(library::builtin(language), user)
     }
+}
+
+/// An entry accepted from the list, on its way into the editor.
+struct Accepted {
+    editor: EntityId,
+    word_start: usize,
+    at: AcceptedAt,
+    insertion: Insertion,
+}
+
+/// What an accepted entry inserts.
+enum Insertion {
+    /// A server entry, with its details when they came.
+    Item(Box<CompletionItem>),
+    /// A snippet's body.
+    Snippet(String),
+}
+
+/// Where an entry was accepted, to tell whether it still goes in once its details came.
+struct AcceptedAt {
+    /// Where the text the list matched starts.
+    start: usize,
+    /// The cursor when the list was asked for.
+    request_cursor: usize,
+    /// The cursor when the entry was accepted.
+    cursor: usize,
+    /// The text before `start` then.
+    prefix: String,
+}
+
+impl AcceptedAt {
+    /// Whether the accepted entry still goes into `text` with the cursor at `cursor`: the
+    /// cursor is not before where it was both when the list was asked for and when the
+    /// entry was accepted (a deletion made before accepting is the entry's to replace,
+    /// one made while it waited is not), the text before the list's start is unchanged,
+    /// and the text from there to the cursor is still one word, as for an open list.
+    fn still_applies(&self, text: &Rope, cursor: usize) -> bool {
+        cursor >= self.request_cursor.min(self.cursor)
+            && typed_since(text, self.start, cursor).is_some()
+            && text.slice(0..self.start) == self.prefix
+    }
+}
+
+/// The text of `text` before `offset`, or nothing when `offset` is not a position in it.
+fn text_before(text: &Rope, offset: usize) -> String {
+    if offset <= text.len() && text.is_char_boundary(offset) {
+        text.slice(0..offset).to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Whether `manager` is ready and resolves completion entries.
+fn resolves_entries(manager: &LanguageManager) -> bool {
+    manager.health().state == "ready" && manager.capabilities().completion_resolve()
+}
+
+/// Whether a completion request goes out: always when the user asked for the list or
+/// `typed` a character that is not a word character (a trigger character); for a typed
+/// word character, or nothing typed, only outside strings and comments.
+fn should_auto_request(
+    invoked: bool,
+    typed: Option<char>,
+    word_char: bool,
+    in_string_or_comment: bool,
+) -> bool {
+    invoked || (typed.is_some() && !word_char) || !in_string_or_comment
+}
+
+/// The entry to accept: its details when they came (`cached`), else the entry as listed.
+fn resolved_item(cached: Option<&CompletionItem>, original: &CompletionItem) -> CompletionItem {
+    cached.unwrap_or(original).clone()
+}
+
+/// Whether accepting `item` waits for its details: the server resolves entries, they have
+/// not come yet (`cached`), and the item adds no edits of its own so far, so an import it
+/// needs may still be missing.
+fn accept_waits_for_details(item: &CompletionItem, cached: bool, resolves: bool) -> bool {
+    resolves
+        && !cached
+        && item
+            .additional_text_edits
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+}
+
+/// Whether selecting `item` asks for its details: the server resolves entries, they have
+/// not come yet (`cached`), and the item has no documentation to show.
+fn selection_wants_details(item: &CompletionItem, cached: bool, resolves: bool) -> bool {
+    resolves && !cached && item.documentation.is_none()
 }
 
 /// Where the text the `candidates` are matched against starts: `word_start`, or earlier
@@ -691,8 +1044,138 @@ fn typed_since(text: &Rope, start: usize, cursor: usize) -> Option<String> {
 mod tests {
     // Explicit imports: `super::*` would bring in GPUI's `test` macro through `gpui_kit::*`
     // and shadow Rust's `#[test]`.
-    use super::{move_selection, opens_list, scrolled_top, typed_since, visible_top};
+    use super::{
+        AcceptedAt, accept_waits_for_details, move_selection, opens_list, resolved_item,
+        scrolled_top, selection_wants_details, should_auto_request, typed_since, visible_top,
+    };
     use gpui_kit::component::input::Rope;
+    use lsp_types::{CompletionItem, Documentation, Position, Range, TextEdit};
+
+    #[test]
+    fn typing_asks_for_the_list_unless_in_a_string_or_comment() {
+        // (invoked, typed, word_char, in_string_or_comment) → asks
+        let table = [
+            ((false, Some('a'), true, false), true),
+            ((false, Some('a'), true, true), false),
+            ((true, Some('a'), true, true), true),
+            ((true, None, false, true), true),
+            ((true, None, false, false), true),
+            // Trigger characters always ask, even inside a string (`"./` in an import).
+            ((false, Some('.'), false, true), true),
+            ((false, Some('/'), false, false), true),
+            ((false, None, false, true), false),
+            ((false, None, false, false), true),
+        ];
+        for ((invoked, typed, word_char, in_string), asks) in table {
+            assert_eq!(
+                should_auto_request(invoked, typed, word_char, in_string),
+                asks,
+                "invoked {invoked}, typed {typed:?}, word {word_char}, string {in_string}"
+            );
+        }
+    }
+
+    fn item(label: &str) -> CompletionItem {
+        CompletionItem {
+            label: label.into(),
+            ..CompletionItem::default()
+        }
+    }
+
+    fn import_edit() -> TextEdit {
+        TextEdit {
+            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+            new_text: "use std::collections::HashMap;\n".into(),
+        }
+    }
+
+    #[test]
+    fn the_resolved_item_is_preferred_over_the_original() {
+        let original = item("HashMap");
+        let mut resolved = item("HashMap");
+        resolved.additional_text_edits = Some(vec![import_edit()]);
+        assert_eq!(resolved_item(Some(&resolved), &original), resolved);
+        assert_eq!(resolved_item(None, &original), original);
+    }
+
+    #[test]
+    fn accepting_waits_for_details_only_when_the_import_may_be_missing() {
+        let plain = item("HashMap");
+        assert!(accept_waits_for_details(&plain, false, true));
+        // Already resolved, or a server that does not resolve: nothing to wait for.
+        assert!(!accept_waits_for_details(&plain, true, true));
+        assert!(!accept_waits_for_details(&plain, false, false));
+        let mut with_import = item("HashMap");
+        with_import.additional_text_edits = Some(vec![import_edit()]);
+        assert!(!accept_waits_for_details(&with_import, false, true));
+        let mut empty = item("HashMap");
+        empty.additional_text_edits = Some(Vec::new());
+        assert!(accept_waits_for_details(&empty, false, true));
+    }
+
+    #[test]
+    fn a_selected_item_without_documentation_asks_for_it_once() {
+        let plain = item("total_area");
+        assert!(selection_wants_details(&plain, false, true));
+        assert!(!selection_wants_details(&plain, true, true));
+        assert!(!selection_wants_details(&plain, false, false));
+        let mut documented = item("total_area");
+        documented.documentation = Some(Documentation::String("Adds up the areas.".into()));
+        assert!(!selection_wants_details(&documented, false, true));
+    }
+
+    /// What was accepted in `marked` (`[` the list's start, `|` the cursor when it was
+    /// asked for and accepted).
+    fn accepted(marked: &str) -> (AcceptedAt, String) {
+        let start = marked.find('[').expect("a start marker");
+        let text = marked.replace('[', "");
+        let cursor = text.find('|').expect("a cursor marker");
+        let text = text.replace('|', "");
+        let at = AcceptedAt {
+            start,
+            request_cursor: cursor,
+            cursor,
+            prefix: text[..start].to_string(),
+        };
+        (at, text)
+    }
+
+    #[test]
+    fn an_accepted_entry_goes_in_while_its_word_is_still_there() {
+        let (at, text) = accepted("let map = [HashMa|\n");
+        let cursor = text.find('\n').unwrap();
+        assert!(at.still_applies(&Rope::from_str(&text), cursor));
+        // Typed on during the wait.
+        let typed = text.replace("HashMa", "HashMap");
+        assert!(at.still_applies(&Rope::from_str(&typed), cursor + 1));
+    }
+
+    #[test]
+    fn an_accepted_entry_is_dropped_once_its_word_is_gone() {
+        let (at, text) = accepted("let map = [HashMa|\n");
+        let cursor = text.find('\n').unwrap();
+        // Deleted back past the cursor of the request.
+        let deleted = text.replace("HashMa", "Hash");
+        assert!(!at.still_applies(&Rope::from_str(&deleted), cursor - 2));
+        // Moved on past a space.
+        let spaced = text.replace("HashMa", "HashMa x");
+        assert!(!at.still_applies(&Rope::from_str(&spaced), cursor + 2));
+        // The text before the word changed, the word itself did not move.
+        let edited = text.replace("map", "mop");
+        assert!(!at.still_applies(&Rope::from_str(&edited), cursor));
+        // The cursor went before the word.
+        assert!(!at.still_applies(&Rope::from_str(&text), 2));
+    }
+
+    #[test]
+    fn a_deletion_made_before_accepting_still_goes_in() {
+        // Asked for at `HashMa|`, then one character deleted before accepting.
+        let (mut at, text) = accepted("let map = [HashMa|\n");
+        let text = text.replace("HashMa", "HashM");
+        at.cursor -= 1;
+        assert!(at.still_applies(&Rope::from_str(&text), at.cursor));
+        assert!(!at.still_applies(&Rope::from_str(&text), at.cursor - 1));
+    }
 
     #[test]
     fn up_and_down_wrap_around_the_ends() {

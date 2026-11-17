@@ -458,7 +458,7 @@ impl ProjectSession {
             pull_diagnostics: false,
             closed: false,
             language:if config.python.is_some(){"python"}else{"rust"},
-            configuration:config.python.as_ref().map(|p|json!({"python":{"pythonPath":p.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":false}},"pyright":{"disableOrganizeImports":true}})).unwrap_or(json!({})),
+            configuration:config.python.as_ref().map(|p|json!({"python":{"pythonPath":p.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":true}},"pyright":{"disableOrganizeImports":true}})).unwrap_or(json!({})),
             diagnostic_versions:BTreeMap::new(),version_counter:0,synced_sequence:u64::MAX,
             capabilities: Value::Null,
             collected_edits: None,
@@ -466,7 +466,7 @@ impl ProjectSession {
         let init = session.request("initialize", json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
             "capabilities":client_capabilities(),
             "initializationOptions":{"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":config.cache},
-                "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":false}},"rustfmt":{"extraArgs":[]}}
+                "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":true}},"rustfmt":{"extraArgs":[]}}
         }), &AtomicBool::new(false), stopped)?;
         session.capabilities = init.get("capabilities").cloned().unwrap_or(Value::Null);
         ensure!(
