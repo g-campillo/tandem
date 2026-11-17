@@ -1171,6 +1171,19 @@ mod tests {
     }
 
     #[test]
+    fn trigger_parameter_hints_is_shift_cmd_space_in_the_editor() {
+        let spec = commands()
+            .into_iter()
+            .find(|spec| spec.title == "Trigger Parameter Hints")
+            .expect("Trigger Parameter Hints is a registry command");
+        assert_eq!(spec.menu, MenuId::Code);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "⇧⌘Space");
+        assert_eq!(spec.keys, ["cmd-shift-space"]);
+        assert_eq!(spec.scope, KeyScope::Editor);
+    }
+
+    #[test]
     fn shortcut_finds_a_command_by_its_title() {
         assert_eq!(shortcut("Quick Open"), "⌘P");
         assert_eq!(shortcut("Toggle Panel"), "⌘J");

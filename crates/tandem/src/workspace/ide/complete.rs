@@ -873,7 +873,7 @@ impl Workspace {
     /// screen or the accepted word is gone (see `AcceptedAt::still_applies`). The edit is
     /// one undo step the toolkit does not see as typing; the selection then goes where
     /// the entry says, a snippet's tab stops start, and an entry that asks for the list
-    /// again gets it at the new cursor.
+    /// again or for parameter hints gets them at the new cursor.
     fn insert_accepted(&mut self, accepted: Accepted, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self
             .ide_target()
@@ -937,8 +937,12 @@ impl Workspace {
         if !self.apply_accepted(&target.editor, plan, window, cx) {
             return;
         }
-        if command.is_some_and(|command| command.command == TRIGGER_SUGGEST) {
-            self.suggest_again(accepted.editor, window, cx);
+        match command.as_ref().map(|command| command.command.as_str()) {
+            Some(TRIGGER_SUGGEST) => self.suggest_again(accepted.editor, window, cx),
+            Some(signature::TRIGGER_PARAMETER_HINTS) => {
+                self.signature_after_accept(accepted.editor, cx)
+            }
+            _ => {}
         }
     }
 

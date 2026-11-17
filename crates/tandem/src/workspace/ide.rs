@@ -1,11 +1,12 @@
 //! Tandem's IDE layer over the toolkit editor: the per-language editing rules, the
 //! corrections made right after a keystroke (indentation and tag closing), Tandem's own
-//! completion list and the tab stops of inserted snippets. Every edit this layer makes to a
-//! buffer goes through [`Workspace::ide_replace`], one undo step each.
+//! completion list, the tab stops of inserted snippets and the parameter hints. Every edit
+//! this layer makes to a buffer goes through [`Workspace::ide_replace`], one undo step each.
 mod complete;
 mod icons;
 mod popup;
 mod rules;
+mod signature;
 mod snippets;
 
 pub(super) use rules::register_language_rules;
@@ -42,6 +43,10 @@ pub(super) struct IdeUi {
     lists: u64,
     /// An accepted completion waiting for its details; dropping it cancels it.
     accepting: Option<Task<()>>,
+    /// The parameter hints, on screen or waiting for the server.
+    signature: Option<signature::SignatureState>,
+    /// Counts the parameter hints shown, so each reply's documentation starts afresh.
+    hints: u64,
     /// What the key listeners may take, kept current with the popups.
     keys: Rc<Cell<KeyClaim>>,
 }
@@ -56,6 +61,11 @@ impl IdeUi {
                 .as_ref()
                 .filter(|list| list.shown())
                 .map(|list| list.editor_id),
+            hints: self
+                .signature
+                .as_ref()
+                .filter(|hints| hints.shown())
+                .map(|hints| hints.editor_id),
             session: self
                 .tabs
                 .iter()
@@ -119,18 +129,21 @@ pub(in crate::workspace) enum IdeKey {
 struct KeyClaim {
     /// The editor whose completion list is on screen.
     list: Option<EntityId>,
+    /// The editor whose parameter hints are on screen.
+    hints: Option<EntityId>,
     /// The editor whose snippet is being filled in.
     session: Option<EntityId>,
 }
 
 impl KeyClaim {
     /// Whether `ide_key` takes `key` pressed in `editor`: the completion list takes every
-    /// key but ⇧Tab, a snippet session Tab, ⇧Tab and Escape.
+    /// key but ⇧Tab, the parameter hints Escape, a snippet session Tab, ⇧Tab and Escape.
     fn takes(&self, editor: EntityId, key: IdeKey) -> bool {
         let list = self.list == Some(editor) && key != IdeKey::ShiftTab;
+        let hints = self.hints == Some(editor) && key == IdeKey::Escape;
         let session = self.session == Some(editor)
             && matches!(key, IdeKey::Tab | IdeKey::ShiftTab | IdeKey::Escape);
-        list || session
+        list || hints || session
     }
 
     /// Whether `ide_key` has a popup to close in an editor other than `editor`.
@@ -373,11 +386,13 @@ impl Workspace {
         let blur = cx.subscribe_in(editor, window, |view, editor, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::Blur) {
                 view.completion_blurred(editor, cx);
+                view.signature_blurred(editor, cx);
             }
         });
         let moved = cx.observe(editor, |view, editor, cx| {
             view.completion_moved(&editor, cx);
             view.snippet_moved(&editor, cx);
+            view.signature_moved(&editor, cx);
         });
         let triggers = Rc::new(RefCell::new(Vec::new()));
         let source = Rc::new(complete::CompletionSource {
@@ -491,7 +506,8 @@ impl Workspace {
     }
 
     /// Handles a key while the editor container has focus; true when consumed. The
-    /// popups are asked in order: the completion list first, then the snippet session.
+    /// popups are asked in order: the completion list first, then the parameter hints, then
+    /// the snippet session.
     pub(in crate::workspace) fn ide_key(
         &mut self,
         key: IdeKey,
@@ -503,7 +519,9 @@ impl Workspace {
             .map(|target| target.editor)
             .filter(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
             .map(|editor| editor.entity_id());
-        self.completion_key(key, focused, window, cx) || self.snippet_key(key, focused, window, cx)
+        self.completion_key(key, focused, window, cx)
+            || self.signature_key(key, focused, cx)
+            || self.snippet_key(key, focused, window, cx)
     }
 
     /// The IDE layer of `editor`, the active tab's editor on screen: its key listeners and
@@ -519,9 +537,15 @@ impl Workspace {
             .completion
             .as_ref()
             .filter(|list| list.editor_id == editor.entity_id() && list.shown());
+        let hints = self
+            .ide
+            .signature
+            .as_ref()
+            .filter(|hints| hints.editor_id == editor.entity_id() && hints.shown());
         let overlays = list
             .and_then(|list| popup::completion_list(list, editor, face, cx))
             .into_iter()
+            .chain(hints.and_then(|hints| signature::signature_card(hints, editor, face, cx)))
             .collect();
         IdeLayer {
             workspace: cx.entity().downgrade(),
@@ -534,7 +558,8 @@ impl Workspace {
 
     /// Follows a user edit: keeps the snippet session in step with it, corrects a single
     /// keystroke (see `typing_correction`) as its own undo step, then keeps the completion
-    /// list in step with the text. Edits made by `ide_replace` are skipped.
+    /// list and the parameter hints in step with the text. Edits made by `ide_replace` are
+    /// skipped.
     fn ide_edits(
         &mut self,
         editor: &Entity<EditorState>,
@@ -549,6 +574,10 @@ impl Workspace {
             tab.own_edits -= 1;
             return;
         }
+        // Read before a correction moves the cursor.
+        let typed = single_edit(event.edits()).and_then(|(start, _, inserted)| {
+            signature::typed_char(start, &inserted, editor.read(cx).cursor())
+        });
         let changes = event.edits().iter().map(|(edit, _)| {
             let new_len = edit.new_end_byte.saturating_sub(edit.start_byte);
             (edit.start_byte, edit.old_end_byte, new_len)
@@ -560,6 +589,7 @@ impl Workspace {
         let deleted = single_edit(event.edits())
             .is_some_and(|(start, old_end, inserted)| inserted.is_empty() && old_end > start);
         self.completion_edited(editor, deleted, window, cx);
+        self.signature_edited(editor, typed, window, cx);
     }
 
     /// The correction of a single keystroke in the focused editor: the indentation after
@@ -590,8 +620,9 @@ impl Workspace {
     }
 
     /// Forgets the tabs whose editor is gone, with their snippet sessions, closes a
-    /// completion list whose editor is gone, and refreshes the active tab's completion
-    /// trigger characters from its language server (none while language tools are off).
+    /// completion list whose editor is gone and parameter hints whose editor is no longer
+    /// on screen, and refreshes the active tab's completion trigger characters from its
+    /// language server (none while language tools are off).
     pub(in crate::workspace) fn ide_tick(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ide
             .tabs
@@ -605,6 +636,7 @@ impl Workspace {
         {
             self.close_completion(cx);
         }
+        self.signature_tick(cx);
         let triggers = self
             .language_manager()
             .map(|manager| manager.capabilities().completion_triggers())
@@ -846,6 +878,7 @@ mod tests {
         let both = KeyClaim {
             list: Some(ours),
             session: Some(ours),
+            ..KeyClaim::default()
         };
         for key in [
             IdeKey::Up,
@@ -859,6 +892,44 @@ mod tests {
         ] {
             assert!(both.takes(ours, key), "{key:?}");
         }
+    }
+
+    #[test]
+    fn parameter_hints_take_only_escape_in_their_own_editor() {
+        let (ours, other) = (EntityId::from(1), EntityId::from(2));
+        let hints = KeyClaim {
+            hints: Some(ours),
+            ..KeyClaim::default()
+        };
+        assert!(hints.takes(ours, IdeKey::Escape));
+        assert!(!hints.takes(other, IdeKey::Escape));
+        for key in [
+            IdeKey::Up,
+            IdeKey::Down,
+            IdeKey::PageUp,
+            IdeKey::PageDown,
+            IdeKey::Enter,
+            IdeKey::Tab,
+            IdeKey::ShiftTab,
+        ] {
+            assert!(!hints.takes(ours, key), "{key:?}");
+        }
+        // Blurring the editor closes them, so there is nothing to close elsewhere.
+        assert!(!hints.elsewhere(other));
+    }
+
+    #[test]
+    fn parameter_hints_leave_the_session_tab_and_shift_tab() {
+        let ours = EntityId::from(1);
+        let both = KeyClaim {
+            hints: Some(ours),
+            session: Some(ours),
+            ..KeyClaim::default()
+        };
+        for key in [IdeKey::Tab, IdeKey::ShiftTab, IdeKey::Escape] {
+            assert!(both.takes(ours, key), "{key:?}");
+        }
+        assert!(!both.takes(ours, IdeKey::Enter));
     }
 
     #[test]

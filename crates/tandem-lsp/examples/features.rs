@@ -10,6 +10,7 @@ use tandem_lsp::features::capabilities::ServerFeatures;
 use tandem_lsp::features::completion::{
     accept_item, completion_items, completion_params, word_start,
 };
+use tandem_lsp::features::signature::{signature_help, signature_params, signature_view};
 use tandem_lsp::*;
 
 const RUST_LIB: &str = r#"pub trait Shape {
@@ -152,7 +153,52 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
         "rust completion_autoimport",
         completion_autoimport(&manager, &mut docs, &lib).await,
     );
+    let probe = format!("{RUST_LIB}\npub fn probe() -> String {{\n    describe(1.0, )\n}}\n");
+    checks.record(
+        "rust signature",
+        signature(&manager, &mut docs, &lib, &probe).await,
+    );
     manager.stop();
+}
+
+/// In `text`, the parameter hints right after `describe(1.0, ` describe `describe` with
+/// its `label` parameter active.
+async fn signature(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    file: &Path,
+    text: &str,
+) -> Result<()> {
+    set_text(manager, docs, file, text);
+    let cursor = text.rfind("describe(1.0, ").unwrap() + "describe(1.0, ".len();
+    let params = signature_params(text, cursor, None, false, None)?;
+    let reply = retry(|| {
+        let params = params.clone();
+        async move {
+            manager
+                .request("textDocument/signatureHelp", file, "fixture", text, params)
+                .await
+        }
+    })
+    .await?;
+    let help = signature_help(reply.value)?.context("the server described no call")?;
+    let view = signature_view(&help, None).context("the reply has no signature")?;
+    ensure!(
+        view.label.contains("label"),
+        "the signature {:?} has no label parameter",
+        view.label
+    );
+    let active = view
+        .active
+        .clone()
+        .with_context(|| format!("no parameter of {:?} is active", view.label))?;
+    ensure!(
+        view.label[active.clone()].starts_with("label"),
+        "the active parameter of {:?} is {:?}, not label",
+        view.label,
+        &view.label[active]
+    );
+    Ok(())
 }
 
 /// Completing `total_ar` offers `total_area` as a snippet, and accepting it inserts the
@@ -292,7 +338,7 @@ async fn python_checks(project: &Path, checks: &mut Checks) {
         .await
     }
     .await;
-    let (manager, _docs) = match started {
+    let (manager, mut docs) = match started {
         Ok(started) => started,
         Err(error) => return checks.record("python start", Err(error)),
     };
@@ -311,6 +357,11 @@ async fn python_checks(project: &Path, checks: &mut Checks) {
             ],
             &[],
         ),
+    );
+    let probe = format!("{PYTHON_MAIN}\nfrom shapes import describe\n\nprint(describe(1.0, ))\n");
+    checks.record(
+        "python signature",
+        signature(&manager, &mut docs, &main, &probe).await,
     );
     manager.stop();
 }
