@@ -8,8 +8,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
-gpui-kit = { version = "=0.9.1", features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-toml", "tree-sitter-markdown", "tree-sitter-diff", "tree-sitter-go", "tree-sitter-typescript", "tree-sitter-javascript", "tree-sitter-java", "tree-sitter-bash"] }
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-toml", "tree-sitter-markdown", "tree-sitter-diff", "tree-sitter-go", "tree-sitter-typescript", "tree-sitter-javascript", "tree-sitter-java", "tree-sitter-bash", "tree-sitter-tsx", "tree-sitter-swift", "tree-sitter-html", "tree-sitter-css", "tree-sitter-svelte"] }
 tree-sitter = "0.26.13"
+tree-sitter-swift = "0.7"
 tandem-core = { path = "../tandem-core" }
 tandem-terminal = { path = "../tandem-terminal" }
 tandem-lsp = { path = "../tandem-lsp" }

@@ -3,7 +3,9 @@
 use super::chat_logic::hover_after;
 use super::*;
 use crate::appearance::{palette, panel_code};
-use gpui_kit::component::highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter};
+use gpui_kit::component::highlighter::{
+    GrammarConfig, HighlightTheme, LanguageRegistry, SyntaxHighlighter,
+};
 use gpui_kit::component::{ActiveTheme, Rope, StyledExt};
 use std::cell::RefCell;
 use std::ops::Range;
@@ -11,12 +13,42 @@ use std::rc::Rc;
 use std::sync::Once;
 use tandem_claude::view::{self, BlockKind, BlockPart, StepBlock, StepCard};
 
-/// Registers the fence tags of `view::FENCE_ALIASES` with the toolkit, once, so that
-/// fenced code in Claude's replies is coloured for tags such as `shell` or `jsx`.
+/// Registers the Swift and TSX highlight queries and the fence tags of
+/// `view::FENCE_ALIASES` with the toolkit, once, so that Swift and TSX files and fenced
+/// code in Claude's replies are coloured, for tags such as `shell` or `jsx` too.
 pub(super) fn register_fence_aliases() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let registry = LanguageRegistry::singleton();
+        // The toolkit registers Swift without a highlight query. The grammar crate's query
+        // uses captures such as `keyword.function`, which take the colour of their prefix.
+        registry.register(
+            "swift",
+            &GrammarConfig::new(
+                "swift",
+                tree_sitter::Language::new(tree_sitter_swift::LANGUAGE),
+                vec![],
+                tree_sitter_swift::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
+        );
+        // The toolkit's TSX query holds only TypeScript's additions to the JavaScript query,
+        // which colours type names and nothing else. Its full TypeScript queries also compile
+        // for the TSX grammar.
+        if let (Some(tsx), Some(typescript)) =
+            (registry.language("tsx"), registry.language("typescript"))
+        {
+            registry.register(
+                "tsx",
+                &GrammarConfig {
+                    injection_languages: typescript.injection_languages,
+                    highlights: typescript.highlights,
+                    injections: typescript.injections,
+                    ..tsx
+                },
+            );
+        }
         for (tag, grammar) in view::FENCE_ALIASES {
             if registry.language(tag).is_none()
                 && let Some(config) = registry.language(grammar)
@@ -96,7 +128,7 @@ fn enclosures(grammar: &str) -> &'static [(&'static str, &'static str)] {
             ("type i interface {\n", "\n}"),
             ("func f() {\nswitch {\n", "\n}\n}"),
         ],
-        "typescript" => &[
+        "typescript" | "tsx" => &[
             ("interface I {\n", "\n}"),
             ("class C {\n", "\n}"),
             ("x = {\n", "\n};"),
@@ -112,6 +144,13 @@ fn enclosures(grammar: &str) -> &'static [(&'static str, &'static str)] {
             ("enum E {\n", "\n}"),
             ("class C {\nvoid f() {\nswitch (x) {\n", "\n}\n}\n}"),
         ],
+        "swift" => &[
+            ("struct S {\n", "\n}"),
+            ("enum E {\n", "\n}"),
+            ("func f() {\nswitch x {\n", "\n}\n}"),
+        ],
+        // Declarations of a rule.
+        "css" => &[(".a {\n", "\n}")],
         // Cases of a match; other indented code parses alone.
         "python" => &[("match x:\n", "")],
         // Members of an object and elements of an array, the last one or one with more after it.
@@ -393,6 +432,7 @@ mod tests {
 
     #[test]
     fn every_supported_language_gets_colours() {
+        register_fence_aliases();
         let theme = HighlightTheme::default_dark();
         let rows = [
             ("rust", RUST),
@@ -404,6 +444,11 @@ mod tests {
             ("bash", "cargo test --quiet && echo \"done\""),
             ("json", "{\"a\": 1}"),
             ("toml", "[package]\nname = \"x\"\n"),
+            ("swift", "let x: Int = 1\nfunc f() -> String { \"a\" }\n"),
+            ("tsx", "const a = <div className=\"x\">{1}</div>;"),
+            ("html", "<p class=\"a\">Hi</p>"),
+            ("css", "a { color: red; }"),
+            ("svelte", "<script>let x = 1;</script>\n<p>{x}</p>"),
         ];
         for (grammar, sample) in rows {
             let runs = syntax_runs(sample, grammar, &theme);
@@ -450,6 +495,7 @@ mod tests {
 
     #[test]
     fn a_snippet_is_coloured_as_in_its_file() {
+        register_fence_aliases();
         let theme = HighlightTheme::default_dark();
         // (grammar, file, snippet): each snippet is only valid inside its enclosing item.
         let rows = [
@@ -528,6 +574,16 @@ mod tests {
                 "{\n  \"name\": \"x\",\n  \"version\": \"1.0.0\"\n}\n",
                 "  \"name\": \"x\",",
             ),
+            (
+                "swift",
+                "struct Person {\n    let name: String\n}\n",
+                "    let name: String",
+            ),
+            (
+                "swift",
+                "func size(_ x: Size) -> Int {\n    switch x {\n    case .a: return 1\n    default: return 0\n    }\n}\n",
+                "    case .a: return 1",
+            ),
         ];
         for (grammar, file, snippet) in rows {
             let start = file.find(snippet).expect("the snippet is in the file");
@@ -599,6 +655,17 @@ mod tests {
             "md",
             "diff",
             "patch",
+            "swift",
+            "tsx",
+            "typescriptreact",
+            "javascriptreact",
+            "html",
+            "htm",
+            "vue",
+            "css",
+            "scss",
+            "less",
+            "svelte",
         ];
         let registry = LanguageRegistry::singleton();
         for tag in tags {
@@ -610,6 +677,23 @@ mod tests {
                 config.name.as_ref(),
                 view::grammar_for_language(tag).unwrap(),
                 "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_document_language_has_a_highlight_grammar() {
+        register_fence_aliases();
+        let registry = LanguageRegistry::singleton();
+        for row in tandem_core::languages::LANGUAGES {
+            let config = registry
+                .language(row.id)
+                .unwrap_or_else(|| panic!("{}: not registered", row.id));
+            assert!(config.has_grammar(), "{}: no grammar", row.id);
+            assert!(
+                !config.highlights.is_empty(),
+                "{}: no highlight query",
+                row.id
             );
         }
     }

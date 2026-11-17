@@ -312,9 +312,16 @@ pub fn grammar_for_language(name: &str) -> Option<&'static str> {
         "rust" | "rs" => "rust",
         "go" | "golang" => "go",
         "typescript" | "ts" | "mts" | "cts" => "typescript",
-        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "node" => "javascript",
+        "tsx" | "typescriptreact" => "tsx",
+        "javascript" | "js" | "jsx" | "mjs" | "cjs" | "node" | "javascriptreact" => "javascript",
         "python" | "py" | "pyi" | "python3" => "python",
         "java" => "java",
+        "swift" => "swift",
+        // Vue single-file components use the HTML grammar, which colours <script> as
+        // JavaScript and <style> as CSS.
+        "html" | "htm" | "vue" => "html",
+        "css" | "scss" | "less" => "css",
+        "svelte" => "svelte",
         "shell" | "bash" | "sh" | "zsh" | "console" | "shellscript" | "terminal" => "bash",
         "json" | "jsonc" => "json",
         "toml" => "toml",
@@ -330,7 +337,7 @@ pub fn grammar_for_path(path: &str) -> Option<&'static str> {
 }
 
 /// Fence tags Claude uses that the toolkit does not resolve by itself, as (tag, grammar).
-pub const FENCE_ALIASES: [(&str, &str); 15] = [
+pub const FENCE_ALIASES: [(&str, &str); 20] = [
     ("golang", "go"),
     ("mts", "typescript"),
     ("cts", "typescript"),
@@ -346,6 +353,11 @@ pub const FENCE_ALIASES: [(&str, &str); 15] = [
     ("shellscript", "bash"),
     ("terminal", "bash"),
     ("patch", "diff"),
+    ("htm", "html"),
+    ("vue", "html"),
+    ("less", "css"),
+    ("typescriptreact", "tsx"),
+    ("javascriptreact", "javascript"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1175,7 +1187,10 @@ mod tests {
             ("rust,ignore", Some("rust")),
             ("python title=x", Some("python")),
             ("ts", Some("typescript")),
-            ("tsx", None),
+            ("tsx", Some("tsx")),
+            ("vue", Some("html")),
+            ("scss", Some("css")),
+            ("swift", Some("swift")),
             ("jsx", Some("javascript")),
             ("js{1,3}", Some("javascript")),
             ("shell", Some("bash")),
@@ -1202,7 +1217,7 @@ mod tests {
     fn grammar_for_path_reads_the_extension() {
         let cases = [
             ("src/main.rs", Some("rust")),
-            ("web/App.tsx", None),
+            ("web/App.tsx", Some("tsx")),
             ("web/app.mjs", Some("javascript")),
             ("run.sh", Some("bash")),
             ("Cargo.toml", Some("toml")),
@@ -1309,7 +1324,7 @@ mod tests {
     fn step_blocks_picks_the_grammar_from_the_path_then_the_language() {
         let cases = [
             (Some("web/app.mjs"), "typescript", Some("javascript")),
-            (Some("web/App.tsx"), "typescript", Some("typescript")),
+            (Some("web/App.tsx"), "typescript", Some("tsx")),
             (Some("notes.txt"), "go", Some("go")),
             (None, "kotlin", None),
         ];
