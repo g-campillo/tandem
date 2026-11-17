@@ -1,7 +1,9 @@
 //! How Tandem launches each language server it runs: program, arguments, environment and settings.
-use crate::ServerConfig;
+use crate::{DiagnosticMode, ServerConfig};
 use serde_json::json;
 use std::path::Path;
+use std::time::Duration;
+use tandem_core::Launch;
 
 /// rust-analyzer from the project's toolchain, offline, with build scripts and proc macros off.
 pub fn rust_server(tools: &tandem_core::RustTools, project: &Path, cache: &Path) -> ServerConfig {
@@ -35,6 +37,39 @@ pub fn python_server(
     config.push_configuration = true;
     config.resend_on_change = true;
     Some(config)
+}
+
+/// A server found by registry discovery (`tandem_core::discover_kind`), its builds and indexes
+/// kept in `cache`.
+pub fn server_config(
+    server: &tandem_core::ServerTools,
+    project: &Path,
+    cache: &Path,
+) -> ServerConfig {
+    match &server.launch {
+        Launch::SourceKit {
+            server: program,
+            developer_dir,
+            extra_path,
+        } => {
+            let mut config = ServerConfig::new(&server.title, program, project, cache);
+            config.args = vec!["--scratch-path".into(), cache.join("build").into()];
+            config.path = program
+                .parent()
+                .map(Path::to_path_buf)
+                .into_iter()
+                .chain(extra_path.iter().cloned())
+                .collect();
+            config.env = vec![("DEVELOPER_DIR".into(), developer_dir.into())];
+            config.capabilities =
+                json!({"textDocument":{"diagnostic":{"dynamicRegistration":true}}});
+            config.diagnostics = DiagnosticMode::Settled;
+            config.start_timeout = Duration::from_secs(30);
+            config.request_timeout = Duration::from_secs(30);
+            config.ready_detail = format!("{} ready · indexes in Tandem's cache", server.title);
+            config
+        }
+    }
 }
 
 #[cfg(test)]
@@ -149,5 +184,59 @@ mod tests {
         tools.node = Some("/opt/node/bin/node".into());
         tools.server = None;
         assert!(python_server(&tools, Path::new("/work/app"), Path::new("/state/py")).is_none());
+    }
+
+    #[test]
+    fn sourcekit_config_keeps_builds_out_of_the_project() {
+        let developer = PathBuf::from("/Applications/Xcode.app/Contents/Developer");
+        let program = developer.join("Toolchains/XcodeDefault.xctoolchain/usr/bin/sourcekit-lsp");
+        let tools = tandem_core::ServerTools {
+            name: "sourcekit-lsp".into(),
+            title: "SourceKit-LSP (Xcode 26.1)".into(),
+            languages: vec!["swift".into()],
+            launch: tandem_core::Launch::SourceKit {
+                server: program.clone(),
+                developer_dir: developer.clone(),
+                extra_path: vec!["/opt/homebrew/bin".into()],
+            },
+        };
+        let cache = Path::new("/state/language-cache/p/swift/sourcekit-lsp");
+        let config = server_config(&tools, Path::new("/work/app"), cache);
+        assert_eq!(config.name, "SourceKit-LSP (Xcode 26.1)");
+        assert_eq!(config.program, program);
+        assert_eq!(
+            config.args,
+            vec![
+                OsString::from("--scratch-path"),
+                OsString::from(cache.join("build"))
+            ]
+        );
+        assert_eq!(config.project, PathBuf::from("/work/app"));
+        assert_eq!(config.cache, cache);
+        assert_eq!(
+            config.path,
+            vec![
+                developer.join("Toolchains/XcodeDefault.xctoolchain/usr/bin"),
+                PathBuf::from("/opt/homebrew/bin")
+            ]
+        );
+        assert_eq!(
+            config.env,
+            vec![("DEVELOPER_DIR".into(), OsString::from(&developer))]
+        );
+        assert_eq!(
+            config.capabilities,
+            json!({"textDocument":{"diagnostic":{"dynamicRegistration":true}}})
+        );
+        assert_eq!(config.diagnostics, DiagnosticMode::Settled);
+        assert_eq!(config.start_timeout, Duration::from_secs(30));
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(
+            config.ready_detail,
+            "SourceKit-LSP (Xcode 26.1) ready · indexes in Tandem's cache"
+        );
+        assert!(config.initialization_options.is_null());
+        assert!(!config.push_configuration);
+        assert!(!config.resend_on_change);
     }
 }
