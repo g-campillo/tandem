@@ -1,7 +1,8 @@
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use anyhow::{Context as _, Result, ensure};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, IconName, Sizable, StyledExt};
@@ -57,6 +58,152 @@ pub fn scroll_lines(pixels: f32, line_height: f32) -> i32 {
         (pixels / line_height).round() as i32
     } else {
         0
+    }
+}
+
+/// The cursor as the view draws it: its cell among the visible rows and the shape the
+/// program asked for.
+#[derive(Clone, Debug, PartialEq)]
+struct CursorCell {
+    /// The row, counted from the top of the visible rows.
+    row: usize,
+    column: usize,
+    /// How many cells it covers: 2 on a wide character, otherwise 1.
+    cells: usize,
+    /// Never `CursorShape::Hidden`: a hidden cursor has no `CursorCell`.
+    shape: CursorShape,
+    /// The character under the cursor with its combining marks. A block cursor draws it
+    /// in the background colour.
+    text: String,
+}
+
+/// The visible row of a cursor on grid line `line` (0 is the top of the screen) while the
+/// view is scrolled back `display_offset` rows, or `None` when that row is below the
+/// `screen_lines` visible rows.
+fn viewport_row(line: i32, display_offset: usize, screen_lines: usize) -> Option<usize> {
+    let row = i64::from(line) + i64::try_from(display_offset).ok()?;
+    usize::try_from(row).ok().filter(|row| *row < screen_lines)
+}
+
+/// The cursor of `term` as the view draws it, or `None` while the program hides it
+/// (DECTCEM, `ESC [ ? 25 l`) or the view is scrolled back so far that its row is off
+/// screen.
+fn visible_cursor(term: &Term<Events>) -> Option<CursorCell> {
+    // Alacritty reports a hidden cursor as `CursorShape::Hidden` and moves a cursor on
+    // the right half of a wide character to its left half.
+    let cursor = term.renderable_content().cursor;
+    if cursor.shape == CursorShape::Hidden {
+        return None;
+    }
+    let row = viewport_row(
+        cursor.point.line.0,
+        term.grid().display_offset(),
+        term.screen_lines(),
+    )?;
+    let cell = &term.grid()[cursor.point];
+    let cells = if cell.flags.contains(Flags::WIDE_CHAR) {
+        2
+    } else {
+        1
+    };
+    let mut text = String::from(cell.c);
+    if let Some(extra) = cell.zerowidth() {
+        text.extend(extra);
+    }
+    Some(CursorCell {
+        row,
+        column: cursor.point.column.0,
+        cells,
+        shape: cursor.shape,
+        text,
+    })
+}
+
+/// How the cursor is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorLook {
+    /// A filled cell; the character under it is drawn in the background colour.
+    Block,
+    /// A bar under the cell.
+    Underline,
+    /// A bar at the cell's left edge.
+    Beam,
+    /// The cell's outline.
+    Hollow,
+}
+
+/// How a cursor the program shaped `shape` is drawn: as asked while the terminal has
+/// focus, as a hollow block without focus, and not at all when the program hides it.
+fn cursor_look(shape: CursorShape, focused: bool) -> Option<CursorLook> {
+    match shape {
+        CursorShape::Hidden => None,
+        _ if !focused => Some(CursorLook::Hollow),
+        CursorShape::Block => Some(CursorLook::Block),
+        CursorShape::Underline => Some(CursorLook::Underline),
+        CursorShape::Beam => Some(CursorLook::Beam),
+        CursorShape::HollowBlock => Some(CursorLook::Hollow),
+    }
+}
+
+/// How long a blinking cursor stays on, and then off.
+const BLINK: Duration = Duration::from_millis(500);
+
+/// Whether the cursor is drawn `elapsed` after its blink last restarted (on focus, a key
+/// press or new output). Without focus it is always drawn; with focus it is on for the
+/// first 500 ms, off for the next 500 ms, and so on.
+fn cursor_on(focused: bool, elapsed: Duration) -> bool {
+    !focused || (elapsed.as_nanos() / BLINK.as_nanos()).is_multiple_of(2)
+}
+
+/// How long after `elapsed` a blinking cursor next turns on or off: more than zero and
+/// at most 500 ms.
+fn next_blink(elapsed: Duration) -> Duration {
+    let into = elapsed.as_nanos() % BLINK.as_nanos();
+    BLINK - Duration::from_nanos(u64::try_from(into).unwrap_or(0))
+}
+
+/// The thickness of a beam or an underline cursor, in pixels.
+const BAR: f32 = 2.;
+
+/// Where the cursor is drawn, in pixels from the top left corner of the output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CursorRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+/// The rectangle `look` paints for `cursor` when a cell is `cell_width` wide and a row
+/// `line_height` high.
+fn cursor_rect(
+    look: CursorLook,
+    cursor: &CursorCell,
+    cell_width: f32,
+    line_height: f32,
+) -> CursorRect {
+    let x = cursor.column as f32 * cell_width;
+    let y = cursor.row as f32 * line_height;
+    let width = cursor.cells as f32 * cell_width;
+    match look {
+        CursorLook::Block | CursorLook::Hollow => CursorRect {
+            x,
+            y,
+            width,
+            height: line_height,
+        },
+        CursorLook::Beam => CursorRect {
+            x,
+            y,
+            width: BAR,
+            height: line_height,
+        },
+        CursorLook::Underline => CursorRect {
+            x,
+            y: y + line_height - BAR,
+            width,
+            height: BAR,
+        },
     }
 }
 
@@ -195,6 +342,14 @@ impl Terminal {
         visible_text(&term)
     }
 
+    /// The visible text and the cursor, read under one lock so that they agree.
+    fn snapshot(&self) -> (String, Option<CursorCell>) {
+        let Ok(term) = self.grid.lock() else {
+            return (String::new(), None);
+        };
+        (visible_text(&term), visible_cursor(&term))
+    }
+
     fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         let size = Size { rows, cols };
         self.master.resize(size.pty())?;
@@ -277,6 +432,19 @@ pub struct TerminalView {
     revision: u64,
     columns: u16,
     font: TerminalFont,
+    /// The cursor as of the last output; `None` while it is hidden or scrolled off.
+    cursor: Option<CursorCell>,
+    /// Whether the terminal has keyboard focus in the active window. Only then does the
+    /// cursor blink.
+    focused: bool,
+    /// When the blink last restarted: on focus, a key press or new output.
+    blink_origin: Instant,
+    /// Redraws the view each time the cursor turns on or off. It runs only while the
+    /// terminal is focused; dropping it stops the blink.
+    blink: Option<Task<()>>,
+    /// The focus, blur and window activation watchers, made on the first render because
+    /// they need the window.
+    watchers: Vec<Subscription>,
 }
 
 pub fn start() -> Result<Terminal> {
@@ -305,7 +473,8 @@ impl TerminalView {
                         let revision = view.terminal.revision.load(Ordering::Relaxed);
                         if revision != view.revision {
                             view.revision = revision;
-                            view.text = view.terminal.text();
+                            (view.text, view.cursor) = view.terminal.snapshot();
+                            view.restart_blink(cx);
                             cx.notify();
                         }
                     })
@@ -323,7 +492,86 @@ impl TerminalView {
             revision: 0,
             columns: 100,
             font: TerminalFont::default(),
+            cursor: None,
+            focused: false,
+            blink_origin: Instant::now(),
+            blink: None,
+            watchers: Vec::new(),
         }
+    }
+
+    /// Shows the cursor at once and blinks it from now on, while the terminal is focused.
+    /// Without focus it does nothing: the cursor is a steady hollow block then.
+    fn restart_blink(&mut self, cx: &mut Context<Self>) {
+        if !self.focused {
+            return;
+        }
+        let origin = Instant::now();
+        self.blink_origin = origin;
+        // Replacing the task drops, and so cancels, the one timed from the old origin.
+        self.blink = Some(cx.spawn(async move |view, cx| {
+            loop {
+                smol::Timer::after(next_blink(origin.elapsed())).await;
+                if view
+                    .update(cx, |view, cx| {
+                        // A hidden cursor has nothing to blink, so skip the redraw.
+                        if view.cursor.is_some() {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// Follows keyboard focus and the window's activation: the cursor is drawn as the
+    /// program asks only while the terminal has focus in the active window, and as a
+    /// hollow block otherwise.
+    fn sync_focus(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let focused = self.focus.is_focused(window) && window.is_window_active();
+        if focused != self.focused {
+            self.focused = focused;
+            if focused {
+                self.restart_blink(cx);
+            } else {
+                self.blink = None;
+            }
+            cx.notify();
+        }
+    }
+
+    /// The cursor drawn over the output at its cell, or `None` while it is hidden or in the
+    /// off half of its blink.
+    fn cursor_overlay(&self, cell_width: f32, line_height: f32, cx: &App) -> Option<Div> {
+        let cursor = self.cursor.as_ref()?;
+        let look = cursor_look(cursor.shape, self.focused)?;
+        if !cursor_on(self.focused, self.blink_origin.elapsed()) {
+            return None;
+        }
+        let rect = cursor_rect(look, cursor, cell_width, line_height);
+        let ink = cx.theme().foreground;
+        let overlay = div()
+            .absolute()
+            .left(px(rect.x))
+            .top(px(rect.y))
+            .w(px(rect.width))
+            .h(px(rect.height));
+        Some(match look {
+            // Inverse video: the cell in the text colour, its character in the background
+            // colour, so the character stays readable.
+            CursorLook::Block => overlay
+                .bg(ink)
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(cx.theme().background.alpha(1.))
+                .child(cursor.text.clone()),
+            CursorLook::Hollow => overlay.border_1().border_color(ink),
+            CursorLook::Beam | CursorLook::Underline => overlay.bg(ink),
+        })
     }
 
     /// Draws the output in `font` from now on.
@@ -376,14 +624,29 @@ impl TerminalView {
         };
         if !bytes.is_empty() {
             let _ = self.terminal.send(&bytes);
+            self.restart_blink(cx);
             cx.stop_propagation();
         }
     }
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.watchers.is_empty() {
+            self.watchers = vec![
+                cx.on_focus(&self.focus, window, |this, window, cx| {
+                    this.sync_focus(window, cx)
+                }),
+                cx.on_blur(&self.focus, window, |this, window, cx| {
+                    this.sync_focus(window, cx)
+                }),
+                cx.observe_window_activation(window, |this, window, cx| {
+                    this.sync_focus(window, cx)
+                }),
+            ];
+        }
         let line = self.font.line_height();
+        let cursor = self.cursor_overlay(self.cell_width(window), line, cx);
         div()
             .id("human-terminal")
             .role(Role::Group)
@@ -456,6 +719,7 @@ impl Render for TerminalView {
             .child(
                 div()
                     .id("terminal-output")
+                    .relative()
                     .role(Role::Label)
                     .aria_label(self.text.clone())
                     .font_family(self.font.family.clone())
@@ -466,7 +730,8 @@ impl Render for TerminalView {
                         self.text
                             .lines()
                             .map(|text| div().h(px(line)).child(text.to_string())),
-                    ),
+                    )
+                    .children(cursor),
             )
     }
 }
@@ -513,7 +778,7 @@ pub fn check() -> Result<()> {
         .success();
     ensure!(!alive, "terminal child survived cleanup");
     let receipt = serde_json::json!({"gate": "M0-B terminal slice", "pty": "portable-pty 0.9.0", "engine": "alacritty_terminal 0.26.0", "unicode_and_ansi": true, "resize": true, "ctrl_c": true, "child_reaped": true,
-        "limitations": ["probe renderer uses plain monochrome cells", "selection/scrollback UI and terminal IME are not implemented"]});
+        "limitations": ["probe renderer uses plain monochrome cells", "selection/scrollback UI and terminal IME are not implemented", "the cursor is placed by cell width, so it can sit off its character on a line with wide characters drawn in a fallback font"]});
     std::fs::write(
         ".tandem-local/m0/terminal-receipt.json",
         serde_json::to_string_pretty(&receipt)?,

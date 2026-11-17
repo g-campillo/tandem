@@ -1,10 +1,11 @@
 use super::{
-    Events, Size, Terminal, TerminalFont, Writer, scroll_lines, view_height, visible_text,
-    wait_for_line,
+    BAR, BLINK, CursorCell, CursorLook, CursorRect, Events, Size, Terminal, TerminalFont, Writer,
+    cursor_look, cursor_on, cursor_rect, next_blink, scroll_lines, view_height, viewport_row,
+    visible_cursor, visible_text, wait_for_line,
 };
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -104,4 +105,210 @@ fn scroll_lines_counts_whole_rows_of_the_row_height() {
     assert_eq!(scroll_lines(8., 18.), 0);
     assert_eq!(scroll_lines(36., 0.), 0);
     assert_eq!(scroll_lines(f32::NAN, 18.), 0);
+}
+
+/// A terminal `rows` by 30 with 2,000 rows of history that has read `input`.
+fn term_after(rows: u16, input: &str) -> Term<Events> {
+    let writer: Writer = Arc::new(Mutex::new(Box::new(std::io::sink())));
+    let mut term = Term::new(
+        Config {
+            scrolling_history: 2000,
+            ..Default::default()
+        },
+        &Size { rows, cols: 30 },
+        Events(writer),
+    );
+    let mut parser: Processor = Processor::new();
+    parser.advance(&mut term, input.as_bytes());
+    term
+}
+
+#[test]
+fn viewport_row_adds_the_scrollback_and_drops_rows_below_the_screen() {
+    assert_eq!(viewport_row(2, 0, 3), Some(2));
+    assert_eq!(viewport_row(0, 2, 3), Some(2));
+    assert_eq!(viewport_row(1, 1, 3), Some(2));
+    assert_eq!(viewport_row(2, 1, 3), None);
+    assert_eq!(viewport_row(0, 3, 3), None);
+    assert_eq!(viewport_row(-1, 0, 3), None);
+    assert_eq!(viewport_row(0, 0, 0), None);
+}
+
+#[test]
+fn the_cursor_follows_the_output_as_a_block_over_a_blank_cell() {
+    let cursor = visible_cursor(&term_after(3, "tandem$ ab")).unwrap();
+    assert_eq!(
+        cursor,
+        CursorCell {
+            row: 0,
+            column: 10,
+            cells: 1,
+            shape: CursorShape::Block,
+            text: " ".into(),
+        }
+    );
+    let cursor = visible_cursor(&term_after(3, "one\r\ntwo\r\nx")).unwrap();
+    assert_eq!((cursor.row, cursor.column), (2, 1));
+}
+
+#[test]
+fn the_cursor_carries_the_character_under_it_with_its_combining_marks() {
+    // ESC [ 1 G moves the cursor back to the first column.
+    let cursor = visible_cursor(&term_after(3, "e\u{301}x\x1b[1G")).unwrap();
+    assert_eq!((cursor.column, cursor.cells), (0, 1));
+    assert_eq!(cursor.text, "e\u{301}");
+}
+
+#[test]
+fn a_cursor_on_a_wide_character_covers_both_of_its_cells() {
+    for input in ["\u{1F980}\x1b[1G", "\u{1F980}\x1b[2G"] {
+        let cursor = visible_cursor(&term_after(3, input)).unwrap();
+        assert_eq!((cursor.column, cursor.cells), (0, 2), "{input:?}");
+        assert_eq!(cursor.text, "\u{1F980}");
+    }
+}
+
+#[test]
+fn the_program_sets_the_cursor_shape() {
+    let shape = |input: &str| visible_cursor(&term_after(3, input)).map(|cursor| cursor.shape);
+    assert_eq!(shape(""), Some(CursorShape::Block));
+    assert_eq!(shape("\x1b[6 q"), Some(CursorShape::Beam));
+    assert_eq!(shape("\x1b[5 q"), Some(CursorShape::Beam));
+    assert_eq!(shape("\x1b[4 q"), Some(CursorShape::Underline));
+    assert_eq!(shape("\x1b[6 q\x1b[2 q"), Some(CursorShape::Block));
+    assert_eq!(shape("\x1b[6 q\x1b[0 q"), Some(CursorShape::Block));
+}
+
+#[test]
+fn the_program_hides_and_shows_the_cursor() {
+    assert_eq!(visible_cursor(&term_after(3, "\x1b[?25l")), None);
+    assert!(visible_cursor(&term_after(3, "\x1b[?25l\x1b[?25h")).is_some());
+    assert_eq!(visible_cursor(&term_after(3, "\x1b[6 q\x1b[?25l")), None);
+}
+
+#[test]
+fn scrolling_back_moves_the_cursor_down_and_then_off_the_screen() {
+    // Five lines in three rows leave two in the history and the cursor on the last row.
+    let mut term = term_after(3, "L0\r\nL1\r\nL2\r\nL3\r\nL4");
+    assert_eq!(visible_cursor(&term).map(|cursor| cursor.row), Some(2));
+    term.scroll_display(Scroll::Delta(1));
+    assert_eq!(visible_cursor(&term), None);
+    term.scroll_display(Scroll::Bottom);
+    assert_eq!(visible_cursor(&term).map(|cursor| cursor.row), Some(2));
+
+    // ESC [ H puts the cursor on the top row, which stays on screen one row lower.
+    let mut term = term_after(3, "L0\r\nL1\r\nL2\r\nL3\r\nL4\x1b[H");
+    term.scroll_display(Scroll::Delta(1));
+    assert_eq!(visible_cursor(&term).map(|cursor| cursor.row), Some(1));
+    term.scroll_display(Scroll::Top);
+    assert_eq!(visible_cursor(&term).map(|cursor| cursor.row), Some(2));
+}
+
+#[test]
+fn focus_keeps_the_programs_shape_and_without_focus_the_cursor_is_hollow() {
+    for (shape, focused) in [
+        (CursorShape::Block, CursorLook::Block),
+        (CursorShape::Underline, CursorLook::Underline),
+        (CursorShape::Beam, CursorLook::Beam),
+        (CursorShape::HollowBlock, CursorLook::Hollow),
+    ] {
+        assert_eq!(cursor_look(shape, true), Some(focused), "{shape:?}");
+        assert_eq!(
+            cursor_look(shape, false),
+            Some(CursorLook::Hollow),
+            "{shape:?}"
+        );
+    }
+    assert_eq!(cursor_look(CursorShape::Hidden, true), None);
+    assert_eq!(cursor_look(CursorShape::Hidden, false), None);
+}
+
+#[test]
+fn the_cursor_rectangle_fills_its_cells_or_draws_a_bar() {
+    let at = |cells: usize| CursorCell {
+        row: 2,
+        column: 3,
+        cells,
+        shape: CursorShape::Block,
+        text: " ".into(),
+    };
+    let rect = |x: f32, y: f32, width: f32, height: f32| CursorRect {
+        x,
+        y,
+        width,
+        height,
+    };
+    assert_eq!(
+        cursor_rect(CursorLook::Block, &at(1), 7.5, 18.),
+        rect(22.5, 36., 7.5, 18.)
+    );
+    assert_eq!(
+        cursor_rect(CursorLook::Hollow, &at(1), 7.5, 18.),
+        rect(22.5, 36., 7.5, 18.)
+    );
+    assert_eq!(
+        cursor_rect(CursorLook::Block, &at(2), 7.5, 18.),
+        rect(22.5, 36., 15., 18.)
+    );
+    assert_eq!(
+        cursor_rect(CursorLook::Beam, &at(2), 7.5, 18.),
+        rect(22.5, 36., BAR, 18.)
+    );
+    assert_eq!(
+        cursor_rect(CursorLook::Underline, &at(1), 7.5, 18.),
+        rect(22.5, 52., 7.5, BAR)
+    );
+    assert_eq!(BAR, 2.);
+}
+
+#[test]
+fn a_focused_cursor_is_on_for_500_ms_then_off_for_500_ms() {
+    let ms = Duration::from_millis;
+    assert_eq!(BLINK, ms(500));
+    for (elapsed, on) in [
+        (0, true),
+        (499, true),
+        (500, false),
+        (999, false),
+        (1000, true),
+        (1500, false),
+        (60_250, true),
+    ] {
+        assert_eq!(cursor_on(true, ms(elapsed)), on, "{elapsed} ms");
+    }
+    assert!(cursor_on(true, ms(500) - Duration::from_nanos(1)));
+}
+
+#[test]
+fn an_unfocused_cursor_never_blinks() {
+    for elapsed in [0, 499, 500, 999, 1500, 60_750] {
+        assert!(
+            cursor_on(false, Duration::from_millis(elapsed)),
+            "{elapsed} ms"
+        );
+    }
+}
+
+#[test]
+fn the_next_blink_is_at_the_next_half_second_boundary() {
+    let ms = Duration::from_millis;
+    assert_eq!(next_blink(ms(0)), ms(500));
+    assert_eq!(next_blink(ms(120)), ms(380));
+    assert_eq!(next_blink(ms(500)), ms(500));
+    assert_eq!(next_blink(ms(1499)), ms(1));
+    assert_eq!(
+        next_blink(ms(1499) + Duration::from_nanos(999_999)),
+        Duration::from_nanos(1)
+    );
+    // Waking at the boundary it names always lands in the other half of the blink.
+    for elapsed in [0, 1, 250, 499, 500, 777, 1000, 12_345] {
+        let now = ms(elapsed);
+        let wait = next_blink(now);
+        assert!(wait > Duration::ZERO && wait <= BLINK, "{elapsed} ms");
+        assert_ne!(
+            cursor_on(true, now),
+            cursor_on(true, now + wait),
+            "{elapsed} ms"
+        );
+    }
 }
