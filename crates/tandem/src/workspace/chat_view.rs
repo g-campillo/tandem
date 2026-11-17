@@ -18,12 +18,11 @@ use gpui_kit::prelude::FluentBuilder;
 use tandem_claude::prompts::kind_label;
 use tandem_claude::view::{
     self, BlockKind, ChangeRow, ChangesCard, ComposerMode, ConnectionNotice, StepBlock, StepCard,
-    TrailState,
 };
 use tandem_claude::{ChatState, Connection, TakeoverRequest};
 use tandem_core::chat::{
     ChangeKind, ChatItem, CheckResult, DEFAULT_MODEL, Decision, Finding, Guidance, HelpLevel,
-    ItemKind, Phase, Plan, StepKind,
+    ItemKind, Plan, StepKind,
 };
 
 const NO_PROJECT: &str = "Open a folder to start a task with Claude.";
@@ -112,43 +111,6 @@ fn speaker(name: &'static str, p: Palette, small: Pixels) -> Div {
         .child(name)
 }
 
-/// "Discuss › Plan › Build" with the current phase emphasised.
-fn phase_trail(phase: Phase, p: Palette) -> AnyElement {
-    let steps =
-        view::phase_trail(phase)
-            .into_iter()
-            .enumerate()
-            .flat_map(move |(index, (label, step))| {
-                let separator = (index > 0).then(|| {
-                    div()
-                        .text_color(p.secondary_foreground)
-                        .child("›")
-                        .into_any_element()
-                });
-                let current = step == TrailState::Current;
-                let label = div()
-                    .text_color(if current {
-                        p.foreground
-                    } else {
-                        p.secondary_foreground
-                    })
-                    .when(current, |d| d.font_semibold())
-                    .child(label)
-                    .into_any_element();
-                separator.into_iter().chain(std::iter::once(label))
-            });
-    div()
-        .id("chat-trail")
-        .role(Role::Label)
-        .aria_label(format!("Phase: {}", phase_name(phase)))
-        .h_flex()
-        .items_center()
-        .gap_1()
-        .text_size(px(12.))
-        .children(steps)
-        .into_any_element()
-}
-
 impl Workspace {
     /// Markdown in the chat, in the chat's text and code fonts.
     fn chat_markdown(
@@ -214,7 +176,6 @@ impl Workspace {
     fn chat_header(&self, state: Option<&ChatState>, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx.theme().mode);
         let task_menu = state.map(|state| self.task_menu(state, cx));
-        let phase = state.and_then(|state| state.task.as_ref().map(|task| task.phase));
         div()
             // A control, so not in the chat's text font that the panel sets.
             .font_family(cx.theme().font_family.clone())
@@ -237,7 +198,6 @@ impl Workspace {
                     .child("Chat · Claude"),
             )
             .children(task_menu)
-            .children(phase.map(|phase| phase_trail(phase, p)))
             .child(div().flex_1().min_w_0())
             .child(
                 Button::new("chat-settings")

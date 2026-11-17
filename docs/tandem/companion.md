@@ -6,10 +6,11 @@ This document describes the design as the code implements it. Setup and day-to-d
 
 ## The flow
 
-A task moves through four phases. The chat header shows the first three as a trail, `Discuss › Plan › Build`, with the current one emphasised; when the task is done, all three are finished.
+A task moves through four phases: Discuss, Plan, Build and Done. The chat header shows the active task's title on the task button; the task menu shows each task's phase.
 
 ```
-Chat · Claude              Discuss › Plan › Build
+Chat · Claude
+[ Print results as JSON when --json is set ▾ ]  ⚙
 ─────────────────────────────────────────────────
 You  Add a --json flag to the CLI
 Claude
@@ -110,7 +111,7 @@ Snapshots live in the Tandem state folder under `takeover/<id>/` and are removed
 
 ### Done
 
-A finished task shows `Task complete.` and all three phases as finished. You can still chat with Claude about it; Claude no longer edits files in it, except in Bypass when you ask for a change. Start a new task for the next feature.
+A finished task shows `Task complete.`, and the task menu lists it as `<title> · Done`. You can still chat with Claude about it; Claude no longer edits files in it, except in Bypass when you ask for a change. Start a new task for the next feature.
 
 ## Help levels
 
