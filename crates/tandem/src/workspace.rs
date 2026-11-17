@@ -232,7 +232,7 @@ impl Workspace {
     ) -> Self {
         let appearance = crate::appearance::install(window, cx);
         window.set_window_title("Tandem");
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find a file · ⌘P"));
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files · ⇧⌘E"));
         let subscription = cx.subscribe_in(
             &query,
             window,
@@ -1126,7 +1126,7 @@ impl Workspace {
             query.set_value("", window, cx);
             query.set_placeholder(
                 match sidebar {
-                    Sidebar::Files => "Find a file · ⌘P",
+                    Sidebar::Files => "Filter files · ⇧⌘E",
                     Sidebar::Search => "Search text · Enter to run",
                     Sidebar::New => "New file: relative/path.rs",
                 },
