@@ -108,9 +108,11 @@ pub fn file_icon(path: &str) -> FileIcon {
     }
     let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
     match extension {
-        "rs" | "py" | "pyi" | "go" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "java" | "c"
-        | "h" | "cc" | "cpp" | "hpp" | "swift" | "kt" | "rb" | "php" | "cs" | "html" | "css"
-        | "scss" | "xml" | "sql" => FileIcon::Code,
+        "rs" | "py" | "pyi" | "go" | "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs"
+        | "cjs" | "java" | "c" | "h" | "cc" | "cpp" | "hpp" | "swift" | "kt" | "rb" | "php"
+        | "cs" | "vue" | "svelte" | "html" | "htm" | "css" | "scss" | "less" | "xml" | "sql" => {
+            FileIcon::Code
+        }
         "json" | "jsonc" | "jsonl" | "csv" => FileIcon::Data,
         "toml" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "env" | "plist" => FileIcon::Config,
         "md" | "markdown" | "txt" | "rst" => FileIcon::Text,
@@ -154,14 +156,7 @@ pub fn cursor_label(line: u32, column: u32) -> String {
 
 /// The status bar's name for a language id of `Document::language`.
 pub fn language_label(language: &str) -> &'static str {
-    match language {
-        "rust" => "Rust",
-        "python" => "Python",
-        "json" => "JSON",
-        "toml" => "TOML",
-        "markdown" => "Markdown",
-        _ => "Plain Text",
-    }
+    tandem_core::languages::language_label(language)
 }
 
 /// How many errors and warnings the language tools report for the open file.
@@ -286,6 +281,12 @@ mod tests {
         let rows = [
             ("src/main.rs", FileIcon::Code),
             ("app/View.TSX", FileIcon::Code),
+            ("App.vue", FileIcon::Code),
+            ("App.svelte", FileIcon::Code),
+            ("x.mts", FileIcon::Code),
+            ("x.cts", FileIcon::Code),
+            ("a.less", FileIcon::Code),
+            ("old.htm", FileIcon::Code),
             ("package.json", FileIcon::Data),
             ("Cargo.toml", FileIcon::Config),
             (".env", FileIcon::Config),
@@ -351,7 +352,12 @@ mod tests {
         for (id, label) in [
             ("rust", "Rust"),
             ("python", "Python"),
+            ("java", "Java"),
+            ("typescriptreact", "TypeScript JSX"),
+            ("vue", "Vue"),
             ("json", "JSON"),
+            ("jsonc", "JSON with Comments"),
+            ("scss", "SCSS"),
             ("toml", "TOML"),
             ("markdown", "Markdown"),
             ("plain_text", "Plain Text"),

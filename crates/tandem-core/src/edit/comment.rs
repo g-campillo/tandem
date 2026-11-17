@@ -69,8 +69,8 @@ pub fn comment_tokens(path: &str) -> CommentTokens {
         "ini" | "clj" | "cljs" | "cljc" | "edn" | "lisp" | "el" | "scm" => tokens(Some(";"), None),
         "tex" | "sty" | "cls" | "erl" | "hrl" => tokens(Some("%"), None),
         "vim" => tokens(Some("\""), None),
-        "html" | "htm" | "xhtml" | "xml" | "svg" | "md" | "markdown" | "vue" | "plist" | "xsl"
-        | "xslt" => tokens(None, Some(("<!--", "-->"))),
+        "html" | "htm" | "xhtml" | "xml" | "svg" | "md" | "markdown" | "vue" | "svelte"
+        | "plist" | "xsl" | "xslt" => tokens(None, Some(("<!--", "-->"))),
         "css" => tokens(None, Some(("/*", "*/"))),
         _ => tokens(None, None),
     }
@@ -410,6 +410,7 @@ mod tests {
             ("a.yaml", hash),
             ("README.md", html),
             ("index.html", html),
+            ("App.svelte", html),
             ("style.css", (None, Some(("/*", "*/")))),
             ("a.jsonc", c),
             ("tsconfig.json", c),

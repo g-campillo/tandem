@@ -50,7 +50,7 @@ impl HelpLevel {
 }
 
 /// Languages that always get a help-level row, as (id, label).
-pub const HELP_LANGUAGES: [(&str, &str); 7] = [
+pub const HELP_LANGUAGES: [(&str, &str); 12] = [
     ("rust", "Rust"),
     ("go", "Go"),
     ("typescript", "TypeScript"),
@@ -58,6 +58,11 @@ pub const HELP_LANGUAGES: [(&str, &str); 7] = [
     ("java", "Java"),
     ("javascript", "JavaScript"),
     ("shell", "Shell"),
+    ("swift", "Swift"),
+    ("vue", "Vue"),
+    ("svelte", "Svelte"),
+    ("html", "HTML"),
+    ("css", "CSS"),
 ];
 
 pub fn language_for_path(path: &str) -> Option<&'static str> {
@@ -70,6 +75,11 @@ pub fn language_for_path(path: &str) -> Option<&'static str> {
         "py" | "pyi" => "python",
         "java" => "java",
         "sh" | "bash" | "zsh" => "shell",
+        "swift" => "swift",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "html" | "htm" => "html",
+        "css" | "scss" | "less" => "css",
         _ => return None,
     })
 }
@@ -77,9 +87,11 @@ pub fn language_for_path(path: &str) -> Option<&'static str> {
 pub fn normalize_language(raw: &str) -> String {
     let language = raw.trim().to_lowercase();
     match language.as_str() {
-        "ts" => "typescript".into(),
-        "js" => "javascript".into(),
+        "ts" | "tsx" | "typescriptreact" => "typescript".into(),
+        "js" | "jsx" | "javascriptreact" => "javascript".into(),
         "py" => "python".into(),
+        "htm" => "html".into(),
+        "scss" | "less" => "css".into(),
         "golang" => "go".into(),
         "" | "bash" | "sh" | "zsh" | "terminal" => "shell".into(),
         _ => language,
@@ -767,12 +779,34 @@ mod tests {
             ("run.sh", Some("shell")),
             ("run.bash", Some("shell")),
             ("run.zsh", Some("shell")),
+            ("App.swift", Some("swift")),
+            ("App.vue", Some("vue")),
+            ("App.svelte", Some("svelte")),
+            ("index.html", Some("html")),
+            ("old.htm", Some("html")),
+            ("a.css", Some("css")),
+            ("a.scss", Some("css")),
+            ("a.less", Some("css")),
             ("README.md", None),
             ("Makefile", None),
             ("", None),
         ];
         for (path, expected) in cases {
             assert_eq!(language_for_path(path), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn language_for_path_agrees_with_the_language_table() {
+        for row in crate::languages::LANGUAGES {
+            for extension in row.extensions {
+                assert_eq!(
+                    language_for_path(&format!("x.{extension}")),
+                    row.help,
+                    "{}: .{extension}",
+                    row.id
+                );
+            }
         }
     }
 
@@ -793,6 +827,13 @@ mod tests {
             ("Terminal", "shell"),
             ("", "shell"),
             ("   ", "shell"),
+            ("tsx", "typescript"),
+            ("typescriptreact", "typescript"),
+            ("jsx", "javascript"),
+            ("javascriptreact", "javascript"),
+            ("htm", "html"),
+            ("scss", "css"),
+            ("less", "css"),
             ("Kotlin", "kotlin"),
         ];
         for (raw, expected) in cases {

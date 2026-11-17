@@ -416,14 +416,19 @@ mod tests {
                 "java",
                 "javascript",
                 "shell",
+                "swift",
+                "vue",
+                "svelte",
+                "html",
+                "css",
                 "kotlin",
                 "elixir"
             ]
         );
         assert_eq!(rows[0].1, "Rust");
         assert_eq!(rows[2].1, "TypeScript");
-        assert_eq!(rows[7].1, "Kotlin");
-        assert_eq!(help_languages([]).len(), 7);
+        assert_eq!(rows[12].1, "Kotlin");
+        assert_eq!(help_languages([]).len(), 12);
     }
 
     #[test]
