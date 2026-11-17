@@ -8,7 +8,6 @@ pub fn rust_server(tools: &tandem_core::RustTools, project: &Path, cache: &Path)
     let bin = tools.toolchain.join("bin");
     let mut config = ServerConfig::new("rust-analyzer", &tools.rust_analyzer, project, cache);
     config.ready_detail = "rust-analyzer ready · build scripts and proc macros off".into();
-    config.language_id = "rust".into();
     config.env = vec![
         ("RUSTC".into(), bin.join("rustc").into()),
         ("RUSTDOC".into(), bin.join("rustdoc").into()),
@@ -30,7 +29,6 @@ pub fn python_server(
     let (node, script) = (tools.node.as_ref()?, tools.server.as_ref()?);
     let mut config = ServerConfig::new("Pyright", node, project, cache);
     config.ready_detail = "Pyright ready · selected local interpreter".into();
-    config.language_id = "python".into();
     config.args = vec![script.into(), "--stdio".into()];
     config.path = vec![tools.prefix.join("bin")];
     config.configuration = json!({"python":{"pythonPath":tools.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":false}},"pyright":{"disableOrganizeImports":true}});
@@ -42,6 +40,7 @@ pub fn python_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DiagnosticMode;
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -91,7 +90,7 @@ mod tests {
             config.initialization_options.pointer("/cargo/extraArgs"),
             Some(&json!(["--locked", "--offline"]))
         );
-        assert_eq!(config.language_id, "rust");
+        assert_eq!(config.diagnostics, DiagnosticMode::Versioned);
         assert_eq!(
             config.ready_detail,
             "rust-analyzer ready · build scripts and proc macros off"
@@ -139,7 +138,7 @@ mod tests {
         assert!(config.push_configuration);
         assert!(config.resend_on_change);
         assert!(config.initialization_options.is_null());
-        assert_eq!(config.language_id, "python");
+        assert_eq!(config.diagnostics, DiagnosticMode::Versioned);
         assert_eq!(
             config.ready_detail,
             "Pyright ready · selected local interpreter"

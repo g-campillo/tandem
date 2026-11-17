@@ -11,6 +11,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
+use tandem_core::languages::language_id_for_path;
 
 /// How to launch one language server and what to tell it. Built by `rust_server`, `python_server`, ...
 #[derive(Clone, Debug)]
@@ -34,12 +35,18 @@ pub struct ServerConfig {
     pub push_configuration: bool,
     /// Send every open document again with a new version whenever the workspace sequence changes (Pyright).
     pub resend_on_change: bool,
-    /// The `languageId` every document is opened with.
-    pub language_id: String,
+    /// Merged over client_capabilities(), objects key by key (Swift asks for dynamic diagnostic registration).
+    pub capabilities: Value,
+    pub diagnostics: DiagnosticMode,
+    /// How long `initialize` may take before the start fails.
+    pub start_timeout: Duration,
+    /// How long any other request may take before the server is restarted.
+    pub request_timeout: Duration,
 }
 impl ServerConfig {
     /// Defaults: ready_detail "{name} ready", no args/path/env, initialization_options null,
-    /// configuration {}, push_configuration false, resend_on_change false, language_id "plain_text".
+    /// configuration {}, push_configuration false, resend_on_change false, capabilities {},
+    /// diagnostics Versioned, start and request timeouts 20 s.
     pub fn new(
         name: impl Into<String>,
         program: impl Into<PathBuf>,
@@ -60,10 +67,27 @@ impl ServerConfig {
             configuration: json!({}),
             push_configuration: false,
             resend_on_change: false,
-            language_id: "plain_text".into(),
+            capabilities: json!({}),
+            diagnostics: DiagnosticMode::Versioned,
+            start_timeout: Duration::from_secs(20),
+            request_timeout: Duration::from_secs(20),
         }
     }
 }
+
+/// How a session answers `textDocument/diagnostic` for a server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticMode {
+    /// Pull when `diagnosticProvider` is advertised, otherwise only pushes carrying the current
+    /// document version (rust-analyzer, Pyright: today's behaviour).
+    Versioned,
+    /// Pull when advertised or dynamically registered. Otherwise the latest push for the file,
+    /// with or without a version, once the server has been quiet for SETTLE since the file's
+    /// last change and its last push.
+    Settled,
+}
+/// How long a `Settled` server must stay quiet before its latest push counts as its answer.
+const SETTLE: Duration = Duration::from_millis(500);
 
 /// PATH for a server: the configured directories, then the system ones. Never an empty entry,
 /// which would put the project folder (the server's working directory) on PATH.
@@ -346,16 +370,16 @@ fn worker(
                     session.sync_documents(&request.stamp.documents, request.stamp.sequence)?;
                     let mut params = request.params.clone();
                     params["textDocument"] = json!({"uri": file_uri(&request.file)?});
-                    let value = if request.method == "textDocument/diagnostic"
-                        && !session.pull_diagnostics
-                    {
-                        session.versioned_diagnostics(
-                            &request.file,
+                    let value = if request.method == "textDocument/diagnostic" {
+                        session.diagnostics(&request.file, params, &request.cancelled, &stopped)?
+                    } else {
+                        session.request(
+                            &request.method,
+                            params,
+                            session.request_timeout,
                             &request.cancelled,
                             &stopped,
                         )?
-                    } else {
-                        session.request(&request.method, params, &request.cancelled, &stopped)?
                     };
                     ensure!(
                         shared.lock().unwrap().sequence == request.stamp.sequence,
@@ -374,10 +398,22 @@ fn worker(
     health(&shared, "stopped", "Language tools stopped", retries);
 }
 
+/// A request the server did not answer in time; the session is closed and restarts.
+#[derive(Debug)]
+struct TimedOut;
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Language request timed out; restarting server")
+    }
+}
+impl std::error::Error for TimedOut {}
+
 struct OpenDocument {
     text: Arc<str>,
     instance: String,
     version: i32,
+    /// When didOpen or the latest didChange was sent.
+    changed: Instant,
 }
 struct ProjectSession {
     child: Child,
@@ -386,11 +422,16 @@ struct ProjectSession {
     next_id: u64,
     documents: BTreeMap<PathBuf, OpenDocument>,
     pull_diagnostics: bool,
+    /// Whether `initialize` advertised `diagnosticProvider`; restored when a dynamic registration is withdrawn.
+    static_pull: bool,
+    diagnostic_mode: DiagnosticMode,
+    request_timeout: Duration,
     closed: bool,
-    language_id: String,
     resend_on_change: bool,
     configuration: Value,
     diagnostic_versions: BTreeMap<PathBuf, (i32, Value)>,
+    /// `Settled` only: the latest usable push for each open document and when it arrived.
+    latest_push: BTreeMap<PathBuf, (Value, Instant)>,
     version_counter: i32,
     synced_sequence: u64,
 }
@@ -460,28 +501,49 @@ impl ProjectSession {
             next_id: 1,
             documents: BTreeMap::new(),
             pull_diagnostics: false,
+            static_pull: false,
+            diagnostic_mode: config.diagnostics,
+            request_timeout: config.request_timeout,
             closed: false,
-            language_id: config.language_id.clone(),
             resend_on_change: config.resend_on_change,
             configuration: config.configuration.clone(),
             diagnostic_versions: BTreeMap::new(),
+            latest_push: BTreeMap::new(),
             version_counter: 0,
             synced_sequence: u64::MAX,
         };
+        let mut capabilities = client_capabilities();
+        merge_json(&mut capabilities, &config.capabilities);
         let mut initialize = json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
-            "capabilities":client_capabilities()});
+            "capabilities":capabilities});
         if !config.initialization_options.is_null() {
             initialize["initializationOptions"] = config.initialization_options.clone();
         }
-        let init = session.request("initialize", initialize, &AtomicBool::new(false), stopped)?;
+        let init = session
+            .request(
+                "initialize",
+                initialize,
+                config.start_timeout,
+                &AtomicBool::new(false),
+                stopped,
+            )
+            .map_err(|error| match error.downcast::<TimedOut>() {
+                Ok(TimedOut) => anyhow!(
+                    "{} did not start within {} s",
+                    config.name,
+                    config.start_timeout.as_secs_f32()
+                ),
+                Err(error) => error,
+            })?;
         ensure!(
             init.pointer("/capabilities/positionEncoding")
                 .is_none_or(|v| v == "utf-16"),
             "Unsupported language-server position encoding"
         );
-        session.pull_diagnostics = init
+        session.static_pull = init
             .pointer("/capabilities/diagnosticProvider")
             .is_some_and(|v| !v.is_null());
+        session.pull_diagnostics = session.static_pull;
         session.notify("initialized", json!({}))?;
         if config.push_configuration {
             session.notify(
@@ -526,6 +588,7 @@ impl ProjectSession {
                 json!({"textDocument":{"uri":file_uri(&path)?}}),
             )?;
             self.documents.remove(&path);
+            self.latest_push.remove(&path);
         }
         for document in documents {
             if self
@@ -538,6 +601,7 @@ impl ProjectSession {
                     json!({"textDocument":{"uri":file_uri(&document.path)?}}),
                 )?;
                 self.documents.remove(&document.path);
+                self.latest_push.remove(&document.path);
             }
             match self.documents.get_mut(&document.path) {
                 Some(old) if old.text != document.text || force_versions => {
@@ -547,6 +611,7 @@ impl ProjectSession {
                         .context("Language document version exhausted")?;
                     old.version = self.version_counter;
                     old.text = document.text.clone();
+                    old.changed = Instant::now();
                     let version = old.version;
                     self.notify("textDocument/didChange",json!({"textDocument":{"uri":file_uri(&document.path)?,"version":version},"contentChanges":[{"text":document.text.as_ref()}]}))?;
                 }
@@ -555,13 +620,14 @@ impl ProjectSession {
                         .version_counter
                         .checked_add(1)
                         .context("Language document version exhausted")?;
-                    self.notify("textDocument/didOpen",json!({"textDocument":{"uri":file_uri(&document.path)?,"languageId":self.language_id,"version":self.version_counter,"text":document.text.as_ref()}}))?;
+                    self.notify("textDocument/didOpen",json!({"textDocument":{"uri":file_uri(&document.path)?,"languageId":language_id_for_path(&document.path.to_string_lossy()),"version":self.version_counter,"text":document.text.as_ref()}}))?;
                     self.documents.insert(
                         document.path.clone(),
                         OpenDocument {
                             text: document.text.clone(),
                             instance: document.instance.clone(),
                             version: self.version_counter,
+                            changed: Instant::now(),
                         },
                     );
                 }
@@ -570,19 +636,41 @@ impl ProjectSession {
         }
         Ok(())
     }
-    fn versioned_diagnostics(
+    /// Answers `textDocument/diagnostic`: the server's pull when it offers one, otherwise
+    /// the pushes the diagnostic mode accepts.
+    fn diagnostics(
         &mut self,
         path: &Path,
+        params: Value,
         cancel: &AtomicBool,
         stop: &AtomicBool,
     ) -> Result<Value> {
-        let version = self.documents.get(path).context("Document closed")?.version;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + self.request_timeout.min(Duration::from_secs(10));
         loop {
+            // A dynamic registration can arrive while waiting.
+            if self.pull_diagnostics {
+                return self.request(
+                    "textDocument/diagnostic",
+                    params,
+                    self.request_timeout,
+                    cancel,
+                    stop,
+                );
+            }
+            let document = self.documents.get(path).context("Document closed")?;
             if let Some((received, items)) = self.diagnostic_versions.get(path)
-                && *received == version
+                && *received == document.version
             {
                 return Ok(json!({"kind":"full","items":items}));
+            }
+            if self.diagnostic_mode == DiagnosticMode::Settled {
+                let push = self.latest_push.get(path);
+                let quiet_since =
+                    push.map_or(document.changed, |(_, at)| document.changed.max(*at));
+                if quiet_since.elapsed() >= SETTLE {
+                    let items = push.map_or(json!([]), |(items, _)| items.clone());
+                    return Ok(json!({"kind":"full","items":items}));
+                }
             }
             ensure!(
                 !cancel.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed),
@@ -606,17 +694,18 @@ impl ProjectSession {
         &mut self,
         method: &str,
         params: Value,
+        timeout: Duration,
         cancel: &AtomicBool,
         stop: &AtomicBool,
     ) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + timeout;
         loop {
             if Instant::now() >= deadline {
                 self.closed = true;
-                bail!("Language request timed out; restarting server");
+                return Err(TimedOut.into());
             }
             if cancel.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
                 let _ = self.notify("$/cancelRequest", json!({"id":id}));
@@ -640,7 +729,6 @@ impl ProjectSession {
                     .context("Language result missing");
             }
             self.handle_message(message)?;
-            // Unversioned push diagnostics never become current findings.
         }
     }
     fn drain(&mut self) -> Result<()> {
@@ -660,24 +748,43 @@ impl ProjectSession {
         if message["method"] == "textDocument/publishDiagnostics"
             && let Some(uri) = message["params"]["uri"].as_str()
             && let Ok(path) = uri_path(uri)
-            && let Some(version) = message["params"]["version"].as_i64()
             && let Some(doc) = self.documents.get(&path)
-            && i64::from(doc.version) == version
         {
-            self.diagnostic_versions.insert(
-                path,
-                (doc.version, message["params"]["diagnostics"].clone()),
-            );
+            let version = message["params"]["version"].as_i64();
+            let current = version == Some(i64::from(doc.version));
+            let diagnostics = &message["params"]["diagnostics"];
+            if current {
+                self.diagnostic_versions
+                    .insert(path.clone(), (doc.version, diagnostics.clone()));
+            }
+            if self.diagnostic_mode == DiagnosticMode::Settled && (current || version.is_none()) {
+                self.latest_push
+                    .insert(path, (diagnostics.clone(), Instant::now()));
+            }
         }
         if message.get("method").is_some() && message.get("id").is_some() {
             match message["method"].as_str() {
                     Some("workspace/applyEdit")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"applied":false,"failureReason":"Source edits require an explicit editor action"}}))?,
-                    Some("window/workDoneProgress/create"|"client/registerCapability")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?,
+                    Some("window/workDoneProgress/create")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?,
+                    Some("window/showDocument")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"success":false}}))?,
+                    Some("client/registerCapability")=>{
+                        if self.diagnostic_mode==DiagnosticMode::Settled&&names_diagnostic_pull(&message["params"]["registrations"]){
+                            self.pull_diagnostics=true;
+                        }
+                        self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?;
+                    },
+                    Some("client/unregisterCapability")=>{
+                        // The spec spells it "unregisterations".
+                        if self.diagnostic_mode==DiagnosticMode::Settled&&names_diagnostic_pull(&message["params"]["unregisterations"]){
+                            self.pull_diagnostics=self.static_pull;
+                        }
+                        self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?;
+                    },
                     Some("workspace/configuration")=>{
                         let values=message["params"]["items"].as_array().map(|items|items.iter().map(|item|item["section"].as_str().map(|s|s.split('.').fold(&self.configuration,|value,key|&value[key]).clone()).unwrap_or_else(||self.configuration.clone())).collect::<Vec<_>>()).unwrap_or_default();
                         self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":values}))?;
                     },
-                    _=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32601,"message":"Unsupported client method"}}))?,
+                    _=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?,
                 }
         }
         Ok(())
@@ -708,6 +815,25 @@ impl Drop for ProjectSession {
 fn client_capabilities() -> Value {
     json!({"general":{"positionEncodings":["utf-16"]},"workspace":{"configuration":true},
         "textDocument":{"completion":{"completionItem":{"snippetSupport":false}},"definition":{"linkSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"publishDiagnostics":{"versionSupport":true},"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}})
+}
+/// Whether a (un)registration list names pull diagnostics.
+fn names_diagnostic_pull(registrations: &Value) -> bool {
+    registrations.as_array().is_some_and(|registrations| {
+        registrations
+            .iter()
+            .any(|registration| registration["method"] == "textDocument/diagnostic")
+    })
+}
+/// Merges `overlay` into `base`: objects key by key, any other overlay value replaces the base value.
+fn merge_json(base: &mut Value, overlay: &Value) {
+    match (base, overlay) {
+        (Value::Object(base), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                merge_json(base.entry(key.as_str()).or_insert(Value::Null), value);
+            }
+        }
+        (base, overlay) => *base = overlay.clone(),
+    }
 }
 pub fn file_uri(path: &Path) -> Result<String> {
     Ok(url::Url::from_file_path(path)
@@ -813,6 +939,23 @@ mod tests {
             capabilities.pointer("/textDocument/completion/completionItem/snippetSupport"),
             Some(&json!(false))
         );
+    }
+
+    #[test]
+    fn capability_overlays_merge_objects_and_replace_other_values() {
+        let mut capabilities = json!({"textDocument":{"diagnostic":{},"hover":{"contentFormat":["markdown"]}},"general":true});
+        merge_json(
+            &mut capabilities,
+            &json!({"textDocument":{"diagnostic":{"dynamicRegistration":true},"hover":{"contentFormat":["plaintext"]}},"general":{"a":1},"window":{"showDocument":{"support":false}}}),
+        );
+        assert_eq!(
+            capabilities,
+            json!({"textDocument":{"diagnostic":{"dynamicRegistration":true},"hover":{"contentFormat":["plaintext"]}},"general":{"a":1},"window":{"showDocument":{"support":false}}})
+        );
+        // The default overlay changes nothing.
+        let mut unchanged = client_capabilities();
+        merge_json(&mut unchanged, &json!({}));
+        assert_eq!(unchanged, client_capabilities());
     }
 
     #[test]

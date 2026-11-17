@@ -1,5 +1,7 @@
+mod support;
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use support::wait_for;
 use tandem_lsp::*;
 
 fn fixture() -> (tempfile::TempDir, LanguageManager, PathBuf) {
@@ -44,15 +46,6 @@ while True:
     }]);
     wait_for(|| manager.health().state == "ready");
     (root, manager, file)
-}
-fn wait_for(mut condition: impl FnMut() -> bool) {
-    for _ in 0..150 {
-        if condition() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(condition(), "condition timed out");
 }
 
 #[test]
