@@ -1,6 +1,6 @@
 //! Language servers beyond Rust and Python: where Tandem looks, what it found and what is
 //! missing. Discovery inspects files only; it never runs a tool or an installer.
-use super::{file_hash, java, swift, typescript};
+use super::{file_hash, java, swift, typescript, web};
 use crate::{ToolKind, content_hash};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -53,6 +53,24 @@ pub enum Launch {
         server: PathBuf,
         tsserver: PathBuf,
     },
+    /// A Node.js language server script, run as `node <script> --stdio`; `server` says which one,
+    /// for its settings.
+    Node {
+        node: PathBuf,
+        script: PathBuf,
+        server: NodeServer,
+    },
+}
+
+/// The language servers Tandem runs as Node.js scripts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeServer {
+    /// vscode-langservers-extracted's HTML server.
+    Html,
+    /// vscode-langservers-extracted's CSS server, which also serves SCSS and Less.
+    Css,
+    /// vscode-langservers-extracted's JSON server, which also serves JSON with Comments.
+    Json,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +124,7 @@ pub const SERVER_KINDS: &[(ToolKind, Discover)] = &[
     (ToolKind::Java, java::discover),
     (ToolKind::Swift, swift::discover),
     (ToolKind::TypeScript, typescript::discover),
+    (ToolKind::Web, web::discover),
 ];
 
 /// Runs the discovery of `kind`; `None` when the kind is not served through this registry.

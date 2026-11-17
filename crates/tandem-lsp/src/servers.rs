@@ -3,7 +3,7 @@ use crate::{DiagnosticMode, ServerConfig};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
-use tandem_core::Launch;
+use tandem_core::{Launch, NodeServer};
 
 /// rust-analyzer from the project's toolchain, offline, with build scripts and proc macros off.
 pub fn rust_server(tools: &tandem_core::RustTools, project: &Path, cache: &Path) -> ServerConfig {
@@ -110,6 +110,42 @@ pub fn server_config(
             });
             config
         }
+        Launch::Node {
+            node,
+            script,
+            server: kind,
+        } => {
+            let mut config = ServerConfig::new(&server.title, node, project, cache);
+            config.args = vec![script.into(), "--stdio".into()];
+            config.path = node.parent().map(Path::to_path_buf).into_iter().collect();
+            (config.initialization_options, config.configuration) = node_settings(*kind);
+            config.push_configuration = true;
+            // These servers pull diagnostics when the client declares textDocument.diagnostic, as
+            // Tandem does; `Settled` covers a push fallback.
+            config.diagnostics = DiagnosticMode::Settled;
+            config.start_timeout = Duration::from_secs(30);
+            config.request_timeout = Duration::from_secs(30);
+            config
+        }
+    }
+}
+
+/// Initialization options and settings of each Node.js server. The JSON server reads only `file:`
+/// schemas: it asks the client for any other, and gets null, so nothing is downloaded.
+fn node_settings(server: NodeServer) -> (Value, Value) {
+    match server {
+        NodeServer::Html => (
+            json!({"provideFormatter":true,"embeddedLanguages":{"css":true,"javascript":true}}),
+            json!({"html":{"format":{"enable":true}},"css":{"validate":true},"javascript":{"validate":{"enable":true}}}),
+        ),
+        NodeServer::Css => (
+            json!({"provideFormatter":true}),
+            json!({"css":{"validate":true},"scss":{"validate":true},"less":{"validate":true}}),
+        ),
+        NodeServer::Json => (
+            json!({"provideFormatter":true,"handledSchemaProtocols":["file"]}),
+            json!({"json":{"validate":{"enable":true},"format":{"enable":true},"schemas":[]}}),
+        ),
     }
 }
 
@@ -466,6 +502,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn web_configs_enable_formatting_and_no_schema_downloads() {
+        let package = PathBuf::from("/n/lib/node_modules/vscode-langservers-extracted");
+        let web = |name: &str, title: &str, kind| tandem_core::ServerTools {
+            name: name.into(),
+            title: title.into(),
+            languages: vec![name.into()],
+            launch: tandem_core::Launch::Node {
+                node: "/n/bin/node".into(),
+                script: package.join(format!("bin/vscode-{name}-language-server")),
+                server: kind,
+            },
+        };
+        let configs = [
+            ("html", "HTML language server", NodeServer::Html),
+            ("css", "CSS language server", NodeServer::Css),
+            ("json", "JSON language server", NodeServer::Json),
+        ]
+        .map(|(name, title, kind)| {
+            let cache = PathBuf::from("/state/language-cache/p/web").join(name);
+            let config = server_config(&web(name, title, kind), Path::new("/work/app"), &cache);
+            assert_eq!(config.name, title);
+            assert_eq!(config.program, PathBuf::from("/n/bin/node"));
+            assert_eq!(
+                config.args,
+                vec![
+                    OsString::from(package.join(format!("bin/vscode-{name}-language-server"))),
+                    OsString::from("--stdio")
+                ]
+            );
+            assert_eq!(config.project, PathBuf::from("/work/app"));
+            assert_eq!(config.cache, cache);
+            assert_eq!(config.path, vec![PathBuf::from("/n/bin")]);
+            assert!(config.env.is_empty());
+            assert_eq!(
+                config.initialization_options["provideFormatter"],
+                json!(true),
+                "{name}"
+            );
+            assert!(config.push_configuration, "{name}");
+            assert!(!config.resend_on_change, "{name}");
+            assert_eq!(config.capabilities, json!({}));
+            assert_eq!(config.diagnostics, DiagnosticMode::Settled);
+            assert_eq!(config.start_timeout, Duration::from_secs(30));
+            assert_eq!(config.request_timeout, Duration::from_secs(30));
+            assert_eq!(config.ready_detail, format!("{title} ready"));
+            config
+        });
+        let [html, css, json] = configs;
+        assert_eq!(
+            html.initialization_options,
+            json!({"provideFormatter":true,"embeddedLanguages":{"css":true,"javascript":true}})
+        );
+        assert_eq!(
+            html.configuration,
+            json!({"html":{"format":{"enable":true}},"css":{"validate":true},"javascript":{"validate":{"enable":true}}})
+        );
+        assert_eq!(css.initialization_options, json!({"provideFormatter":true}));
+        assert_eq!(
+            css.configuration,
+            json!({"css":{"validate":true},"scss":{"validate":true},"less":{"validate":true}})
+        );
+        // Only file: schemas are read; the server asks the client for any other and gets null.
+        assert_eq!(
+            json.initialization_options["handledSchemaProtocols"],
+            json!(["file"])
+        );
+        assert_eq!(
+            json.configuration,
+            json!({"json":{"validate":{"enable":true},"format":{"enable":true},"schemas":[]}})
+        );
     }
 
     #[test]

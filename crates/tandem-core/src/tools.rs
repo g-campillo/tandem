@@ -3,6 +3,7 @@ mod node;
 mod servers;
 mod swift;
 mod typescript;
+mod web;
 pub use servers::*;
 
 use crate::{ToolKind, content_hash};
