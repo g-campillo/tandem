@@ -37,36 +37,6 @@ pub fn composer_mode(state: &ChatState, draft_is_empty: bool) -> ComposerMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TrailState {
-    Done,
-    Current,
-    Upcoming,
-}
-
-/// The "Discuss › Plan › Build" trail in the panel header.
-pub fn phase_trail(phase: Phase) -> [(&'static str, TrailState); 3] {
-    let current = match phase {
-        Phase::Discuss => 0,
-        Phase::Plan => 1,
-        Phase::Build => 2,
-        Phase::Done => 3,
-    };
-    let mut trail = [
-        ("Discuss", TrailState::Upcoming),
-        ("Plan", TrailState::Upcoming),
-        ("Build", TrailState::Upcoming),
-    ];
-    for (index, (_, state)) in trail.iter_mut().enumerate() {
-        *state = match index.cmp(&current) {
-            std::cmp::Ordering::Less => TrailState::Done,
-            std::cmp::Ordering::Equal => TrailState::Current,
-            std::cmp::Ordering::Greater => TrailState::Upcoming,
-        };
-    }
-    trail
-}
-
 /// One line of Claude's activity, such as "read src/cli.rs".
 pub fn activity_text(kind: ActivityKind, label: &str) -> String {
     match kind {
@@ -760,31 +730,6 @@ mod tests {
         assert_eq!(
             composer_mode(&state, false),
             ComposerMode::Disabled("Claude is not connected.")
-        );
-    }
-
-    #[test]
-    fn phase_trail_marks_each_phase() {
-        use TrailState::{Current, Done, Upcoming};
-        assert_eq!(
-            phase_trail(Phase::Discuss),
-            [
-                ("Discuss", Current),
-                ("Plan", Upcoming),
-                ("Build", Upcoming)
-            ]
-        );
-        assert_eq!(
-            phase_trail(Phase::Plan),
-            [("Discuss", Done), ("Plan", Current), ("Build", Upcoming)]
-        );
-        assert_eq!(
-            phase_trail(Phase::Build),
-            [("Discuss", Done), ("Plan", Done), ("Build", Current)]
-        );
-        assert_eq!(
-            phase_trail(Phase::Done),
-            [("Discuss", Done), ("Plan", Done), ("Build", Done)]
         );
     }
 

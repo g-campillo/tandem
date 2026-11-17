@@ -6,10 +6,11 @@ This document describes the design as the code implements it. Setup and day-to-d
 
 ## The flow
 
-A task moves through four phases. The chat header shows the first three as a trail, `Discuss › Plan › Build`, with the current one emphasised; when the task is done, all three are finished.
+A task moves through four phases: Discuss, Plan, Build and Done. The chat header shows the active task's title on the task button; the task menu shows each task's phase.
 
 ```
-Chat · Claude              Discuss › Plan › Build
+Chat · Claude
+[ Print results as JSON when --json is set ▾ ]  ⚙
 ─────────────────────────────────────────────────
 You  Add a --json flag to the CLI
 Claude
@@ -37,7 +38,7 @@ Claude
   Model ▾  Effort ▾  Permissions: Ask ▾      [↑]
 ```
 
-Each project has its own list of tasks. The task button in the chat header lists them as `<title> · <phase>` and offers `New task` (also in the **Chat** menu). A task is titled after your first message, and after the plan's goal once there is a plan. `New task` does nothing while the current task is still empty, and you cannot switch tasks while Claude is working.
+Each project has its own list of tasks. The task button in the chat header shows the active task's title (`Tasks` when there is none) with a border and a `▾`; its menu offers `New task` (also in the **Chat** menu) and lists the tasks as `<title> · <phase>`. A task is titled after your first message, and after the plan's goal once there is a plan. `New task` does nothing while the current task is still empty, and you cannot switch tasks while Claude is working.
 
 ### Discuss
 
@@ -110,7 +111,7 @@ Snapshots live in the Tandem state folder under `takeover/<id>/` and are removed
 
 ### Done
 
-A finished task shows `Task complete.` and all three phases as finished. You can still chat with Claude about it; Claude no longer edits files in it, except in Bypass when you ask for a change. Start a new task for the next feature.
+A finished task shows `Task complete.`, and the task menu lists it as `<title> · Done`. You can still chat with Claude about it; Claude no longer edits files in it, except in Bypass when you ask for a change. Start a new task for the next feature.
 
 ## Help levels
 
