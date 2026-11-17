@@ -458,7 +458,7 @@ impl ProjectSession {
             pull_diagnostics: false,
             closed: false,
             language:if config.python.is_some(){"python"}else{"rust"},
-            configuration:config.python.as_ref().map(|p|json!({"python":{"pythonPath":p.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":true}},"pyright":{"disableOrganizeImports":true}})).unwrap_or(json!({})),
+            configuration:config.python.as_ref().map(|p|json!({"python":{"pythonPath":p.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":true}},"pyright":{"disableOrganizeImports":false}})).unwrap_or(json!({})),
             diagnostic_versions:BTreeMap::new(),version_counter:0,synced_sequence:u64::MAX,
             capabilities: Value::Null,
             collected_edits: None,

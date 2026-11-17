@@ -873,7 +873,8 @@ impl Workspace {
     /// screen or the accepted word is gone (see `AcceptedAt::still_applies`). The edit is
     /// one undo step the toolkit does not see as typing; the selection then goes where
     /// the entry says, a snippet's tab stops start, and an entry that asks for the list
-    /// again or for parameter hints gets them at the new cursor.
+    /// again or for parameter hints gets them at the new cursor; any other command of the
+    /// entry runs on the language server when the server lists it.
     fn insert_accepted(&mut self, accepted: Accepted, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self
             .ide_target()
@@ -937,12 +938,16 @@ impl Workspace {
         if !self.apply_accepted(&target.editor, plan, window, cx) {
             return;
         }
-        match command.as_ref().map(|command| command.command.as_str()) {
-            Some(TRIGGER_SUGGEST) => self.suggest_again(accepted.editor, window, cx),
-            Some(signature::TRIGGER_PARAMETER_HINTS) => {
+        match command {
+            Some(command) if command.command == TRIGGER_SUGGEST => {
+                self.suggest_again(accepted.editor, window, cx)
+            }
+            Some(command) if command.command == signature::TRIGGER_PARAMETER_HINTS => {
                 self.signature_after_accept(accepted.editor, cx)
             }
-            _ => {}
+            // A server command runs only when the server lists it.
+            Some(command) => self.run_server_command(command, window, cx),
+            None => {}
         }
     }
 

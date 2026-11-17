@@ -1,9 +1,10 @@
 //! Tandem's IDE layer over the toolkit editor: the per-language editing rules, the
 //! corrections made right after a keystroke (indentation and tag closing), Tandem's own
 //! completion list, the tab stops of inserted snippets, the parameter hints, the
-//! highlights of the symbol under the cursor, Rename Symbol and the language server's
-//! edits to several files. Every edit this layer makes to a buffer goes through
-//! [`Workspace::ide_replace`], one undo step each.
+//! highlights of the symbol under the cursor, Rename Symbol, Quick Fix and Organize
+//! Imports, and the language server's edits to several files. Every edit this layer makes
+//! to a buffer goes through [`Workspace::ide_replace`], one undo step each.
+mod actions;
 mod complete;
 mod edits;
 mod highlights;
@@ -61,6 +62,9 @@ pub(super) struct IdeUi {
     /// The request of Rename Symbol in flight (the symbol to rename, or the rename itself);
     /// dropping it cancels it.
     renaming: Option<Task<()>>,
+    /// A step of a code action or Organize Imports waiting for the language server;
+    /// dropping it cancels it.
+    acting: Option<Task<()>>,
     /// What the key listeners may take, kept current with the popups.
     keys: Rc<Cell<KeyClaim>>,
 }
@@ -401,7 +405,8 @@ impl Workspace {
     /// Starts the IDE layer for a tab's editor. Called after the tab's own subscription
     /// exists, so the document snapshot is taken before `ide_edits` sees an edit. The
     /// tab's completion source stays for the life of the tab; it offers the language's
-    /// snippets while language tools are off.
+    /// snippets while language tools are off. So does its code-action source, which says
+    /// in the status bar why there are no code actions while language tools are off.
     pub(super) fn attach_ide(
         &mut self,
         editor: &Entity<EditorState>,
@@ -437,8 +442,12 @@ impl Workspace {
             language,
             triggers: triggers.clone(),
         });
+        let actions = Rc::new(actions::CodeActionSource {
+            workspace: cx.entity().downgrade(),
+        });
         editor.update(cx, |editor, _| {
             editor.lsp_mut().completion_provider = Some(source);
+            editor.lsp_mut().code_action_providers = vec![actions];
         });
         self.ide.tabs.insert(
             editor.entity_id(),

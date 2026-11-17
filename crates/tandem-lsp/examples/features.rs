@@ -2,15 +2,18 @@
 //! Run from the repository root:
 //! `cargo run -p tandem-lsp --example features [rust|python]`.
 use anyhow::{Context, Result, bail, ensure};
-use lsp_types::{CompletionItem, InsertTextFormat};
+use lsp_types::{CodeAction, CompletionItem, InsertTextFormat};
 use serde_json::{Value, json};
 use std::{collections::HashMap, future::Future, path::Path, sync::Arc, time::Duration};
 use tandem_core::edit::indent::language_default;
+use tandem_lsp::features::actions::{
+    ORGANIZE_IMPORTS, code_action_params, code_actions, organize_imports,
+};
 use tandem_lsp::features::capabilities::ServerFeatures;
 use tandem_lsp::features::completion::{
     accept_item, completion_items, completion_params, word_start,
 };
-use tandem_lsp::features::edits::{relative_edits, workspace_edit};
+use tandem_lsp::features::edits::{command_edits, relative_edits, workspace_edit};
 use tandem_lsp::features::highlights::document_highlights;
 use tandem_lsp::features::signature::{signature_help, signature_params, signature_view};
 use tandem_lsp::*;
@@ -180,7 +183,74 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
         )
         .await,
     );
+    checks.record(
+        "rust actions",
+        rust_actions(&manager, &mut docs, project).await,
+    );
     manager.stop();
+}
+
+/// On the `for shape in shapes` line rust-analyzer offers code actions; resolving the first
+/// one that has `data` gives an edit to `src/lib.rs` that applies to its text.
+async fn rust_actions(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    project: &Path,
+) -> Result<()> {
+    let lib = project.join("src/lib.rs");
+    set_text(manager, docs, &lib, RUST_LIB);
+    let cursor = RUST_LIB.find("for shape in shapes").unwrap();
+    let params = code_action_params(RUST_LIB, cursor..cursor, vec![], None)?;
+    let reply = retry(|| {
+        let params = params.clone();
+        let lib = &lib;
+        async move {
+            manager
+                .request("textDocument/codeAction", lib, "fixture", RUST_LIB, params)
+                .await
+        }
+    })
+    .await?;
+    let actions = code_actions(&reply.value);
+    ensure!(!actions.is_empty(), "no code actions on the for line");
+    println!(
+        "rust actions: {}",
+        actions
+            .iter()
+            .map(|action| action.title.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let action = actions
+        .iter()
+        .find(|action| action.data.is_some())
+        .context("no code action on the for line can be resolved")?;
+    let resolved = manager
+        .request(
+            "codeAction/resolve",
+            &lib,
+            "fixture",
+            RUST_LIB,
+            serde_json::to_value(action)?,
+        )
+        .await?;
+    let resolved: CodeAction = serde_json::from_value(resolved.value)?;
+    let edit = resolved
+        .edit
+        .with_context(|| format!("resolving {:?} gave no edit", action.title))?;
+    let root = std::fs::canonicalize(project)?;
+    let edited = relative_edits(&root, workspace_edit(&serde_json::to_value(edit)?)?)?;
+    let (_, edits) = edited
+        .iter()
+        .find(|(path, _)| path == "src/lib.rs")
+        .with_context(|| format!("{:?} does not edit src/lib.rs", action.title))?;
+    let changed = apply_text_edits(RUST_LIB, edits)?;
+    ensure!(
+        changed != RUST_LIB,
+        "{:?} leaves src/lib.rs as it is",
+        action.title
+    );
+    Ok(())
 }
 
 /// A rename of `total_area` to `sum_area` to check: where it is asked for (`delta` bytes
@@ -529,7 +599,83 @@ async fn python_checks(project: &Path, checks: &mut Checks) {
         "python signature",
         signature(&manager, &mut docs, &main, &probe).await,
     );
+    checks.record(
+        "python organize_imports",
+        python_organize_imports(&manager, &mut docs, project).await,
+    );
     manager.stop();
+}
+
+/// When Pyright offers organize imports for `main.py`, its command is one Pyright lists,
+/// and the edits the command asks for sort the imports. Pyright 1.1.414 offers no such
+/// action (its code actions are only quick fixes, and it lists no commands), so there
+/// Tandem's Organize Imports says the server has none, and the check says so on its own
+/// line and requires only that Pyright answers the request with a list.
+async fn python_organize_imports(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    project: &Path,
+) -> Result<()> {
+    let main = project.join("main.py");
+    set_text(manager, docs, &main, PYTHON_MAIN);
+    let params = code_action_params(
+        PYTHON_MAIN,
+        0..PYTHON_MAIN.len(),
+        vec![],
+        Some(&[ORGANIZE_IMPORTS]),
+    )?;
+    let reply = manager
+        .request(
+            "textDocument/codeAction",
+            &main,
+            "fixture",
+            PYTHON_MAIN,
+            params,
+        )
+        .await?;
+    ensure!(
+        reply.value.is_null() || reply.value.is_array(),
+        "the code action reply is not a list: {}",
+        reply.value
+    );
+    let Some(action) = organize_imports(&code_actions(&reply.value)) else {
+        println!(
+            "note python organize_imports: Pyright offers no organize-imports action \
+             (it lists the commands {:?}), so Organize Imports says the server has none",
+            manager.capabilities().commands()
+        );
+        return Ok(());
+    };
+    let command = action
+        .command
+        .context("the organize-imports action runs no command")?;
+    let commands = manager.capabilities().commands();
+    ensure!(
+        commands.contains(&command.command),
+        "Pyright does not list {} among its commands {commands:?}",
+        command.command
+    );
+    let reply = manager
+        .request(
+            "workspace/executeCommand",
+            &main,
+            "fixture",
+            PYTHON_MAIN,
+            json!({"command": command.command, "arguments": command.arguments}),
+        )
+        .await?;
+    let root = std::fs::canonicalize(project)?;
+    let edited = relative_edits(&root, command_edits(&reply.value, &main)?)?;
+    let (_, edits) = edited
+        .iter()
+        .find(|(path, _)| path == "main.py")
+        .with_context(|| format!("organize imports does not edit main.py: {}", reply.value))?;
+    let organized = apply_text_edits(PYTHON_MAIN, edits)?;
+    ensure!(
+        organized.starts_with("import os\nimport sys"),
+        "organize imports gave:\n{organized}"
+    );
+    Ok(())
 }
 
 fn write_rust_fixture(project: &Path) -> Result<()> {
