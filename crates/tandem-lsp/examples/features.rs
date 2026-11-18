@@ -16,6 +16,7 @@ use tandem_lsp::features::completion::{
 use tandem_lsp::features::edits::{command_edits, relative_edits, workspace_edit};
 use tandem_lsp::features::highlights::document_highlights;
 use tandem_lsp::features::inlay::{LineHint, eol_hints, hint_text, inlay_params};
+use tandem_lsp::features::locations::locations;
 use tandem_lsp::features::signature::{signature_help, signature_params, signature_view};
 use tandem_lsp::features::symbols::workspace_symbols;
 use tandem_lsp::*;
@@ -143,6 +144,8 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
                 "signatureHelpProvider",
                 "inlayHintProvider",
                 "workspaceSymbolProvider",
+                "typeDefinitionProvider",
+                "implementationProvider",
             ],
             &[
                 (
@@ -198,7 +201,82 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
         "rust workspace_symbol",
         workspace_symbol(&manager, &mut docs, project, ("src/lib.rs", RUST_LIB)).await,
     );
+    checks.record(
+        "rust type_definition",
+        location(
+            &manager,
+            &mut docs,
+            &lib,
+            Lookup {
+                method: "textDocument/typeDefinition",
+                needle: "for shape",
+                delta: "for ".len(),
+                expected: "pub struct Square",
+            },
+        )
+        .await,
+    );
+    checks.record(
+        "rust implementation",
+        location(
+            &manager,
+            &mut docs,
+            &lib,
+            Lookup {
+                method: "textDocument/implementation",
+                needle: "pub trait Shape",
+                delta: "pub trait ".len(),
+                expected: "impl Shape for Square",
+            },
+        )
+        .await,
+    );
     manager.stop();
+}
+
+/// A request for the places of the symbol `delta` bytes into the first `needle` of the
+/// Rust fixture, and the text of the line one of them must be on.
+struct Lookup {
+    method: &'static str,
+    needle: &'static str,
+    delta: usize,
+    expected: &'static str,
+}
+
+/// The server's reply to `lookup.method` at the lookup's symbol of `RUST_LIB` has a place
+/// in `lib` on a line that contains `lookup.expected`.
+async fn location(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    lib: &Path,
+    lookup: Lookup,
+) -> Result<()> {
+    set_text(manager, docs, lib, RUST_LIB);
+    let params = at(RUST_LIB, lookup.needle, lookup.delta);
+    let reply = retry(|| {
+        let params = params.clone();
+        async move {
+            manager
+                .request(lookup.method, lib, "fixture", RUST_LIB, params)
+                .await
+        }
+    })
+    .await?;
+    let found = locations(&reply.value);
+    let lib = std::fs::canonicalize(lib)?;
+    let line = found
+        .iter()
+        .filter(|(path, _)| std::fs::canonicalize(path).ok().as_ref() == Some(&lib))
+        .filter_map(|(_, range)| RUST_LIB.lines().nth(range.start.line as usize))
+        .find(|line| line.contains(lookup.expected))
+        .with_context(|| {
+            format!(
+                "no place on a `{}` line of lib.rs: {found:?}",
+                lookup.expected
+            )
+        })?;
+    println!("{}: lib.rs {}", lookup.method, line.trim());
+    Ok(())
 }
 
 /// On the `for shape in shapes` line rust-analyzer offers code actions; resolving the first
