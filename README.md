@@ -123,3 +123,7 @@ Building, verifying, installing and rolling back a local release are described i
 - [docs/tandem/local-use.md](docs/tandem/local-use.md): installing, first run, shortcuts, recovery and building a release.
 - [docs/tandem/third-party-notices.md](docs/tandem/third-party-notices.md): what the third-party notices of a release cover.
 - Historical documents from the earlier Codex-based design, kept for reference: [the original plan](docs/tandem/README.md), [product](docs/tandem/product.md), [architecture](docs/tandem/architecture.md), [UX](docs/tandem/ux.md), [roadmap](docs/tandem/roadmap.md), [verification](docs/tandem/verification.md), [guided companion verification](docs/tandem/guided-companion.md), [native glass refresh](docs/tandem/native-glass-refresh.md), and the milestone reports [M0](docs/tandem/m0-progress.md), [M1](docs/tandem/m1-progress.md), [M2](docs/tandem/m2-progress.md), [M3](docs/tandem/m3-progress.md), [M4](docs/tandem/m4-progress.md) and [M5](docs/tandem/m5-progress.md).
+
+## License
+
+Tandem's source code is released under the [MIT License](LICENSE). Third-party components keep their own licenses, and a packaged build is still not redistributable because it contains Claude Code (see Limits above).
