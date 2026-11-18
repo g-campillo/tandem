@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import plistlib
+import subprocess
 import shutil
 import sqlite3
 from contextlib import closing
@@ -118,10 +120,12 @@ class ReleaseSafety(unittest.TestCase):
 
             with patch.object(release, 'PINS', pinned(self.bundled_binary(older))), \
                  patch.object(release, 'copy_helper', side_effect=copy_fixture_helper), \
+                 patch.object(release, 'compile_icon', return_value={'CFBundleIconName': 'Tandem'}), \
                  patch.object(release, 'verify_signature'), \
                  patch.object(release.subprocess, 'run'):
                 release.package(binary, notices, current, 'current-schema-six')
                 packaged = json.loads((current / 'Contents/Resources/release-manifest.json').read_text())
+                self.assertEqual(plistlib.loads((current / 'Contents/Info.plist').read_bytes())['CFBundleIconName'], 'Tandem')
                 self.assertEqual(packaged['database_schema'], 6)
                 self.assertEqual(packaged['claude_agent_sdk_version'], release.PINS['claude_agent_sdk_version'])
                 self.assertEqual(packaged['claude_code_version'], release.PINS['claude_code_version'])
@@ -147,6 +151,17 @@ class ReleaseSafety(unittest.TestCase):
                 copy.assert_not_called()
             self.assertFalse((root/'out').exists())
 
+    @unittest.skipUnless(subprocess.run(['/usr/bin/xcrun', '--find', 'actool'], capture_output=True).returncode == 0, 'needs Xcode')
+    def test_compile_icon_writes_the_asset_catalog_and_icns_and_names_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            resources=Path(tmp)
+            self.assertEqual(release.compile_icon(resources),{'CFBundleIconName':'Tandem','CFBundleIconFile':'Tandem'})
+            self.assertEqual(sorted(p.name for p in resources.iterdir()),['Assets.car','Tandem.icns'])
+    def test_compile_icon_reports_why_actool_failed(self):
+        failure=subprocess.CompletedProcess([],1,stdout=plistlib.dumps({'com.apple.actool.errors':[{'description':'Failed to create a catalog'}]}),stderr=b'')
+        with tempfile.TemporaryDirectory() as tmp, patch.object(release.subprocess,'run',return_value=failure):
+            with self.assertRaisesRegex(ValueError,'did not compile: Failed to create a catalog'):release.compile_icon(Path(tmp))
+            self.assertEqual(list(Path(tmp).iterdir()),[])
     def test_copy_helper_copies_the_runtime_without_installer_links_or_tests(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);helper=fake_helper(root);resources=root/'Resources'

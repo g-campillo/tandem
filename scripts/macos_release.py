@@ -18,6 +18,8 @@ HELPER = ROOT / 'crates/tandem-claude/helper'
 PINS = json.loads((ROOT / 'scripts/release-inputs.json').read_text())
 CLAUDE_BINARY = 'node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude'
 SDK_LOCK_KEY = 'node_modules/@anthropic-ai/claude-agent-sdk'
+APP_ICON = ROOT / 'crates/tandem/resources/Tandem.icon'
+MINIMUM_MACOS = '27.0'
 # Listing every file of the helper's npm tree makes a manifest of about 1.5 MB.
 MANIFEST_LIMIT = 8 * 1024 * 1024
 
@@ -78,6 +80,32 @@ def copy_helper(resources):
     if links:
         shutil.rmtree(target)
         raise ValueError('The helper contains a symlink: ' + str(links[0].relative_to(target)))
+
+def compile_icon(resources):
+    """Compile the Liquid Glass app icon into resources; returns the Info.plist keys that name it.
+
+    actool writes Assets.car (light, dark and tinted renditions) and a Tandem.icns
+    fallback. Needs Xcode: the Command Line Tools do not include actool.
+    """
+    with tempfile.TemporaryDirectory(prefix='.tandem-icon-') as temporary:
+        output = Path(temporary)
+        result = subprocess.run(['/usr/bin/xcrun', 'actool', str(APP_ICON), '--compile', str(output),
+                                 '--platform', 'macosx', '--minimum-deployment-target', MINIMUM_MACOS,
+                                 '--app-icon', APP_ICON.stem, '--output-format', 'xml1',
+                                 '--output-partial-info-plist', str(output / 'partial.plist')],
+                                capture_output=True)
+        try:
+            errors = plistlib.loads(result.stdout).get('com.apple.actool.errors', [])
+        except Exception:
+            errors = [{'description': result.stderr.decode(errors='replace').strip() or 'actool failed'}]
+        if result.returncode or errors:
+            reason = '; '.join(error.get('description', '') for error in errors) or f'actool exited with {result.returncode}'
+            raise ValueError('The app icon did not compile: ' + reason)
+        for name in ['Assets.car', APP_ICON.stem + '.icns']:
+            if not (output / name).is_file():
+                raise ValueError('The app icon did not compile: actool wrote no ' + name)
+            shutil.copy2(output / name, resources / name)
+        return plistlib.loads((output / 'partial.plist').read_bytes())
 
 def verify_signature(bundle):
     subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(bundle)], check=True, capture_output=True)
@@ -142,11 +170,12 @@ def package(binary, notices, destination, release_id):
         copy_helper(resources)
         shutil.copytree(notices, resources / 'ThirdPartyNotices')
         (resources / 'LOCAL-USE.md').write_text((ROOT / 'docs/tandem/local-use.md').read_text())
+        icon_keys = compile_icon(resources)
         (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({
             'CFBundleExecutable': 'tandem', 'CFBundleIdentifier': 'dev.tandem.ide',
             'CFBundleName': 'Tandem', 'CFBundlePackageType': 'APPL',
             'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '6',
-            'LSMinimumSystemVersion': '27.0', 'NSHighResolutionCapable': True,
+            'LSMinimumSystemVersion': MINIMUM_MACOS, 'NSHighResolutionCapable': True, **icon_keys,
         }))
         # Sign the main executable before hashing it; the outer seal does not
         # re-sign the bundled Claude Code binary and so preserves its pinned bytes.

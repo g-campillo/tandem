@@ -8,7 +8,7 @@ import subprocess
 import os
 import tempfile
 import argparse
-from macos_release import copy_helper
+from macos_release import compile_icon, copy_helper
 
 root = Path(__file__).resolve().parents[1]
 binary = root / "target/debug/tandem"
@@ -29,11 +29,12 @@ try:
     os.replace(pending_path, destination)
 finally:
     pending_path.unlink(missing_ok=True)
+icon_keys = compile_icon(bundle / "Contents/Resources")
 (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
     "CFBundleExecutable": "tandem", "CFBundleIdentifier": "dev.tandem.desktop" if profile == "m1" else f"dev.tandem.{profile}qa",
     "CFBundleName": "Tandem" if profile == "m1" else f"Tandem {profile.upper()}", "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": profile[1:],
-    "NSHighResolutionCapable": True,
+    "NSHighResolutionCapable": True, **icon_keys,
 }))
 copy_helper(bundle / "Contents/Resources")
 subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)], check=True)

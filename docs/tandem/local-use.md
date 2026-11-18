@@ -141,7 +141,7 @@ Quit Tandem first. Rollback changes only the launcher link, never the database. 
 
 ## Build and verify another local release
 
-You need Rust 1.100.0, Node.js 20 or newer with npm, and network access (npm packages and two public license texts are downloaded). Commit the source you want to package and check that `git status --short` prints nothing. Choose a new release id from the date and the short commit id; packaging never overwrites an existing release. Then, from the repository root:
+You need Rust 1.100.0, Node.js 20 or newer with npm, Xcode (packaging compiles the app icon with its `actool`; the Command Line Tools alone do not include it), and network access (npm packages and two public license texts are downloaded). Commit the source you want to package and check that `git status --short` prints nothing. Choose a new release id from the date and the short commit id; packaging never overwrites an existing release. Then, from the repository root:
 
 ```sh
 RELEASE=claude-companion-YYYYMMDD-SHORTHEAD   # for example claude-companion-20261116-1a2b3c4
@@ -161,7 +161,7 @@ python3 scripts/macos_release.py verify "$PWD/.tandem-local/releases/$RELEASE/Ta
 - `npm ci` installs exactly the helper packages in `package-lock.json`, including the Claude Agent SDK and its Claude Code binary.
 - `prepare-notices.py` downloads the pinned MIT and Apache-2.0 license texts, writes Tandem's cargo metadata, and checks that the installed helper matches the pins in `scripts/release-inputs.json` (Claude Agent SDK version and Claude Code binary fingerprint). Its private working folder is `.tandem-local/m5`, a name kept from an earlier milestone.
 - `collect-notices.py` gathers the notices of Tandem's cargo dependencies and of the helper's npm packages, and must end with `0 unresolved notices`. See [third-party-notices.md](third-party-notices.md).
-- `package` refuses notices collected from a different `Cargo.lock` or helper lockfile, unresolved notices, a helper that does not match its pins, and an existing release id. It writes `.tandem-local/releases/<release-id>/Tandem.app`, signed ad hoc.
+- `package` refuses notices collected from a different `Cargo.lock` or helper lockfile, unresolved notices, a helper that does not match its pins, and an existing release id. It compiles the app icon, `crates/tandem/resources/Tandem.icon`, into `Assets.car` and a `Tandem.icns` fallback, and writes `.tandem-local/releases/<release-id>/Tandem.app`, signed ad hoc.
 - `--runtime-status` should print `Claude helper bundled · …/Contents/Resources/claude-helper/main.mjs · Node <version> · <path>`.
 
 Keep the bundle, its inventory and your test notes private under `.tandem-local/`. Verification checks the files and the signature; it does not prove that the app works well, and the build is not notarized. Installing is the separate `install` command shown at the top.
