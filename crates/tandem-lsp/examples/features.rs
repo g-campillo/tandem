@@ -9,6 +9,7 @@ use tandem_core::edit::indent::language_default;
 use tandem_lsp::features::actions::{
     ORGANIZE_IMPORTS, code_action_params, code_actions, organize_imports, pyright_organize_imports,
 };
+use tandem_lsp::features::calls::{incoming, prepared};
 use tandem_lsp::features::capabilities::ServerFeatures;
 use tandem_lsp::features::completion::{
     accept_item, completion_items, completion_params, word_start,
@@ -146,6 +147,7 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
                 "workspaceSymbolProvider",
                 "typeDefinitionProvider",
                 "implementationProvider",
+                "callHierarchyProvider",
             ],
             &[
                 (
@@ -231,6 +233,10 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
         )
         .await,
     );
+    checks.record(
+        "rust call_hierarchy",
+        call_hierarchy(&manager, &mut docs, &lib, RUST_LIB, "fn total_area").await,
+    );
     manager.stop();
 }
 
@@ -276,6 +282,57 @@ async fn location(
             )
         })?;
     println!("{}: lib.rs {}", lookup.method, line.trim());
+    Ok(())
+}
+
+/// Preparing the call hierarchy on the name of the `total_area` definition (`definition`
+/// is the text before the name) in `file`, whose text is `text`, finds `total_area`, and
+/// its incoming calls include `describe`, whose call is on a line of `file` that calls
+/// `total_area`.
+async fn call_hierarchy(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    file: &Path,
+    text: &str,
+    definition: &str,
+) -> Result<()> {
+    set_text(manager, docs, file, text);
+    let params = at(text, definition, definition.len() - "total_area".len());
+    let request = |method: &'static str, params: Value| {
+        retry(move || {
+            let params = params.clone();
+            async move { manager.request(method, file, "fixture", text, params).await }
+        })
+    };
+    let reply = request("textDocument/prepareCallHierarchy", params).await?;
+    let root = prepared(&reply.value)
+        .into_iter()
+        .find(|item| item.name == "total_area")
+        .with_context(|| format!("the server prepared no total_area item: {}", reply.value))?;
+    let reply = request("callHierarchy/incomingCalls", json!({"item": root.raw})).await?;
+    let callers = incoming(&reply.value);
+    let (caller, call_line) = callers
+        .iter()
+        .find(|(item, _)| item.name == "describe")
+        .with_context(|| format!("describe is not among the callers: {}", reply.value))?;
+    ensure!(
+        std::fs::canonicalize(&caller.path)? == std::fs::canonicalize(file)?,
+        "describe is in {}, not in {}",
+        caller.path.display(),
+        file.display()
+    );
+    let line = call_line
+        .and_then(|line| text.lines().nth(line as usize))
+        .with_context(|| format!("the call of describe is on no line: {call_line:?}"))?;
+    ensure!(
+        line.contains("total_area("),
+        "the call line of describe does not call total_area: {line:?}"
+    );
+    println!(
+        "callHierarchy/incomingCalls: total_area <- {} ({})",
+        caller.name,
+        line.trim()
+    );
     Ok(())
 }
 
@@ -767,6 +824,7 @@ async fn python_checks(project: &Path, checks: &mut Checks) {
                 "signatureHelpProvider",
                 "documentHighlightProvider",
                 "workspaceSymbolProvider",
+                "callHierarchyProvider",
             ],
             &[],
         ),
@@ -799,6 +857,17 @@ async fn python_checks(project: &Path, checks: &mut Checks) {
     checks.record(
         "python workspace_symbol",
         workspace_symbol(&manager, &mut docs, project, ("shapes.py", PYTHON_SHAPES)).await,
+    );
+    checks.record(
+        "python call_hierarchy",
+        call_hierarchy(
+            &manager,
+            &mut docs,
+            &shapes,
+            PYTHON_SHAPES,
+            "def total_area",
+        )
+        .await,
     );
     manager.stop();
 }

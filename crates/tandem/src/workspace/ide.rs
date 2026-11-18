@@ -5,9 +5,11 @@
 //! Imports, Format Document and Format on Save, the type and parameter-name hints at the
 //! end of the line, the language server's edits to several files, the Outline section of
 //! the Explorer, the workspace symbols of the command center, Go to Type Definition and Go
-//! to Implementation, and the Editor section of Settings. Every edit this layer makes to a
-//! buffer goes through [`Workspace::ide_replace`], one undo step each.
+//! to Implementation, the call hierarchy of the Problems panel, and the Editor section of
+//! Settings. Every edit this layer makes to a buffer goes through
+//! [`Workspace::ide_replace`], one undo step each.
 mod actions;
+mod calls;
 mod complete;
 mod edits;
 mod format;
@@ -24,6 +26,7 @@ mod signature;
 mod snippets;
 mod symbols;
 
+pub(super) use calls::CallDirection;
 pub(super) use rules::register_language_rules;
 
 use super::fonts::Face;
@@ -86,6 +89,8 @@ pub(super) struct IdeUi {
     /// Go to Type Definition or Go to Implementation waiting for the language server;
     /// dropping it cancels it.
     navigating: Option<Task<()>>,
+    /// The call hierarchy of the Problems panel, with its requests.
+    calls: calls::CallsUi,
     /// The editor settings, read from the store on first use.
     prefs: OnceCell<EditorPrefs>,
     /// What the key listeners may take, kept current with the popups.

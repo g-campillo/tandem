@@ -1,5 +1,6 @@
 //! Commands of the language features of the code editor, in the View, Go and Code menus.
 use super::*;
+use crate::workspace::ide::CallDirection;
 use gpui_kit::component::input::ToggleCodeActions;
 
 actions!(
@@ -12,7 +13,9 @@ actions!(
         ShowOutline,
         GoToSymbolInWorkspace,
         GoToTypeDefinition,
-        GoToImplementation
+        GoToImplementation,
+        ShowCallHierarchy,
+        ShowOutgoingCalls
     ]
 );
 
@@ -35,6 +38,8 @@ pub(super) fn go_specs() -> Vec<CommandSpec> {
         spec::<GoToSymbolInWorkspace>("Go to Symbol in Workspace…", Go, "⌘T", &["cmd-t"], Global),
         spec::<GoToTypeDefinition>("Go to Type Definition", Go, "", &[], Editor),
         spec::<GoToImplementation>("Go to Implementation", Go, "⌘F12", &["cmd-f12"], Editor),
+        spec::<ShowCallHierarchy>("Show Call Hierarchy", Go, "⇧⌥H", &["shift-alt-h"], Editor),
+        spec::<ShowOutgoingCalls>("Show Outgoing Calls", Go, "", &[], Editor),
     ]
 }
 
@@ -84,6 +89,12 @@ pub(super) fn install(cx: &mut App, window: AnyWindowHandle, view: &WeakEntity<W
             w,
             c,
         )
+    });
+    route::<ShowCallHierarchy>(cx, window, view, |v, w, c| {
+        v.show_call_hierarchy(CallDirection::Incoming, w, c)
+    });
+    route::<ShowOutgoingCalls>(cx, window, view, |v, w, c| {
+        v.show_call_hierarchy(CallDirection::Outgoing, w, c)
     });
 }
 
@@ -149,6 +160,26 @@ mod tests {
         assert!(spec.in_menu);
         assert_eq!(spec.shortcut, "⌘F12");
         assert_eq!(spec.keys, ["cmd-f12"]);
+        assert_eq!(spec.scope, KeyScope::Editor);
+    }
+
+    #[test]
+    fn show_call_hierarchy_is_shift_option_h_in_the_editor() {
+        let spec = command("Show Call Hierarchy");
+        assert_eq!(spec.menu, MenuId::Go);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "⇧⌥H");
+        assert_eq!(spec.keys, ["shift-alt-h"]);
+        assert_eq!(spec.scope, KeyScope::Editor);
+    }
+
+    #[test]
+    fn show_outgoing_calls_is_an_editor_command_without_a_key_in_the_go_menu() {
+        let spec = command("Show Outgoing Calls");
+        assert_eq!(spec.menu, MenuId::Go);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "");
+        assert!(spec.keys.is_empty());
         assert_eq!(spec.scope, KeyScope::Editor);
     }
 
