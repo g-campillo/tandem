@@ -7,3 +7,4 @@ pub mod edits;
 pub mod highlights;
 pub mod inlay;
 pub mod signature;
+pub mod symbols;

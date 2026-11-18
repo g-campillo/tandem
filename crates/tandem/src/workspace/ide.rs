@@ -4,15 +4,15 @@
 //! highlights of the symbol under the cursor, Rename Symbol, Quick Fix and Organize
 //! Imports, Format Document and Format on Save, the type and parameter-name hints at the
 //! end of the line, the language server's edits to several files, the Outline section of
-//! the Explorer, and the Editor section of Settings. Every edit this layer makes to a
-//! buffer goes through
+//! the Explorer, the workspace symbols of the command center, and the Editor section of
+//! Settings. Every edit this layer makes to a buffer goes through
 //! [`Workspace::ide_replace`], one undo step each.
 mod actions;
 mod complete;
 mod edits;
 mod format;
 mod highlights;
-mod icons;
+pub(in crate::workspace) mod icons;
 mod inlay;
 mod outline;
 mod popup;
@@ -21,6 +21,7 @@ mod rules;
 mod settings;
 mod signature;
 mod snippets;
+mod symbols;
 
 pub(super) use rules::register_language_rules;
 
@@ -79,6 +80,8 @@ pub(super) struct IdeUi {
     inlay: Option<inlay::InlayState>,
     /// Whether the Outline section of the Explorer is collapsed; it starts expanded.
     outline_collapsed: bool,
+    /// The workspace symbols of the command center's `#` query.
+    symbols: symbols::SymbolSearch,
     /// The editor settings, read from the store on first use.
     prefs: OnceCell<EditorPrefs>,
     /// What the key listeners may take, kept current with the popups.

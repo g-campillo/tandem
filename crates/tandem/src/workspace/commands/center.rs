@@ -1,11 +1,16 @@
 //! The command center in the title bar: one dialog that finds files by name (Quick Open,
-//! ⌘P) and, when the query starts with `>`, lists the commands (the command palette, ⇧⌘P).
+//! ⌘P), lists the commands when the query starts with `>` (the command palette, ⇧⌘P), and
+//! finds the symbols of the project when it starts with `#` (Go to Symbol in Workspace,
+//! ⌘T).
 use super::*;
+use crate::workspace::ide::icons::symbol_icon;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::command::{Command as Palette, CommandItem, CommandState};
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex};
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::rc::Rc;
+use tandem_lsp::features::symbols::SymbolHit;
 
 /// The most files Quick Open lists for one query.
 pub const MAX_FILE_ROWS: usize = 50;
@@ -17,6 +22,13 @@ pub enum CenterEntry {
     File(String),
     /// Runs the command at this index of `commands()`.
     Command(usize),
+    /// Opens the file at this project-relative path at this line (1-based); `kind` is the
+    /// symbol's SymbolKind number, for its icon.
+    Symbol {
+        path: String,
+        line: usize,
+        kind: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +43,40 @@ pub struct CenterRow {
 /// Whether `query` asks for commands instead of files.
 pub fn is_command_query(query: &str) -> bool {
     query.trim_start().starts_with('>')
+}
+
+/// Whether `query` asks for the symbols of the project instead of files.
+pub fn is_symbol_query(query: &str) -> bool {
+    query.trim_start().starts_with('#')
+}
+
+/// The rows of the workspace symbols `hits`, in their order: each symbol's name, then its
+/// container (when it has one) and its project-relative path and 1-based line. Symbols
+/// in files outside the project `root` (the standard library, dependencies) are skipped.
+pub fn symbol_rows(hits: &[SymbolHit], root: &Path) -> Vec<CenterRow> {
+    hits.iter()
+        .filter_map(|hit| {
+            let path = hit
+                .path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|relative| normalized_relative(relative).ok())?;
+            let line = hit.line as usize + 1;
+            let place = format!("{path}:{line}");
+            Some(CenterRow {
+                label: hit.name.clone(),
+                detail: match &hit.container {
+                    Some(container) => format!("{container} · {place}"),
+                    None => place,
+                },
+                entry: CenterEntry::Symbol {
+                    path,
+                    line,
+                    kind: hit.kind,
+                },
+            })
+        })
+        .collect()
 }
 
 /// The rows the command center shows for `query`.
@@ -92,7 +138,8 @@ pub fn center_rows(query: &str, files: &[String], specs: &[CommandSpec]) -> Vec<
 
 impl Workspace {
     /// Opens the command center with `prefix` as its query: `""` finds files (⌘P), `">"`
-    /// lists the commands (⇧⌘P). Closes it instead when a dialog is already open.
+    /// lists the commands (⇧⌘P), `"#"` finds the symbols of the project (⌘T). Closes it
+    /// instead when a dialog is already open.
     pub(in crate::workspace) fn open_center(
         &mut self,
         prefix: &'static str,
@@ -109,6 +156,7 @@ impl Workspace {
             .get_or_insert_with(|| cx.new(|cx| CommandState::new(window, cx)))
             .clone();
         state.update(cx, |state, cx| state.set_query(prefix, window, cx));
+        self.reset_workspace_symbols();
         let weak = cx.entity().downgrade();
         let first = Cell::new(true);
         // What each row on screen does, for `on_confirm`, which is given a row's index.
@@ -121,15 +169,28 @@ impl Workspace {
             // The dialog is drawn again whenever the query changes, so the rows always
             // answer the query on screen. The toolkit's own filter is off.
             let query = state.read(cx).query(cx);
-            let rows = weak
-                .upgrade()
-                .map(|view| center_rows(&query, &view.read(cx).index.files, &commands()))
-                .unwrap_or_default();
+            let rows = if is_symbol_query(&query) {
+                // The language server answers later; the search redraws the dialog then.
+                let rest = query.trim_start()[1..].trim();
+                weak.update(cx, |view, cx| {
+                    view.request_workspace_symbols(rest, window, cx);
+                    view.project
+                        .as_ref()
+                        .map(|project| symbol_rows(view.workspace_symbol_hits(), &project.root))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+            } else {
+                weak.upgrade()
+                    .map(|view| center_rows(&query, &view.read(cx).index.files, &commands()))
+                    .unwrap_or_default()
+            };
             *shown.borrow_mut() = rows.iter().map(|row| row.entry.clone()).collect();
             let items = rows.into_iter().map(|row| {
                 let icon = match row.entry {
                     CenterEntry::File(_) => Lucide::File,
                     CenterEntry::Command(_) => Lucide::ChevronRight,
+                    CenterEntry::Symbol { kind, .. } => symbol_icon(kind),
                 };
                 let (label, detail) = (row.label.clone(), row.detail);
                 // No `.action(…)`: the toolkit would dispatch it while the search field
@@ -156,7 +217,7 @@ impl Workspace {
                 Palette::new(&state)
                     .bordered(false)
                     .filterable(false)
-                    .placeholder("Search files by name · type > for commands")
+                    .placeholder("Search files by name · > commands · # symbols")
                     .items(items)
                     .on_confirm(move |index, window, cx| {
                         let entry = shown.borrow().get(index.row).cloned();
@@ -168,6 +229,10 @@ impl Workspace {
                             }
                             Some(CenterEntry::Command(index)) => {
                                 view.run_command(index, window, cx)
+                            }
+                            Some(CenterEntry::Symbol { path, line, .. }) => {
+                                view.settings.open = false;
+                                view.open_file(path, false, Some(line), window, cx);
                             }
                             None => {}
                         });
@@ -204,7 +269,12 @@ mod tests {
     // Explicit imports: `super::*` would bring in GPUI's `test` macro through `gpui_kit::*`
     // and shadow Rust's `#[test]`.
     use super::super::commands;
-    use super::{CenterEntry, MAX_FILE_ROWS, center_rows, is_command_query};
+    use super::{
+        CenterEntry, CenterRow, MAX_FILE_ROWS, center_rows, is_command_query, is_symbol_query,
+        symbol_rows,
+    };
+    use std::path::{Path, PathBuf};
+    use tandem_lsp::features::symbols::SymbolHit;
 
     fn files(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|path| (*path).to_owned()).collect()
@@ -224,6 +294,96 @@ mod tests {
         assert!(is_command_query("  > save"));
         assert!(!is_command_query(""));
         assert!(!is_command_query("save >"));
+    }
+
+    #[test]
+    fn a_query_that_starts_with_a_hash_asks_for_symbols() {
+        assert!(is_symbol_query("#"));
+        assert!(is_symbol_query("#Squa"));
+        assert!(is_symbol_query("  # Squa"));
+        assert!(!is_symbol_query(""));
+        assert!(!is_symbol_query("Squa #"));
+        assert!(!is_symbol_query(">#"));
+        assert!(!is_command_query("#>"));
+    }
+
+    fn hit(name: &str, container: Option<&str>, kind: u32, path: &str, line: u32) -> SymbolHit {
+        SymbolHit {
+            name: name.into(),
+            container: container.map(Into::into),
+            kind,
+            path: PathBuf::from(path),
+            line,
+        }
+    }
+
+    #[test]
+    fn symbol_rows_show_the_name_then_the_container_and_where_with_a_one_based_line() {
+        let hits = [
+            hit("Square", None, 23, "/project/src/lib.rs", 4),
+            hit(
+                "area",
+                Some("impl Shape for Square"),
+                6,
+                "/project/src/lib.rs",
+                9,
+            ),
+            hit("main", None, 12, "/project/main.rs", 0),
+        ];
+        assert_eq!(
+            symbol_rows(&hits, Path::new("/project")),
+            [
+                CenterRow {
+                    entry: CenterEntry::Symbol {
+                        path: "src/lib.rs".into(),
+                        line: 5,
+                        kind: 23
+                    },
+                    label: "Square".into(),
+                    detail: "src/lib.rs:5".into(),
+                },
+                CenterRow {
+                    entry: CenterEntry::Symbol {
+                        path: "src/lib.rs".into(),
+                        line: 10,
+                        kind: 6
+                    },
+                    label: "area".into(),
+                    detail: "impl Shape for Square · src/lib.rs:10".into(),
+                },
+                CenterRow {
+                    entry: CenterEntry::Symbol {
+                        path: "main.rs".into(),
+                        line: 1,
+                        kind: 12
+                    },
+                    label: "main".into(),
+                    detail: "main.rs:1".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn symbols_outside_the_project_are_skipped() {
+        let hits = [
+            hit(
+                "HashMap",
+                Some("std::collections"),
+                23,
+                "/toolchain/lib/rs/map.rs",
+                200,
+            ),
+            hit("Escape", None, 23, "/project/../elsewhere/lib.rs", 1),
+            hit("Prefix", None, 23, "/projectile/lib.rs", 1),
+            hit("Root", None, 2, "/project", 0),
+            hit("Square", None, 23, "/project/src/lib.rs", 4),
+        ];
+        let labels: Vec<String> = symbol_rows(&hits, Path::new("/project"))
+            .into_iter()
+            .map(|row| row.label)
+            .collect();
+        assert_eq!(labels, ["Square"]);
     }
 
     #[test]

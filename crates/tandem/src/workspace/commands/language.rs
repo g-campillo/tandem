@@ -9,7 +9,8 @@ actions!(
         TriggerParameterHints,
         RenameSymbol,
         OrganizeImports,
-        ShowOutline
+        ShowOutline,
+        GoToSymbolInWorkspace
     ]
 );
 
@@ -26,7 +27,13 @@ pub(super) fn view_specs() -> Vec<CommandSpec> {
 
 /// The language commands of the Go menu, listed after the others there.
 pub(super) fn go_specs() -> Vec<CommandSpec> {
-    Vec::new()
+    vec![spec::<GoToSymbolInWorkspace>(
+        "Go to Symbol in Workspace…",
+        MenuId::Go,
+        "⌘T",
+        &["cmd-t"],
+        KeyScope::Global,
+    )]
 }
 
 /// The language commands of the Code menu, listed after the others there.
@@ -57,6 +64,7 @@ pub(super) fn install(cx: &mut App, window: AnyWindowHandle, view: &WeakEntity<W
     route::<RenameSymbol>(cx, window, view, |v, w, c| v.rename_symbol(w, c));
     route::<OrganizeImports>(cx, window, view, |v, w, c| v.organize_imports(w, c));
     route::<ShowOutline>(cx, window, view, |v, w, c| v.show_outline(w, c));
+    route::<GoToSymbolInWorkspace>(cx, window, view, |v, w, c| v.open_center("#", w, c));
 }
 
 #[cfg(test)]
@@ -91,6 +99,16 @@ mod tests {
         assert!(spec.in_menu);
         assert_eq!(spec.shortcut, "");
         assert!(spec.keys.is_empty());
+        assert_eq!(spec.scope, KeyScope::Global);
+    }
+
+    #[test]
+    fn go_to_symbol_in_workspace_is_command_t_everywhere_in_the_go_menu() {
+        let spec = command("Go to Symbol in Workspace…");
+        assert_eq!(spec.menu, MenuId::Go);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "⌘T");
+        assert_eq!(spec.keys, ["cmd-t"]);
         assert_eq!(spec.scope, KeyScope::Global);
     }
 

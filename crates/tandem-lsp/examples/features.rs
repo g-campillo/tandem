@@ -17,6 +17,7 @@ use tandem_lsp::features::edits::{command_edits, relative_edits, workspace_edit}
 use tandem_lsp::features::highlights::document_highlights;
 use tandem_lsp::features::inlay::{LineHint, eol_hints, hint_text, inlay_params};
 use tandem_lsp::features::signature::{signature_help, signature_params, signature_view};
+use tandem_lsp::features::symbols::workspace_symbols;
 use tandem_lsp::*;
 
 const RUST_LIB: &str = r#"pub trait Shape {
@@ -141,6 +142,7 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
                 "documentHighlightProvider",
                 "signatureHelpProvider",
                 "inlayHintProvider",
+                "workspaceSymbolProvider",
             ],
             &[
                 (
@@ -191,6 +193,10 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
     checks.record(
         "rust actions",
         rust_actions(&manager, &mut docs, project).await,
+    );
+    checks.record(
+        "rust workspace_symbol",
+        workspace_symbol(&manager, &mut docs, project, ("src/lib.rs", RUST_LIB)).await,
     );
     manager.stop();
 }
@@ -340,6 +346,55 @@ async fn rename(
             "renaming left {path} as:\n{renamed}"
         );
     }
+    Ok(())
+}
+
+/// Searching the workspace for `Squa` finds a symbol named `Square` in `file` (its
+/// project-relative path and text), on the line that declares it.
+async fn workspace_symbol(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    project: &Path,
+    (file, text): (&str, &str),
+) -> Result<()> {
+    let path = project.join(file);
+    set_text(manager, docs, &path, text);
+    // Tandem's project root is canonical, as `Project::open` makes it.
+    let root = std::fs::canonicalize(project)?;
+    let square = |value: &Value| {
+        workspace_symbols(value).into_iter().find(|hit| {
+            hit.name == "Square" && hit.path.strip_prefix(&root).ok() == Some(Path::new(file))
+        })
+    };
+    let reply = retry(|| async {
+        let mut reply = manager
+            .request(
+                "workspace/symbol",
+                &path,
+                "fixture",
+                text,
+                json!({"query": "Squa"}),
+            )
+            .await?;
+        // Symbols of a project still loading count as no answer, so they are asked again.
+        if square(&reply.value).is_none() {
+            reply.value = Value::Null;
+        }
+        Ok(reply)
+    })
+    .await?;
+    let hit = square(&reply.value)
+        .with_context(|| format!("the server found no symbol named Square in {file}"))?;
+    let line = text
+        .lines()
+        .nth(hit.line as usize)
+        .with_context(|| format!("{file} has no line {}", hit.line + 1))?;
+    ensure!(
+        line.contains("Square"),
+        "line {} of {file} does not declare Square: {line:?}",
+        hit.line + 1
+    );
+    println!("{file}: Square on line {}: {}", hit.line + 1, line.trim());
     Ok(())
 }
 
@@ -662,6 +717,10 @@ async fn python_checks(project: &Path, checks: &mut Checks) {
     checks.record(
         "python organize_imports",
         python_organize_imports(&manager, &mut docs, project).await,
+    );
+    checks.record(
+        "python workspace_symbol",
+        workspace_symbol(&manager, &mut docs, project, ("shapes.py", PYTHON_SHAPES)).await,
     );
     manager.stop();
 }

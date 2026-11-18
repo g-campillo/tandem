@@ -41,7 +41,7 @@ pub(super) fn completion_icon(kind: Option<CompletionItemKind>) -> IconName {
 
 /// The icon for a document or workspace symbol of SymbolKind number `kind`; numbers the
 /// protocol does not define, and 0 for a symbol without a kind, get the generic code icon.
-pub(super) fn symbol_icon(kind: u32) -> IconName {
+pub(in crate::workspace) fn symbol_icon(kind: u32) -> IconName {
     match kind {
         1 => IconName::FileText,        // File
         2 => IconName::Package,         // Module
