@@ -8,6 +8,20 @@ use std::ops::Range;
 /// The kind of the action that sorts and cleans up a file's imports.
 pub const ORGANIZE_IMPORTS: &str = "source.organizeImports";
 
+/// The command Pyright organizes a file's imports with. Pyright offers no
+/// organize-imports code action and lists no commands, so Organize Imports runs this one
+/// command by name, for Pyright only.
+pub const PYRIGHT_ORGANIZE_IMPORTS: &str = "pyright.organizeimports";
+
+/// Pyright's organize-imports command for the document at `uri`.
+pub fn pyright_organize_imports(uri: &str) -> Command {
+    Command {
+        title: "Organize Imports".into(),
+        command: PYRIGHT_ORGANIZE_IMPORTS.into(),
+        arguments: Some(vec![Value::String(uri.into())]),
+    }
+}
+
 /// Params for `textDocument/codeAction` (the server adds `textDocument`): the byte `range`
 /// of `text` as a UTF-16 range, and a context with the `diagnostics` the range touches,
 /// the user's request as the trigger and, when given, the only kinds wanted.
@@ -293,5 +307,17 @@ mod tests {
         ]));
         assert_eq!(organize_imports(&actions), None);
         assert_eq!(organize_imports(&[]), None);
+    }
+
+    #[test]
+    fn pyrights_organize_imports_command_names_the_document() {
+        let command = pyright_organize_imports("file:///project/main.py");
+        assert_eq!(command.command, "pyright.organizeimports");
+        assert_eq!(command.command, PYRIGHT_ORGANIZE_IMPORTS);
+        assert_eq!(command.title, "Organize Imports");
+        assert_eq!(
+            command.arguments,
+            Some(vec![json!("file:///project/main.py")])
+        );
     }
 }

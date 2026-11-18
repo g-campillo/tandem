@@ -66,24 +66,30 @@ pub fn workspace_edit(value: &Value) -> Result<Vec<FileEdits>, EditRefusal> {
 /// `edits` entry (each a WorkspaceEdit), plus `result` when it is a WorkspaceEdit
 /// (has `changes` or `documentChanges`), a `TextEdit[]` (applies to `file`), or an
 /// object with an `edits` WorkspaceEdit (Pyright's CommandResult). Merged per file, the
-/// collected edits first since the server sent them before its result.
+/// collected edits first since the server sent them before its result. A WorkspaceEdit
+/// result that equals a collected edit is applied once: Pyright sends the edit its
+/// command returns through `workspace/applyEdit` too.
 pub fn command_edits(reply: &Value, file: &Path) -> Result<Vec<FileEdits>, EditRefusal> {
     let mut files = Files::default();
-    match reply.get("edits") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(edits)) => {
-            for edit in edits {
-                files.add_workspace_edit(edit)?;
-            }
-        }
+    let collected = match reply.get("edits") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(edits)) => edits.as_slice(),
         Some(_) => return Err(malformed("the collected edits are not a list")),
+    };
+    for edit in collected {
+        files.add_workspace_edit(edit)?;
     }
     let result = reply.get("result").unwrap_or(&Value::Null);
-    if result.get("changes").is_some() || result.get("documentChanges").is_some() {
-        files.add_workspace_edit(result)?;
+    let result_edit = if result.get("changes").is_some() || result.get("documentChanges").is_some()
+    {
+        Some(result)
     } else if is_text_edit_list(result) {
         files.add(file.to_path_buf(), text_edits(result)?);
-    } else if let Some(edit) = result.get("edits").filter(|edit| edit.is_object()) {
+        None
+    } else {
+        result.get("edits").filter(|edit| edit.is_object())
+    };
+    if let Some(edit) = result_edit.filter(|edit| !collected.contains(edit)) {
         files.add_workspace_edit(edit)?;
     }
     Ok(files.finish())
@@ -462,6 +468,35 @@ mod tests {
                 "/project/lib.rs",
                 vec![edit(0, 0, 1, "collected"), edit(5, 0, 1, "result")]
             )])
+        );
+    }
+
+    #[test]
+    fn a_result_the_server_also_sent_while_the_command_ran_is_applied_once() {
+        // Pyright sends the edit its command returns through `workspace/applyEdit` too.
+        let organized = json!({"changes": {"file:///project/main.py": [
+            {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 9}},
+             "newText": "import os\nimport sys"},
+        ]}});
+        let expected = Ok(vec![file(
+            "/project/main.py",
+            vec![TextEdit {
+                range: Range::new(Position::new(0, 0), Position::new(1, 9)),
+                new_text: "import os\nimport sys".into(),
+            }],
+        )]);
+        let workspace_edit = json!({"result": organized, "edits": [organized]});
+        assert_eq!(
+            command_edits(&workspace_edit, Path::new("/project/main.py")),
+            expected
+        );
+        let command_result = json!({
+            "result": {"label": "Organize Imports", "edits": organized},
+            "edits": [organized],
+        });
+        assert_eq!(
+            command_edits(&command_result, Path::new("/project/main.py")),
+            expected
         );
     }
 

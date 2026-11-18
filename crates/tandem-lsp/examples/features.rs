@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, future::Future, path::Path, sync::Arc, time::Duration};
 use tandem_core::edit::indent::language_default;
 use tandem_lsp::features::actions::{
-    ORGANIZE_IMPORTS, code_action_params, code_actions, organize_imports,
+    ORGANIZE_IMPORTS, code_action_params, code_actions, organize_imports, pyright_organize_imports,
 };
 use tandem_lsp::features::capabilities::ServerFeatures;
 use tandem_lsp::features::completion::{
@@ -606,11 +606,11 @@ async fn python_checks(project: &Path, checks: &mut Checks) {
     manager.stop();
 }
 
-/// When Pyright offers organize imports for `main.py`, its command is one Pyright lists,
-/// and the edits the command asks for sort the imports. Pyright 1.1.414 offers no such
-/// action (its code actions are only quick fixes, and it lists no commands), so there
-/// Tandem's Organize Imports says the server has none, and the check says so on its own
-/// line and requires only that Pyright answers the request with a list.
+/// Organize Imports on `main.py` as Tandem runs it for Pyright: Pyright's
+/// organize-imports action when it offers one (its command must be one Pyright lists),
+/// else Pyright's own organize-imports command, which Tandem runs by name for Pyright
+/// only (Pyright 1.1.414 offers no such action and lists no commands). The edits the
+/// command asks for change only `main.py`, and sort its imports.
 async fn python_organize_imports(
     manager: &LanguageManager,
     docs: &mut Vec<LanguageDocument>,
@@ -638,23 +638,21 @@ async fn python_organize_imports(
         "the code action reply is not a list: {}",
         reply.value
     );
-    let Some(action) = organize_imports(&code_actions(&reply.value)) else {
-        println!(
-            "note python organize_imports: Pyright offers no organize-imports action \
-             (it lists the commands {:?}), so Organize Imports says the server has none",
-            manager.capabilities().commands()
-        );
-        return Ok(());
+    let command = match organize_imports(&code_actions(&reply.value)) {
+        Some(action) => {
+            let command = action
+                .command
+                .context("the organize-imports action runs no command")?;
+            let commands = manager.capabilities().commands();
+            ensure!(
+                commands.contains(&command.command),
+                "Pyright does not list {} among its commands {commands:?}",
+                command.command
+            );
+            command
+        }
+        None => pyright_organize_imports(&file_uri(&main)?),
     };
-    let command = action
-        .command
-        .context("the organize-imports action runs no command")?;
-    let commands = manager.capabilities().commands();
-    ensure!(
-        commands.contains(&command.command),
-        "Pyright does not list {} among its commands {commands:?}",
-        command.command
-    );
     let reply = manager
         .request(
             "workspace/executeCommand",
@@ -664,13 +662,19 @@ async fn python_organize_imports(
             json!({"command": command.command, "arguments": command.arguments}),
         )
         .await?;
-    let root = std::fs::canonicalize(project)?;
-    let edited = relative_edits(&root, command_edits(&reply.value, &main)?)?;
-    let (_, edits) = edited
-        .iter()
-        .find(|(path, _)| path == "main.py")
-        .with_context(|| format!("organize imports does not edit main.py: {}", reply.value))?;
-    let organized = apply_text_edits(PYTHON_MAIN, edits)?;
+    let files = command_edits(&reply.value, &main)?;
+    let [file] = files.as_slice() else {
+        bail!(
+            "organize imports does not edit only main.py: {}",
+            reply.value
+        );
+    };
+    ensure!(
+        file.path == main,
+        "organize imports edits {} instead of main.py",
+        file.path.display()
+    );
+    let organized = apply_text_edits(PYTHON_MAIN, &file.edits)?;
     ensure!(
         organized.starts_with("import os\nimport sys"),
         "organize imports gave:\n{organized}"

@@ -1,14 +1,19 @@
 //! Quick Fix (⌥↵) and Organize Imports (⇧⌥O): the language server's code actions for the
 //! selection, listed in the toolkit's code-action menu, and what the chosen action does.
 //! Its edits go to the buffers through `apply_file_edits`, which leaves them unsaved; its
-//! command runs on the server only when the server lists that command.
+//! command runs on the server only when the server lists that command. The one exception
+//! is Pyright's organize-imports command, which Pyright neither offers as an action nor
+//! lists: Organize Imports runs it by name on Pyright, and its edits may change only the
+//! file whose imports it organizes.
 use super::*;
 use gpui_kit::component::highlighter::{DiagnosticEntry, DiagnosticSeverity as Severity};
 use gpui_kit::component::input::CodeActionProvider;
 use lsp_types::{CodeAction, DiagnosticSeverity, NumberOrString};
 use serde_json::{Value, json};
 use std::ops::Range;
-use tandem_lsp::features::actions::{self as server, ORGANIZE_IMPORTS, code_action_params};
+use tandem_lsp::features::actions::{
+    self as server, ORGANIZE_IMPORTS, code_action_params, pyright_organize_imports,
+};
 use tandem_lsp::features::edits::{FileEdits, command_edits, workspace_edit};
 
 const STALE: &str = "The code changed before the language server answered. Try again.";
@@ -76,6 +81,9 @@ struct ActionRequest {
     file: PathBuf,
     /// The tab's document instance, as the language server knows it.
     instance: String,
+    /// Whether the server is Pyright, whose organize-imports command Organize Imports runs
+    /// by name.
+    pyright: bool,
 }
 
 /// What the user asked for, which decides what the status bar says once its changes are
@@ -89,7 +97,35 @@ enum Asked {
     Completion,
 }
 
+/// How Organize Imports organizes a file's imports.
+#[derive(Clone, Debug, PartialEq)]
+enum ImportsPlan {
+    /// With the server's organize-imports action.
+    Action(Box<CodeAction>),
+    /// With Pyright's own organize-imports command for the file.
+    PyrightCommand(lsp_types::Command),
+}
+
+/// Which files the edits a server command asks for may change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandReach {
+    /// Any file in the project: the command is one the server lists.
+    Project,
+    /// Only the file it was run for: Pyright's organize-imports command, which Pyright
+    /// does not list.
+    OwnFile,
+}
+
 impl Workspace {
+    /// Whether the active file's language server is Pyright, the server of Tandem's Python
+    /// tool slot. Pyright sends no `serverInfo` to tell it by.
+    fn active_server_is_pyright(&self) -> bool {
+        match (self.language_manager(), self.dev.python_language.as_ref()) {
+            (Some(active), Some(pyright)) => std::ptr::eq(active, pyright),
+            _ => false,
+        }
+    }
+
     /// The language server of `target` while it can give code actions, or `None` with a
     /// status message saying why it can't now.
     fn action_manager(
@@ -138,6 +174,7 @@ impl Workspace {
             editor: target.editor.downgrade(),
             file: target.file,
             instance: target.instance,
+            pyright: self.active_server_is_pyright(),
         })
     }
 
@@ -230,7 +267,8 @@ impl Workspace {
     }
 
     /// Organize Imports (⇧⌥O): asks the language server of the active file for its
-    /// organize-imports action on the whole file and applies it.
+    /// organize-imports action on the whole file and applies it; on Pyright, which offers
+    /// no such action, runs Pyright's organize-imports command on the file instead.
     pub(in crate::workspace) fn organize_imports(
         &mut self,
         window: &mut Window,
@@ -262,8 +300,8 @@ impl Workspace {
         }));
     }
 
-    /// Applies the organize-imports action of the server's reply, or says why there is
-    /// none.
+    /// Organizes the imports as the server's reply allows (see `imports_plan`), or says
+    /// why it can't.
     fn organize_imports_replied(
         &mut self,
         request: ActionRequest,
@@ -281,9 +319,12 @@ impl Workspace {
                 return self.message(message, true, cx);
             }
         };
-        match server::organize_imports(&actions) {
-            Some(action) => self.resolve_and_apply(request, action, window, cx),
-            None => self.message(NO_ORGANIZE, false, cx),
+        match imports_plan(&actions, request.pyright, &request.file) {
+            Ok(ImportsPlan::Action(action)) => self.resolve_and_apply(request, *action, window, cx),
+            Ok(ImportsPlan::PyrightCommand(command)) => {
+                self.execute_command(request, command, CommandReach::OwnFile, 0, window, cx)
+            }
+            Err(message) => self.message(message, false, cx),
         }
     }
 
@@ -414,6 +455,7 @@ impl Workspace {
             editor: target.editor.downgrade(),
             file: target.file,
             instance: target.instance,
+            pyright: self.active_server_is_pyright(),
         };
         self.run_action_command(request, command, 0, window, cx);
     }
@@ -440,6 +482,21 @@ impl Workspace {
             }
             return;
         }
+        self.execute_command(request, command, CommandReach::Project, before, window, cx);
+    }
+
+    /// Runs `command` on the language server of `request`, and applies the edits it asks
+    /// for when they change only the files `reach` allows. `before` counts the files
+    /// earlier steps of the same request changed.
+    fn execute_command(
+        &mut self,
+        request: ActionRequest,
+        command: lsp_types::Command,
+        reach: CommandReach,
+        before: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = request.editor.upgrade() else {
             return;
         };
@@ -453,9 +510,12 @@ impl Workspace {
                 // finish.
                 view.ide.acting = None;
                 let files = match reply {
-                    Ok(Some(value)) => {
-                        command_edits(&value, &request.file).map_err(|refusal| refusal.to_string())
-                    }
+                    Ok(Some(value)) => command_edits(&value, &request.file)
+                        .map_err(|refusal| refusal.to_string())
+                        .and_then(|files| match reach {
+                            CommandReach::Project => Ok(files),
+                            CommandReach::OwnFile => own_file_edits(files, &request.file),
+                        }),
                     Ok(None) => Err(STALE.to_string()),
                     Err(error) => Err(format!(
                         "The language server could not run {}: {error:#}",
@@ -469,6 +529,35 @@ impl Workspace {
             })
             .ok();
         }));
+    }
+}
+
+/// How Organize Imports organizes the imports of `file`, given the code actions its server
+/// offers for the whole file: with the server's organize-imports action; failing that, on
+/// Pyright (`pyright`), with Pyright's own organize-imports command for the file. Else the
+/// message saying the server has no way to.
+fn imports_plan(
+    actions: &[CodeAction],
+    pyright: bool,
+    file: &Path,
+) -> Result<ImportsPlan, &'static str> {
+    if let Some(action) = server::organize_imports(actions) {
+        return Ok(ImportsPlan::Action(Box::new(action)));
+    }
+    match tandem_lsp::file_uri(file) {
+        Ok(uri) if pyright => Ok(ImportsPlan::PyrightCommand(pyright_organize_imports(&uri))),
+        _ => Err(NO_ORGANIZE),
+    }
+}
+
+/// `files` when they are all `file`: any edit for another file refuses them all.
+fn own_file_edits(files: Vec<FileEdits>, file: &Path) -> Result<Vec<FileEdits>, String> {
+    match files.iter().find(|edits| edits.path != file) {
+        Some(other) => Err(format!(
+            "Organizing the imports would also change {}, so nothing was changed.",
+            other.path.display()
+        )),
+        None => Ok(files),
     }
 }
 
@@ -570,11 +659,14 @@ mod tests {
     // Explicit imports: `super::*` would bring in GPUI's `test` macro through `gpui_kit::*`
     // and shadow Rust's `#[test]`.
     use super::{
-        Asked, applied_message, command_params, lsp_diagnostic, needs_resolve, range_diagnostics,
+        Asked, ImportsPlan, NO_ORGANIZE, applied_message, command_params, imports_plan,
+        lsp_diagnostic, needs_resolve, own_file_edits, range_diagnostics,
     };
     use gpui_kit::component::highlighter::{Diagnostic, DiagnosticEntry, DiagnosticSeverity};
-    use lsp_types::{CodeAction, NumberOrString, Position, Range};
+    use lsp_types::{CodeAction, CodeActionKind, NumberOrString, Position, Range, TextEdit};
     use serde_json::json;
+    use std::path::Path;
+    use tandem_lsp::features::edits::FileEdits;
 
     #[test]
     fn a_diagnostic_after_an_emoji_gets_utf16_columns() {
@@ -755,5 +847,96 @@ mod tests {
             Some("The imports are already organized.")
         );
         assert_eq!(applied_message(Asked::Completion, 2), None);
+    }
+
+    fn organize_action() -> CodeAction {
+        CodeAction {
+            title: "Organize Imports".into(),
+            kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
+            ..CodeAction::default()
+        }
+    }
+
+    #[test]
+    fn organize_imports_on_pyright_without_an_action_runs_pyrights_command() {
+        let main = Path::new("/project/main.py");
+        let Ok(ImportsPlan::PyrightCommand(command)) = imports_plan(&[], true, main) else {
+            panic!("Pyright's own command, for want of an action");
+        };
+        assert_eq!(command.command, "pyright.organizeimports");
+        assert_eq!(
+            command.arguments,
+            Some(vec![json!("file:///project/main.py")])
+        );
+        // Pyright's quick fixes are no organize-imports action either.
+        let fix = CodeAction {
+            title: "Add import".into(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            ..CodeAction::default()
+        };
+        assert!(matches!(
+            imports_plan(&[fix], true, main),
+            Ok(ImportsPlan::PyrightCommand(_))
+        ));
+    }
+
+    #[test]
+    fn organize_imports_without_an_action_on_another_server_says_there_is_none() {
+        assert_eq!(
+            imports_plan(&[], false, Path::new("/project/src/lib.rs")),
+            Err(NO_ORGANIZE)
+        );
+        assert_eq!(
+            NO_ORGANIZE,
+            "The language server has no organize-imports action for this file."
+        );
+    }
+
+    #[test]
+    fn organize_imports_applies_the_servers_action_when_it_offers_one() {
+        for pyright in [true, false] {
+            assert_eq!(
+                imports_plan(&[organize_action()], pyright, Path::new("/project/main.py")),
+                Ok(ImportsPlan::Action(Box::new(organize_action()))),
+                "{pyright}"
+            );
+        }
+    }
+
+    fn edits_for(path: &str) -> FileEdits {
+        FileEdits {
+            path: path.into(),
+            edits: vec![TextEdit {
+                range: Range::new(Position::new(0, 0), Position::new(1, 9)),
+                new_text: "import os\nimport sys".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn pyrights_command_may_change_only_its_own_file() {
+        let main = Path::new("/project/main.py");
+        assert_eq!(
+            own_file_edits(vec![edits_for("/project/main.py")], main),
+            Ok(vec![edits_for("/project/main.py")])
+        );
+        assert_eq!(own_file_edits(vec![], main), Ok(vec![]));
+    }
+
+    #[test]
+    fn edits_of_pyrights_command_for_another_file_are_refused() {
+        let main = Path::new("/project/main.py");
+        let files = vec![
+            edits_for("/project/main.py"),
+            edits_for("/project/shapes.py"),
+        ];
+        assert_eq!(
+            own_file_edits(files, main),
+            Err(
+                "Organizing the imports would also change /project/shapes.py, so nothing was changed."
+                    .to_string()
+            )
+        );
+        assert!(own_file_edits(vec![edits_for("/project/shapes.py")], main).is_err());
     }
 }
