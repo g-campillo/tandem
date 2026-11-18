@@ -179,7 +179,11 @@ fn too_many_tabs(opening: usize) -> String {
 /// text it was on: it is moved through each edit with `Edit::map_offset`, the last edit
 /// first, so text the edits leave alone keeps the cursor. Fails when an edit does not
 /// apply to `old` (a position past its end, or edits that overlap).
-fn plan_buffer_edit(old: &str, edits: &[TextEdit], cursor: usize) -> anyhow::Result<Edit> {
+pub(super) fn plan_buffer_edit(
+    old: &str,
+    edits: &[TextEdit],
+    cursor: usize,
+) -> anyhow::Result<Edit> {
     let new = tandem_lsp::apply_text_edits(old, edits)?;
     let mut replacements = edits
         .iter()

@@ -333,7 +333,7 @@ impl Workspace {
                     .disabled(!open)
                     .accessibility_label("Save")
                     .tooltip(tooltip("Save", shortcut("Save")))
-                    .on_click(cx.listener(|this, _, _, cx| this.save_active(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.save_formatted(window, cx))),
             )
             .child(
                 Button::new("tab-compare")

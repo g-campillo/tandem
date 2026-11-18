@@ -104,7 +104,7 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
         v.show_recent = !v.show_recent;
         c.notify();
     });
-    route::<Save>(cx, window, view.clone(), |v, _, c| v.save_active(c));
+    route::<Save>(cx, window, view.clone(), |v, w, c| v.save_formatted(w, c));
     route::<SaveAll>(cx, window, view.clone(), |v, _, c| v.save_all(c));
     route::<SaveCopy>(cx, window, view.clone(), |v, w, c| v.save_copy(w, c));
     route::<QuickOpen>(cx, window, view.clone(), |v, w, c| v.open_center("", w, c));
@@ -133,9 +133,7 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     });
     route::<SwapPanes>(cx, window, view.clone(), |v, _, c| v.swap_panes(c));
     route::<FocusChat>(cx, window, view.clone(), |v, w, c| v.focus_chat(w, c));
-    route::<FormatFile>(cx, window, view.clone(), |v, w, c| {
-        v.language_action("textDocument/formatting", w, c)
-    });
+    route::<FormatFile>(cx, window, view.clone(), |v, w, c| v.format_document(w, c));
     route::<References>(cx, window, view.clone(), |v, w, c| {
         v.language_action("textDocument/references", w, c)
     });

@@ -2,16 +2,19 @@
 //! corrections made right after a keystroke (indentation and tag closing), Tandem's own
 //! completion list, the tab stops of inserted snippets, the parameter hints, the
 //! highlights of the symbol under the cursor, Rename Symbol, Quick Fix and Organize
-//! Imports, and the language server's edits to several files. Every edit this layer makes
-//! to a buffer goes through [`Workspace::ide_replace`], one undo step each.
+//! Imports, Format Document and Format on Save, the language server's edits to several
+//! files, and the Editor section of Settings. Every edit this layer makes to a buffer goes
+//! through [`Workspace::ide_replace`], one undo step each.
 mod actions;
 mod complete;
 mod edits;
+mod format;
 mod highlights;
 mod icons;
 mod popup;
 mod rename;
 mod rules;
+mod settings;
 mod signature;
 mod snippets;
 
@@ -23,7 +26,7 @@ use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InputEdit, MoveDown, MovePageDown, MovePageUp, MoveUp,
     OutdentInline, OverviewRulerDecorationCollection, RangeDecorationCollection, Rope,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
@@ -33,6 +36,7 @@ use tandem_core::edit::indent::{self, IndentUnit};
 use tandem_core::edit::snippet::library::UserSnippets;
 use tandem_core::edit::snippet::session::SnippetSession;
 use tandem_core::edit::tags;
+use tandem_core::editor_prefs::EditorPrefs;
 use tandem_lsp::LanguageManager;
 use tandem_lsp::features::completion;
 
@@ -65,6 +69,10 @@ pub(super) struct IdeUi {
     /// A step of a code action or Organize Imports waiting for the language server;
     /// dropping it cancels it.
     acting: Option<Task<()>>,
+    /// Format Document waiting for the language server; dropping it cancels it.
+    formatting: Option<Task<()>>,
+    /// The editor settings, read from the store on first use.
+    prefs: OnceCell<EditorPrefs>,
     /// What the key listeners may take, kept current with the popups.
     keys: Rc<Cell<KeyClaim>>,
 }
@@ -472,12 +480,18 @@ impl Workspace {
         self.loading || self.takeover_running()
     }
 
-    /// The active tab when its editor is on screen (no diff, settings closed). `manager`
-    /// is `self.language_manager()`.
+    /// The active tab when its editor is on screen (no diff, settings closed).
     fn ide_target(&self) -> Option<IdeTarget> {
         if self.diff.is_some() || self.settings.open {
             return None;
         }
+        self.active_ide_target()
+    }
+
+    /// The active tab, also while Settings or a diff covers its editor, for the features
+    /// that change the buffer without showing anything over it (formatting). `manager` is
+    /// `self.language_manager()`.
+    fn active_ide_target(&self) -> Option<IdeTarget> {
         let tab = self.tabs.get(self.active?)?;
         let ide = self.ide.tabs.get(&tab.editor.entity_id())?;
         let project = self.project.as_ref()?;
