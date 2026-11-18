@@ -3,7 +3,7 @@
 //! installed by npm). Discovery never runs `node` or `npm`.
 use super::node::global_package;
 use super::servers::{
-    KindTools, Launch, MissingTools, NodeServer, ServerTools, ToolRoots, fingerprint,
+    KindTools, Launch, MissingTools, NodeServer, Prepare, ServerTools, ToolRoots, fingerprint,
 };
 use crate::ToolKind;
 use std::path::Path;
@@ -13,7 +13,10 @@ const INSTALL: &str = "npm install -g svelte-language-server";
 /// The package's `svelteserver` command, relative to the package folder.
 const SCRIPT: &str = "bin/server.js";
 
-pub(crate) fn discover(_project: &Path, roots: &ToolRoots) -> Result<KindTools, MissingTools> {
+/// SvelteKit's command in the project's own node_modules.
+const KIT_SCRIPT: &str = "node_modules/@sveltejs/kit/svelte-kit.js";
+
+pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, MissingTools> {
     let Some(package) = global_package(roots, PACKAGE) else {
         return Err(MissingTools {
             message: format!("{PACKAGE} was not found."),
@@ -28,9 +31,21 @@ pub(crate) fn discover(_project: &Path, roots: &ToolRoots) -> Result<KindTools, 
         });
     }
     let package_json = package.dir.join("package.json");
+    // SvelteKit generates the `./$types` of each route; `sync` brings them up to date.
+    let kit = project.join(KIT_SCRIPT);
+    let prepare = kit.is_file().then(|| Prepare {
+        title: "svelte-kit sync".into(),
+        program: package.node.clone(),
+        args: vec![kit.clone().into(), "sync".into()],
+        watch: vec!["src/routes/".into(), "src/params/".into()],
+    });
+    let mut parts = vec![package.version.clone()];
+    if prepare.is_some() {
+        parts.push(format!("svelte-kit sync {}", kit.display()));
+    }
     let fingerprint = fingerprint(
         "svelte-v1",
-        std::slice::from_ref(&package.version),
+        &parts,
         &[&package.node, &package_json, &script],
     )?;
     let label = format!("{PACKAGE} {}", package.version);
@@ -46,6 +61,7 @@ pub(crate) fn discover(_project: &Path, roots: &ToolRoots) -> Result<KindTools, 
                 script,
                 server: NodeServer::Svelte,
             },
+            prepare,
         }],
         notes: vec![],
         fingerprint,
@@ -103,6 +119,7 @@ mod tests {
         assert_eq!(
             tools.servers,
             vec![ServerTools {
+                prepare: None,
                 name: "svelte".into(),
                 title: "svelte-language-server 0.17.21".into(),
                 languages: vec!["svelte".into()],
@@ -163,5 +180,31 @@ mod tests {
             missing.install,
             vec!["npm install -g svelte-language-server".to_string()]
         );
+    }
+
+    #[test]
+    fn sveltekit_projects_run_svelte_kit_sync_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (node, _) = install(&roots.home.join(".nvm/versions/node/v24.22.1"), "0.18.6");
+        let plain = discover(&project, &roots).unwrap();
+        assert_eq!(plain.servers[0].prepare, None);
+
+        let kit = project.join("node_modules/@sveltejs/kit/svelte-kit.js");
+        write(&kit, "// kit");
+        let tools = discover(&project, &roots).unwrap();
+        assert_eq!(
+            tools.servers[0].prepare,
+            Some(Prepare {
+                title: "svelte-kit sync".into(),
+                program: node,
+                args: vec![kit.into_os_string(), "sync".into()],
+                watch: vec!["src/routes/".into(), "src/params/".into()],
+            })
+        );
+        // Trust is asked again for what now runs.
+        assert_ne!(tools.fingerprint, plain.fingerprint);
     }
 }

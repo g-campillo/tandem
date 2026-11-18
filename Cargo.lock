@@ -6397,6 +6397,7 @@ dependencies = [
  "anyhow",
  "ignore",
  "libc",
+ "md-5",
  "rusqlite",
  "semver",
  "serde",

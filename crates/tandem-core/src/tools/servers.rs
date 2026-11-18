@@ -1,5 +1,6 @@
 //! Language servers beyond Rust and Python: where Tandem looks, what it found and what is
 //! missing. Discovery inspects files only; it never runs a tool or an installer.
+pub use super::swift::XcodeSetup;
 use super::{file_hash, java, svelte, swift, typescript, vue, web};
 use crate::{ToolKind, content_hash};
 use anyhow::Context;
@@ -32,26 +33,34 @@ impl ToolRoots {
 pub enum Launch {
     /// `developer_dir` is the Xcode or Command Line Tools developer folder the server belongs to;
     /// `extra_path` holds the existing Homebrew bin folders, so a project's buildServer.json can
-    /// find xcode-build-server.
+    /// find xcode-build-server. `xcode` is the buildServer.json Tandem writes before the server
+    /// starts, for an Xcode project that has none.
     SourceKit {
         server: PathBuf,
         developer_dir: PathBuf,
         extra_path: Vec<PathBuf>,
+        xcode: Option<XcodeSetup>,
     },
     /// `launcher` is jdtls's own start script, canonical; `java_home` is the Java 21 or newer
     /// runtime it runs on, given to it as JAVA_HOME.
+    /// `trigger_files` are Java files of a project without Maven or Gradle, from which jdtls
+    /// infers its source folders (`src/` for `src/demo/A.java` in `package demo`).
     Jdtls {
         launcher: PathBuf,
         java_home: PathBuf,
+        trigger_files: Vec<PathBuf>,
     },
     /// TypeScript 7's native compiler, whose `--lsp --stdio` mode is a full language server.
     Tsgo { server: PathBuf },
     /// typescript-language-server under `node`, driving the tsserver of TypeScript 6 or older.
     /// `server` is the package's `lib/cli.mjs`; `tsserver` is TypeScript's `lib/tsserver.js`.
+    /// `vue_plugin` is the folder `X` with `X/node_modules/@vue/typescript-plugin`, loaded in a Vue
+    /// project so TypeScript files can import `.vue` files.
     TypeScriptLanguageServer {
         node: PathBuf,
         server: PathBuf,
         tsserver: PathBuf,
+        vue_plugin: Option<PathBuf>,
     },
     /// A Node.js language server script, run as `node <script> --stdio`; `server` says which one,
     /// for its settings.
@@ -88,6 +97,19 @@ pub enum NodeServer {
     Svelte,
 }
 
+/// A command run in the project before its language server starts, so the generated types the
+/// server reads are current: SvelteKit's `svelte-kit sync`, Nuxt's `nuxt prepare`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prepare {
+    /// Shown in health text, e.g. "svelte-kit sync".
+    pub title: String,
+    pub program: PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+    /// Project folders, relative with a trailing `/`, where an added or removed file calls for
+    /// another run.
+    pub watch: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerTools {
     /// Cache folder and health prefix: "sourcekit-lsp", "jdtls", "tsgo", "html", ...
@@ -97,6 +119,7 @@ pub struct ServerTools {
     /// `Document::language()` ids this server answers for.
     pub languages: Vec<String>,
     pub launch: Launch,
+    pub prepare: Option<Prepare>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,24 +181,20 @@ pub fn discover_kind(
 
 /// content_hash of "{tag}:{parts joined by '\n'}" followed by file_hash of each file, in order.
 pub(crate) fn fingerprint(tag: &str, parts: &[String], files: &[&Path]) -> anyhow::Result<String> {
-    let mut identity = format!("{tag}:{}", parts.join("\n"));
-    for file in files {
-        identity.push('\n');
-        identity.push_str(&file_hash(file)?);
-    }
-    Ok(content_hash(identity.as_bytes()))
+    let hashes = files
+        .iter()
+        .map(|file| file_hash(file))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(fingerprint_hashes(tag, parts, &hashes))
 }
 
-/// The word as is when it is [A-Za-z0-9._/-]+, otherwise wrapped in single quotes with ' escaped
-/// as '\''.
-pub(crate) fn shell_quote(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'/' | b'-'));
-    if plain {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', r"'\''"))
+/// `fingerprint` with the content hashes given: a file's hash equals content_hash of its bytes, so
+/// a file Tandem is about to write fingerprints the same before and after.
+pub(crate) fn fingerprint_hashes(tag: &str, parts: &[String], hashes: &[String]) -> String {
+    let mut identity = format!("{tag}:{}", parts.join("\n"));
+    for hash in hashes {
+        identity.push('\n');
+        identity.push_str(hash);
     }
+    content_hash(identity.as_bytes())
 }

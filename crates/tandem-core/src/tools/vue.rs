@@ -3,7 +3,9 @@
 //! plugin; TypeScript 7 has no JavaScript API for the plugin. Both servers are global npm packages
 //! run under the Node.js that installed them. Discovery never runs `node` or `npm`.
 use super::node::{global_package, package_version};
-use super::servers::{KindTools, Launch, MissingTools, ServerTools, ToolRoots, fingerprint};
+use super::servers::{
+    KindTools, Launch, MissingTools, Prepare, ServerTools, ToolRoots, fingerprint,
+};
 use crate::ToolKind;
 use std::path::{Path, PathBuf};
 
@@ -12,13 +14,33 @@ const INSTALL_VUE: &str = "npm install -g @vue/language-server";
 const VUE_SCRIPT: &str = "bin/vue-language-server.js";
 /// typescript-language-server's command, relative to its package folder.
 const TS_LS_SCRIPT: &str = "lib/cli.mjs";
+/// Nuxt's command in the project's own node_modules.
+const NUXT_SCRIPT: &str = "node_modules/nuxt/bin/nuxt.mjs";
+/// The folders whose files Nuxt imports automatically, in Nuxt 4's `app/` layout and at the root.
+const NUXT_WATCH: [&str; 13] = [
+    "app/components/",
+    "app/composables/",
+    "app/utils/",
+    "app/pages/",
+    "app/layouts/",
+    "app/middleware/",
+    "app/plugins/",
+    "components/",
+    "composables/",
+    "utils/",
+    "pages/",
+    "server/",
+    "shared/",
+];
 
 /// The project's own TypeScript, which the companion runs with Vue's TypeScript plugin.
 enum ProjectTypeScript {
-    /// `lib` holds both `typescript.js` and `tsserver.js`: TypeScript 6 or older.
+    /// `lib` holds both `typescript.js` and `tsserver.js`: TypeScript 6 or older. `global` when
+    /// the project has none and the global one stands in.
     Usable {
         lib: PathBuf,
         version: String,
+        global: bool,
     },
     /// TypeScript 7 or newer, which has no JavaScript API for the plugin.
     TooNew(String),
@@ -39,7 +61,11 @@ impl ProjectTypeScript {
         };
         let lib = dir.join("lib");
         if lib.join("typescript.js").is_file() && lib.join("tsserver.js").is_file() {
-            return Self::Usable { lib, version };
+            return Self::Usable {
+                lib,
+                version,
+                global: false,
+            };
         }
         let major = version
             .split(['.', '-'])
@@ -68,13 +94,48 @@ fn plugin_dir(vue: &Path) -> Option<PathBuf> {
     .find(|dir| dir.is_dir())
 }
 
+/// The folder `X` with `X/node_modules/@vue/typescript-plugin`, given the plugin's own folder.
+fn plugin_location(plugin: &Path) -> PathBuf {
+    plugin
+        .ancestors()
+        .nth(3)
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+}
+
+/// Where the global @vue/language-server's TypeScript plugin loads from, for the TypeScript tools
+/// of a Vue project.
+pub(crate) fn typescript_plugin_location(roots: &ToolRoots) -> Option<PathBuf> {
+    let vue = global_package(roots, "@vue/language-server")
+        .filter(|package| package.dir.join(VUE_SCRIPT).is_file())?;
+    Some(plugin_location(&plugin_dir(&vue.dir)?))
+}
+
 pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, MissingTools> {
     let vue = global_package(roots, "@vue/language-server")
         .filter(|package| package.dir.join(VUE_SCRIPT).is_file());
     let plugin = vue.as_ref().and_then(|vue| plugin_dir(&vue.dir));
     let ts_ls = global_package(roots, "typescript-language-server")
         .filter(|package| package.dir.join(TS_LS_SCRIPT).is_file());
-    let typescript = ProjectTypeScript::find(project);
+    // Nuxt projects often install no TypeScript of their own; a global TypeScript 6 or older can
+    // stand in, as an editor's bundled one does. A project with nothing installed needs npm
+    // install first.
+    let installed = project.join("node_modules").is_dir();
+    let typescript = match ProjectTypeScript::find(project) {
+        ProjectTypeScript::Missing if installed => global_package(roots, "typescript")
+            .map(|global| global.dir.join("lib"))
+            .filter(|lib| lib.join("typescript.js").is_file() && lib.join("tsserver.js").is_file())
+            .and_then(|lib| {
+                let version = package_version(lib.parent()?).ok()?;
+                Some(ProjectTypeScript::Usable {
+                    lib,
+                    version,
+                    global: true,
+                })
+            })
+            .unwrap_or(ProjectTypeScript::Missing),
+        found => found,
+    };
 
     let mut needs = vec![];
     let mut install = vec![];
@@ -91,8 +152,13 @@ pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, M
         install.push("npm install -g typescript-language-server".into());
     }
     if matches!(typescript, ProjectTypeScript::Missing) {
-        needs.push("the project's own TypeScript (run npm install in the project folder)");
-        install.push("npm install".into());
+        if project.join("node_modules").is_dir() {
+            needs.push("TypeScript 6 or older, which this project does not install");
+            install.push("npm install --save-dev typescript@6".into());
+        } else {
+            needs.push("the project's own TypeScript (run npm install in the project folder)");
+            install.push("npm install".into());
+        }
     }
     let mut problems = vec![];
     if !needs.is_empty() {
@@ -103,8 +169,16 @@ pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, M
             "Vue's TypeScript plugin needs TypeScript 6 or older; this project uses TypeScript {version}."
         ));
     }
-    let (Some(vue), Some(plugin), Some(ts_ls), ProjectTypeScript::Usable { lib, version }) =
-        (vue, plugin, ts_ls, typescript)
+    let (
+        Some(vue),
+        Some(plugin),
+        Some(ts_ls),
+        ProjectTypeScript::Usable {
+            lib,
+            version,
+            global,
+        },
+    ) = (vue, plugin, ts_ls, typescript)
     else {
         return Err(MissingTools {
             message: problems.join(" "),
@@ -114,10 +188,23 @@ pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, M
 
     let server = vue.dir.join(VUE_SCRIPT);
     let ts_server = ts_ls.dir.join(TS_LS_SCRIPT);
-    let title = format!("Vue {} with TypeScript {version} (project)", vue.version);
+    let source = if global { "global" } else { "project" };
+    let title = format!("Vue {} with TypeScript {version} ({source})", vue.version);
+    // Nuxt generates the types of its automatic imports; `prepare` brings them up to date.
+    let nuxt = project.join(NUXT_SCRIPT);
+    let prepare = nuxt.is_file().then(|| Prepare {
+        title: "nuxt prepare".into(),
+        program: vue.node.clone(),
+        args: vec![nuxt.clone().into(), "prepare".into()],
+        watch: NUXT_WATCH.map(String::from).to_vec(),
+    });
+    let mut parts = vec![title.clone(), plugin.display().to_string()];
+    if prepare.is_some() {
+        parts.push(format!("nuxt prepare {}", nuxt.display()));
+    }
     let fingerprint = fingerprint(
         "vue-v1",
-        &[title.clone(), plugin.display().to_string()],
+        &parts,
         &[
             &vue.node,
             &server,
@@ -128,11 +215,7 @@ pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, M
         ],
     )?;
     // The plugin folder is <location>/node_modules/@vue/typescript-plugin.
-    let plugin_location = plugin
-        .ancestors()
-        .nth(3)
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+    let plugin_location = plugin_location(&plugin);
     Ok(KindTools {
         kind: ToolKind::Vue,
         label: title.clone(),
@@ -148,6 +231,7 @@ pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, M
                 ts_server,
                 plugin_location,
             },
+            prepare,
         }],
         notes: vec![],
         fingerprint,
@@ -288,10 +372,84 @@ mod tests {
         global_vue(&global, "3.3.14", Plugin::Nested);
         assert!(discover(&project, &roots).is_ok());
 
-        // A project TypeScript without its JavaScript API counts as not installed.
+        // A project TypeScript without its JavaScript API counts as not installed; with
+        // node_modules there, the project lacks TypeScript rather than an install.
         std::fs::remove_file(project.join("node_modules/typescript/lib/typescript.js")).unwrap();
         let missing = discover(&project, &roots).unwrap_err();
-        assert_eq!(missing.install, ["npm install"]);
+        assert_eq!(
+            missing,
+            MissingTools {
+                message:
+                    "Vue tools need: TypeScript 6 or older, which this project does not install."
+                        .into(),
+                install: vec!["npm install --save-dev typescript@6".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_global_typescript_6_stands_in_for_a_project_without_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        let global = nvm(&roots);
+        global_vue(&global, "3.3.14", Plugin::Nested);
+        global_ts_ls(&global, "6.0.2");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join("node_modules")).unwrap();
+        // Global TypeScript 7 has no tsserver.js, so it cannot stand in.
+        package_json(
+            &global.join("lib/node_modules/typescript"),
+            "typescript",
+            "7.0.2",
+        );
+        assert!(discover(&project, &roots).is_err());
+
+        let lib = global.join("lib/node_modules/typescript/lib");
+        package_json(
+            &global.join("lib/node_modules/typescript"),
+            "typescript",
+            "5.9.3",
+        );
+        write(&lib.join("tsserver.js"), "// tsserver");
+        write(&lib.join("typescript.js"), "// typescript");
+        let tools = discover(&project, &roots).unwrap();
+        assert_eq!(tools.label, "Vue 3.3.14 with TypeScript 5.9.3 (global)");
+        let Launch::Vue { tsdk, .. } = &tools.servers[0].launch else {
+            panic!("expected a Vue launch");
+        };
+        assert_eq!(tsdk, &lib.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn nuxt_projects_run_nuxt_prepare_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        let global = nvm(&roots);
+        global_vue(&global, "3.3.14", Plugin::Nested);
+        global_ts_ls(&global, "6.0.2");
+        let project = temp.path().join("project");
+        project_typescript(&project, "5.9.3");
+        let plain = discover(&project, &roots).unwrap();
+        assert_eq!(plain.servers[0].prepare, None);
+
+        write(&project.join("node_modules/nuxt/bin/nuxt.mjs"), "// nuxt");
+        let nuxt = discover(&project, &roots).unwrap();
+        let prepare = nuxt.servers[0].prepare.clone().expect("nuxt prepare");
+        assert_eq!(prepare.title, "nuxt prepare");
+        assert_eq!(prepare.program, global.join("bin/node"));
+        assert_eq!(
+            prepare.args,
+            vec![
+                project
+                    .join("node_modules/nuxt/bin/nuxt.mjs")
+                    .into_os_string(),
+                "prepare".into()
+            ]
+        );
+        assert!(prepare.watch.contains(&"app/composables/".to_string()));
+        assert!(prepare.watch.contains(&"components/".to_string()));
+        // Trust is asked again for what now runs.
+        assert_ne!(nuxt.fingerprint, plain.fingerprint);
     }
 
     #[test]
@@ -313,6 +471,7 @@ mod tests {
         assert_eq!(
             tools.servers,
             vec![ServerTools {
+                prepare: None,
                 name: "vue".into(),
                 title: "Vue 3.3.14 with TypeScript 5.9.3 (project)".into(),
                 languages: vec!["vue".into()],

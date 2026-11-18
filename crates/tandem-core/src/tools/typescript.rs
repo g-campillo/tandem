@@ -6,6 +6,7 @@ use super::node::{NodePackage, global_package, package_version};
 use super::servers::{
     KindTools, Launch, MissingTools, ServerTools, ToolNote, ToolRoots, fingerprint,
 };
+use super::vue::typescript_plugin_location;
 use crate::ToolKind;
 use std::path::{Path, PathBuf};
 
@@ -79,13 +80,21 @@ pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, M
     let global_ts = global_package(roots, "typescript").map(TypeScript::from);
     let ts_ls = global_package(roots, "typescript-language-server")
         .filter(|package| package.dir.join("lib/cli.mjs").is_file());
-    let (title, launch, notes) = select(project_ts, global_ts, ts_ls)?;
+    let (title, mut launch, notes) = select(project_ts, global_ts, ts_ls)?;
+    // A Vue project's TypeScript files import `.vue` files, which tsserver reads only through
+    // Vue's plugin. TypeScript 7 (tsgo) cannot load plugins.
+    if let Launch::TypeScriptLanguageServer { vue_plugin, .. } = &mut launch
+        && project.join("node_modules/vue/package.json").is_file()
+    {
+        *vue_plugin = typescript_plugin_location(roots);
+    }
     let (name, program, tsserver, files) = match &launch {
         Launch::Tsgo { server } => ("tsgo", server, None, vec![server.as_path()]),
         Launch::TypeScriptLanguageServer {
             node,
             server,
             tsserver,
+            ..
         } => (
             "typescript-language-server",
             server,
@@ -102,6 +111,13 @@ pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, M
             tsserver
                 .map(|tsserver| tsserver.display().to_string())
                 .unwrap_or_default(),
+            match &launch {
+                Launch::TypeScriptLanguageServer {
+                    vue_plugin: Some(plugin),
+                    ..
+                } => format!("vue plugin {}", plugin.display()),
+                _ => String::new(),
+            },
         ],
         &files,
     )?;
@@ -109,6 +125,7 @@ pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, M
         kind: ToolKind::TypeScript,
         label: title.clone(),
         servers: vec![ServerTools {
+            prepare: None,
             name: name.into(),
             title,
             languages: LANGUAGES.map(String::from).to_vec(),
@@ -133,6 +150,7 @@ fn select(
         node: ts_ls.node.clone(),
         server: ts_ls.dir.join("lib/cli.mjs"),
         tsserver,
+        vue_plugin: None,
     };
     if let Some(project_ts) = &project_ts {
         if let Some(native) = project_ts.native() {
@@ -367,9 +385,40 @@ mod tests {
                 node,
                 server: cli,
                 tsserver,
+                vue_plugin: None,
             },
         );
         assert!(tools.notes.is_empty());
+    }
+
+    #[test]
+    fn vue_projects_load_vues_typescript_plugin() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        let global = nvm(&roots, "v24.22.1");
+        global_ts_ls(&global, "6.0.2");
+        let project = temp.path().join("project");
+        typescript_with_tsserver(&project.join("node_modules/typescript"), "5.9.3");
+        let vue = global.join("lib/node_modules/@vue/language-server");
+        package_json(&vue, "@vue/language-server", "3.3.14");
+        write(&vue.join("bin/vue-language-server.js"), "// vue");
+        package_json(
+            &vue.join("node_modules/@vue/typescript-plugin"),
+            "@vue/typescript-plugin",
+            "3.3.14",
+        );
+        let plugin = |tools: &KindTools| match &tools.servers[0].launch {
+            Launch::TypeScriptLanguageServer { vue_plugin, .. } => vue_plugin.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        // Not a Vue project: no plugin.
+        let plain = discover(&project, &roots).unwrap();
+        assert_eq!(plugin(&plain), None);
+
+        package_json(&project.join("node_modules/vue"), "vue", "3.5.0");
+        let tools = discover(&project, &roots).unwrap();
+        assert_eq!(plugin(&tools), Some(vue.canonicalize().unwrap()));
+        assert_ne!(tools.fingerprint, plain.fingerprint);
     }
 
     #[test]
@@ -437,6 +486,7 @@ mod tests {
                 node,
                 server: cli,
                 tsserver,
+                vue_plugin: None,
             },
         );
 

@@ -380,7 +380,8 @@ impl RustTools {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let mut identity = format!("rust-tools-v1:{label}:{}", rust_analyzer.display());
+        // v2: build scripts and proc macros run, so trust is asked again.
+        let mut identity = format!("rust-tools-v2:{label}:{}", rust_analyzer.display());
         for path in [&cargo, &rustc, &rust_analyzer] {
             identity.push_str(&file_hash(path)?);
         }

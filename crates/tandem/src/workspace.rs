@@ -1044,9 +1044,14 @@ impl Workspace {
                         changed = true;
                     }
                     if let Some(index) = index {
-                        changed |= view.index.files != index.files
-                            || view.index.truncated != index.truncated;
-                        view.index = index;
+                        let files_changed = view.index.files != index.files;
+                        changed |= files_changed || view.index.truncated != index.truncated;
+                        let before = std::mem::replace(&mut view.index, index);
+                        if files_changed {
+                            for kind in view.prepare_kinds(&before.files) {
+                                view.restart_kind(kind, cx);
+                            }
+                        }
                         view.last_index = Instant::now();
                         if view.status == "Refreshing project files…" {
                             view.status =

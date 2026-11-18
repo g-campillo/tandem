@@ -47,11 +47,16 @@ pub struct ServerConfig {
     /// same documents, answers the tsserver requests this server relays, and its answers are merged
     /// with this server's. Either exiting restarts both.
     pub companion: Option<Box<ServerConfig>>,
+    /// Written before every start of SourceKit-LSP in an Xcode project without buildServer.json.
+    pub xcode_setup: Option<tandem_core::XcodeSetup>,
+    /// Run before every start, so the generated types the server reads are current.
+    pub prepare: Option<tandem_core::Prepare>,
 }
 impl ServerConfig {
     /// Defaults: ready_detail "{name} ready", no args/path/env, initialization_options null,
     /// configuration {}, push_configuration false, resend_on_change false, capabilities {},
-    /// diagnostics Versioned, start and request timeouts 20 s, no companion.
+    /// diagnostics Versioned, start and request timeouts 20 s, no companion, no Xcode setup, no
+    /// prepare step.
     pub fn new(
         name: impl Into<String>,
         program: impl Into<PathBuf>,
@@ -77,6 +82,8 @@ impl ServerConfig {
             start_timeout: Duration::from_secs(20),
             request_timeout: Duration::from_secs(20),
             companion: None,
+            xcode_setup: None,
+            prepare: None,
         }
     }
 }
@@ -278,6 +285,56 @@ impl LanguageManager {
     }
 }
 
+/// Runs `prepare` in the project with the server's environment, for at most two minutes.
+fn run_prepare(
+    prepare: &tandem_core::Prepare,
+    config: &ServerConfig,
+    stopped: &AtomicBool,
+) -> Result<()> {
+    let mut command = Command::new(&prepare.program);
+    command.args(&prepare.args).env_clear();
+    for name in ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command.env("PATH", search_path(&config.path));
+    for (name, value) in &config.env {
+        command.env(name, value);
+    }
+    let mut child = command
+        .current_dir(&config.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("could not start")?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            anyhow::ensure!(status.success(), "exited with {status}");
+            return Ok(());
+        }
+        if stopped.load(Ordering::Relaxed) || Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("stopped after two minutes");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The ready text, with what an Xcode project Tandem set up still lacks.
+fn ready_detail(config: &ServerConfig) -> String {
+    match &config.xcode_setup {
+        Some(setup) if !setup.flags_found() => format!(
+            "{} · no compiler flags in the Xcode build logs yet: build the app once (a clean build if it is up to date) and SourceKit-LSP picks them up",
+            config.ready_detail
+        ),
+        _ => config.ready_detail.clone(),
+    }
+}
+
 fn health(shared: &Mutex<Shared>, state: &str, detail: impl Into<String>, restarts: u32) {
     shared.lock().unwrap().health = LanguageHealth {
         state: state.into(),
@@ -312,6 +369,20 @@ fn worker(
             );
         }
         if session.is_none() && retries < 3 && Instant::now() >= next_restart {
+            let prepared = match &config.prepare {
+                Some(prepare) => {
+                    health(
+                        &shared,
+                        "starting",
+                        format!("Running {}", prepare.title),
+                        retries,
+                    );
+                    run_prepare(prepare, &config, &stopped)
+                        .map_err(|error| format!("{} failed: {error:#}", prepare.title))
+                        .err()
+                }
+                None => None,
+            };
             match ProjectSession::start(&config, &stopped) {
                 Ok(mut started) => {
                     let documents = shared
@@ -325,7 +396,11 @@ fn worker(
                     if started.sync_documents(&documents, sequence).is_ok() {
                         shared.lock().unwrap().capabilities = started.capabilities.clone();
                         session = Some(started);
-                        health(&shared, "ready", config.ready_detail.as_str(), retries);
+                        let mut detail = ready_detail(&config);
+                        if let Some(failure) = &prepared {
+                            detail = format!("{detail} · {failure}");
+                        }
+                        health(&shared, "ready", detail, retries);
                     } else {
                         retries += 1;
                         next_restart = Instant::now() + Duration::from_secs(1);
@@ -481,6 +556,11 @@ struct ProjectSession {
 impl ProjectSession {
     fn start(config: &ServerConfig, stopped: &AtomicBool) -> Result<Self> {
         std::fs::create_dir_all(&config.cache)?;
+        if let Some(setup) = &config.xcode_setup {
+            setup
+                .apply()
+                .context("Could not set up the Xcode project for SourceKit-LSP")?;
+        }
         // The companion is ready before the main server can relay its first tsserver request.
         let companion = config
             .companion
@@ -1095,6 +1175,26 @@ pub fn apply_text_edits(text: &str, edits: &[TextEdit]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_prepare_step_runs_in_the_project_and_reports_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ServerConfig::new("x", "/bin/sh", temp.path(), temp.path().join("cache"));
+        let stopped = AtomicBool::new(false);
+        let prepare = |script: &str| tandem_core::Prepare {
+            title: "sync".into(),
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            watch: vec![],
+        };
+        run_prepare(&prepare("touch generated"), &config, &stopped).unwrap();
+        assert!(temp.path().join("generated").is_file());
+        let error = run_prepare(&prepare("exit 3"), &config, &stopped).unwrap_err();
+        assert!(format!("{error:#}").contains("exit status: 3"), "{error:#}");
+        stopped.store(true, Ordering::Relaxed);
+        let error = run_prepare(&prepare("sleep 5"), &config, &stopped).unwrap_err();
+        assert!(format!("{error:#}").contains("stopped"), "{error:#}");
+    }
+
     #[test]
     fn hover_is_requested_as_markdown_with_a_plain_text_fallback() {
         let capabilities = client_capabilities();

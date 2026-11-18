@@ -446,6 +446,27 @@ impl Workspace {
             Err(e) => self.message(format!("Could not save tool trust: {e}"), true, cx),
         }
     }
+    /// The running kinds whose prepare step (svelte-kit sync, nuxt prepare) watches a folder
+    /// where files were added or removed since `before`. Restarting them runs the step again
+    /// before the servers read the generated types.
+    pub(super) fn prepare_kinds(&self, before: &[String]) -> Vec<ToolKind> {
+        self.dev
+            .servers
+            .iter()
+            .filter(|(_, slot)| !slot.running.is_empty())
+            .filter_map(|(kind, slot)| {
+                let watch: Vec<&str> = slot
+                    .tools
+                    .as_ref()?
+                    .servers
+                    .iter()
+                    .filter_map(|server| server.prepare.as_ref())
+                    .flat_map(|prepare| prepare.watch.iter().map(String::as_str))
+                    .collect();
+                watched_changed(&watch, before, &self.index.files).then_some(*kind)
+            })
+            .collect()
+    }
     /// Restarts every running server of `kind`.
     pub(super) fn restart_kind(&mut self, kind: ToolKind, cx: &mut Context<Self>) {
         if let Some(slot) = self.dev.servers.get(&kind) {
@@ -790,6 +811,18 @@ impl Workspace {
 /// Rust and Python keep tabSize 4 with spaces (their formatters read their own config). Other
 /// languages follow the buffer: tabs when more indented lines start with a tab than with a space,
 /// otherwise the smallest leading-space count from 2 to 8 among indented lines, else 4.
+/// Whether the files under any folder of `watch` differ between two file lists.
+fn watched_changed(watch: &[&str], before: &[String], after: &[String]) -> bool {
+    let under = |files: &[String]| -> std::collections::BTreeSet<String> {
+        files
+            .iter()
+            .filter(|file| watch.iter().any(|folder| file.starts_with(folder)))
+            .cloned()
+            .collect()
+    };
+    !watch.is_empty() && under(before) != under(after)
+}
+
 pub(super) fn formatting_options(language: &str, text: &str) -> Value {
     if matches!(language, "rust" | "python") {
         return json!({"tabSize": 4, "insertSpaces": true});
@@ -865,8 +898,32 @@ fn navigation_results(value: &Value, relative: &str, root: &std::path::Path) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::formatting_options;
+    use super::{formatting_options, watched_changed};
     use serde_json::json;
+
+    #[test]
+    fn only_added_or_removed_files_in_watched_folders_count() {
+        let files = |list: &[&str]| list.iter().map(|f| f.to_string()).collect::<Vec<_>>();
+        let watch = ["src/routes/"];
+        let before = files(&["src/routes/+page.svelte", "src/lib/a.ts"]);
+        assert!(!watched_changed(&watch, &before, &before));
+        assert!(!watched_changed(
+            &watch,
+            &before,
+            &files(&["src/routes/+page.svelte", "src/lib/a.ts", "src/lib/b.ts"])
+        ));
+        assert!(watched_changed(
+            &watch,
+            &before,
+            &files(&[
+                "src/routes/+page.svelte",
+                "src/routes/blog/+page.ts",
+                "src/lib/a.ts"
+            ])
+        ));
+        assert!(watched_changed(&watch, &before, &files(&["src/lib/a.ts"])));
+        assert!(!watched_changed(&[], &before, &files(&[])));
+    }
 
     #[test]
     fn formatting_options_follow_the_buffer() {

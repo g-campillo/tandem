@@ -6,19 +6,20 @@ use std::path::Path;
 use std::time::Duration;
 use tandem_core::{Launch, NodeServer};
 
-/// rust-analyzer from the project's toolchain, offline, with build scripts and proc macros off.
+/// rust-analyzer from the project's toolchain, offline, with build scripts and proc macros on (as
+/// cargo build runs them), so derived and generated code is known.
 pub fn rust_server(tools: &tandem_core::RustTools, project: &Path, cache: &Path) -> ServerConfig {
     let bin = tools.toolchain.join("bin");
     let mut config = ServerConfig::new("rust-analyzer", &tools.rust_analyzer, project, cache);
-    config.ready_detail = "rust-analyzer ready · build scripts and proc macros off".into();
+    config.ready_detail = "rust-analyzer ready · build scripts and proc macros on".into();
     config.env = vec![
         ("RUSTC".into(), bin.join("rustc").into()),
         ("RUSTDOC".into(), bin.join("rustdoc").into()),
         ("CARGO_NET_OFFLINE".into(), "true".into()),
     ];
     config.path = vec![bin];
-    config.initialization_options = json!({"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":cache},
-        "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":true}},"rustfmt":{"extraArgs":[]}});
+    config.initialization_options = json!({"checkOnSave":false,"cargo":{"extraArgs":["--offline"],"buildScripts":{"enable":true},"targetDir":cache},
+        "procMacro":{"enable":true},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":true}},"rustfmt":{"extraArgs":[]}});
     config
 }
 
@@ -34,7 +35,7 @@ pub fn python_server(
     config.ready_detail = "Pyright ready · selected local interpreter".into();
     config.args = vec![script.into(), "--stdio".into()];
     config.path = vec![tools.prefix.join("bin")];
-    config.configuration = json!({"python":{"pythonPath":tools.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":true}},"pyright":{"disableOrganizeImports":false}});
+    config.configuration = json!({"python":{"pythonPath":tools.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":true,"autoSearchPaths":true}},"pyright":{"disableOrganizeImports":false}});
     config.push_configuration = true;
     config.resend_on_change = true;
     Some(config)
@@ -47,14 +48,22 @@ pub fn server_config(
     project: &Path,
     cache: &Path,
 ) -> ServerConfig {
+    let mut config = launch_config(server, project, cache);
+    config.prepare = server.prepare.clone();
+    config
+}
+
+fn launch_config(server: &tandem_core::ServerTools, project: &Path, cache: &Path) -> ServerConfig {
     match &server.launch {
         Launch::SourceKit {
             server: program,
             developer_dir,
             extra_path,
+            xcode,
         } => {
             let mut config = ServerConfig::new(&server.title, program, project, cache);
             config.args = vec!["--scratch-path".into(), cache.join("build").into()];
+            config.xcode_setup = xcode.clone();
             config.path = program
                 .parent()
                 .map(Path::to_path_buf)
@@ -73,6 +82,7 @@ pub fn server_config(
         Launch::Jdtls {
             launcher,
             java_home,
+            trigger_files,
         } => {
             let mut config = ServerConfig::new(&server.title, launcher, project, cache);
             config.args = vec!["-data".into(), cache.join("workspace").into()];
@@ -80,6 +90,14 @@ pub fn server_config(
             config.env = vec![("JAVA_HOME".into(), java_home.into())];
             let settings = json!({"java":{"import":{"generatesMetadataFilesAtProjectRoot":false,"gradle":{"enabled":true,"offline":{"enabled":true}},"maven":{"enabled":true,"offline":{"enabled":true}}},"maven":{"downloadSources":false},"eclipse":{"downloadSources":false},"format":{"enabled":true},"autobuild":{"enabled":true}}});
             config.initialization_options = json!({ "settings": settings });
+            if !trigger_files.is_empty() {
+                // jdtls infers a plain folder's source folders from these files' packages.
+                config.initialization_options["triggerFiles"] = trigger_files
+                    .iter()
+                    .filter_map(|file| url::Url::from_file_path(file).ok())
+                    .map(|uri| Value::String(uri.to_string()))
+                    .collect();
+            }
             config.configuration = settings;
             config.push_configuration = true;
             // jdtls pushes diagnostics without versions.
@@ -99,6 +117,7 @@ pub fn server_config(
             node,
             server: script,
             tsserver,
+            vue_plugin,
         } => {
             let mut config = typescript_config(&server.title, node, project, cache);
             config.args = vec![script.into(), "--stdio".into()];
@@ -109,6 +128,13 @@ pub fn server_config(
                 "disableAutomaticTypingAcquisition": true,
                 "preferences": inlay_preferences(),
             });
+            if let Some(location) = vue_plugin {
+                config.initialization_options["plugins"] = json!([{
+                    "name": "@vue/typescript-plugin",
+                    "location": location,
+                    "languages": ["vue"],
+                }]);
+            }
             config
         }
         Launch::Node {
@@ -293,16 +319,22 @@ mod tests {
         );
         assert_eq!(
             config.initialization_options.pointer("/procMacro/enable"),
-            Some(&json!(false))
+            Some(&json!(true))
+        );
+        assert_eq!(
+            config
+                .initialization_options
+                .pointer("/cargo/buildScripts/enable"),
+            Some(&json!(true))
         );
         assert_eq!(
             config.initialization_options.pointer("/cargo/extraArgs"),
-            Some(&json!(["--locked", "--offline"]))
+            Some(&json!(["--offline"]))
         );
         assert_eq!(config.diagnostics, DiagnosticMode::Versioned);
         assert_eq!(
             config.ready_detail,
-            "rust-analyzer ready · build scripts and proc macros off"
+            "rust-analyzer ready · build scripts and proc macros on"
         );
         assert_eq!(config.configuration, json!({}));
         assert!(!config.push_configuration);
@@ -344,6 +376,13 @@ mod tests {
                 .pointer("/python/analysis/diagnosticMode"),
             Some(&json!("openFilesOnly"))
         );
+        // Finds packages under src/ that are not installed, as the pyright command does.
+        assert_eq!(
+            config
+                .configuration
+                .pointer("/python/analysis/autoSearchPaths"),
+            Some(&json!(true))
+        );
         assert!(config.push_configuration);
         assert!(config.resend_on_change);
         assert!(config.initialization_options.is_null());
@@ -365,6 +404,7 @@ mod tests {
         let developer = PathBuf::from("/Applications/Xcode.app/Contents/Developer");
         let program = developer.join("Toolchains/XcodeDefault.xctoolchain/usr/bin/sourcekit-lsp");
         let tools = tandem_core::ServerTools {
+            prepare: None,
             name: "sourcekit-lsp".into(),
             title: "SourceKit-LSP (Xcode 26.1)".into(),
             languages: vec!["swift".into()],
@@ -372,6 +412,7 @@ mod tests {
                 server: program.clone(),
                 developer_dir: developer.clone(),
                 extra_path: vec!["/opt/homebrew/bin".into()],
+                xcode: None,
             },
         };
         let cache = Path::new("/state/language-cache/p/swift/sourcekit-lsp");
@@ -412,10 +453,40 @@ mod tests {
         assert!(config.initialization_options.is_null());
         assert!(!config.push_configuration);
         assert!(!config.resend_on_change);
+        assert_eq!(config.xcode_setup, None);
+    }
+
+    #[test]
+    fn sourcekit_config_carries_the_xcode_setup() {
+        let setup = tandem_core::XcodeSetup {
+            path: "/work/app/buildServer.json".into(),
+            config: "{}\n".into(),
+            tool: "/opt/homebrew/bin/xcode-build-server".into(),
+            build_root: "/work/app/build".into(),
+            scheme: "App".into(),
+            flags: "/Users/me/Library/Caches/xcode-build-server/-work-app/compile_file-App-0"
+                .into(),
+            replaces: None,
+        };
+        let tools = tandem_core::ServerTools {
+            prepare: None,
+            name: "sourcekit-lsp".into(),
+            title: "SourceKit-LSP (Xcode 26.1)".into(),
+            languages: vec!["swift".into()],
+            launch: tandem_core::Launch::SourceKit {
+                server: "/x/sourcekit-lsp".into(),
+                developer_dir: "/x".into(),
+                extra_path: vec![],
+                xcode: Some(setup.clone()),
+            },
+        };
+        let config = server_config(&tools, Path::new("/work/app"), Path::new("/state/swift"));
+        assert_eq!(config.xcode_setup, Some(setup));
     }
 
     fn tsgo_tools() -> tandem_core::ServerTools {
         tandem_core::ServerTools {
+            prepare: None,
             name: "tsgo".into(),
             title: "TypeScript 7.0.2 (global)".into(),
             languages: vec!["typescript".into(), "javascript".into()],
@@ -427,6 +498,7 @@ mod tests {
 
     fn ts_ls_tools() -> tandem_core::ServerTools {
         tandem_core::ServerTools {
+            prepare: None,
             name: "typescript-language-server".into(),
             title: "TypeScript 5.9.3 (project) via typescript-language-server 6.0.2".into(),
             languages: vec!["typescript".into(), "javascript".into()],
@@ -434,6 +506,7 @@ mod tests {
                 node: "/n/bin/node".into(),
                 server: "/n/lib/node_modules/typescript-language-server/lib/cli.mjs".into(),
                 tsserver: "/work/app/node_modules/typescript/lib/tsserver.js".into(),
+                vue_plugin: None,
             },
         }
     }
@@ -464,6 +537,38 @@ mod tests {
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.ready_detail, "TypeScript 7.0.2 (global) ready");
         assert!(!config.resend_on_change);
+    }
+
+    #[test]
+    fn ts_ls_config_loads_vues_plugin_and_carries_the_prepare_step() {
+        let mut tools = ts_ls_tools();
+        let cache = Path::new("/state/ts");
+        let plain = server_config(&tools, Path::new("/work/app"), cache);
+        assert_eq!(plain.initialization_options.pointer("/plugins"), None);
+        assert_eq!(plain.prepare, None);
+
+        let tandem_core::Launch::TypeScriptLanguageServer { vue_plugin, .. } = &mut tools.launch
+        else {
+            unreachable!()
+        };
+        *vue_plugin = Some("/n/lib/node_modules/@vue/language-server".into());
+        let prepare = tandem_core::Prepare {
+            title: "nuxt prepare".into(),
+            program: "/n/bin/node".into(),
+            args: vec!["nuxt.mjs".into(), "prepare".into()],
+            watch: vec!["app/composables/".into()],
+        };
+        tools.prepare = Some(prepare.clone());
+        let config = server_config(&tools, Path::new("/work/app"), cache);
+        assert_eq!(
+            config.initialization_options.pointer("/plugins"),
+            Some(&json!([{
+                "name": "@vue/typescript-plugin",
+                "location": "/n/lib/node_modules/@vue/language-server",
+                "languages": ["vue"],
+            }]))
+        );
+        assert_eq!(config.prepare, Some(prepare));
     }
 
     #[test]
@@ -561,6 +666,7 @@ mod tests {
     fn web_configs_enable_formatting_and_no_schema_downloads() {
         let package = PathBuf::from("/n/lib/node_modules/vscode-langservers-extracted");
         let web = |name: &str, title: &str, kind| tandem_core::ServerTools {
+            prepare: None,
             name: name.into(),
             title: title.into(),
             languages: vec![name.into()],
@@ -634,6 +740,7 @@ mod tests {
     fn svelte_config_uses_settled_diagnostics() {
         let script = PathBuf::from("/n/lib/node_modules/svelte-language-server/bin/server.js");
         let tools = tandem_core::ServerTools {
+            prepare: None,
             name: "svelte".into(),
             title: "svelte-language-server 0.17.21".into(),
             languages: vec!["svelte".into()],
@@ -672,6 +779,7 @@ mod tests {
         let tsdk = PathBuf::from("/work/app/node_modules/typescript/lib");
         let vue = PathBuf::from("/n/lib/node_modules/@vue/language-server");
         let tools = tandem_core::ServerTools {
+            prepare: None,
             name: "vue".into(),
             title: "Vue 3.3.14 with TypeScript 5.9.3 (project)".into(),
             languages: vec!["vue".into()],
@@ -752,12 +860,14 @@ mod tests {
         let launcher = PathBuf::from("/opt/homebrew/Cellar/jdtls/1.47.0/bin/jdtls");
         let java_home = PathBuf::from("/Users/me/.sdkman/candidates/java/current");
         let tools = tandem_core::ServerTools {
+            prepare: None,
             name: "jdtls".into(),
             title: "jdtls 1.47.0".into(),
             languages: vec!["java".into()],
             launch: tandem_core::Launch::Jdtls {
                 launcher: launcher.clone(),
                 java_home: java_home.clone(),
+                trigger_files: vec!["/work/app/src/demo/A.java".into()],
             },
         };
         let cache = Path::new("/state/language-cache/p/java/jdtls");
@@ -781,7 +891,10 @@ mod tests {
         let settings = &config.configuration;
         assert_eq!(
             config.initialization_options,
-            json!({ "settings": settings })
+            json!({
+                "settings": settings,
+                "triggerFiles": ["file:///work/app/src/demo/A.java"],
+            })
         );
         assert_eq!(
             settings.pointer("/java/import/generatesMetadataFilesAtProjectRoot"),

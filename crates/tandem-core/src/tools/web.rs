@@ -64,6 +64,7 @@ pub(crate) fn discover(_project: &Path, roots: &ToolRoots) -> Result<KindTools, 
         .zip(scripts)
         .map(
             |((name, title, _, server, languages), script)| ServerTools {
+                prepare: None,
                 name: name.into(),
                 title: title.into(),
                 languages: languages.iter().map(|id| id.to_string()).collect(),
@@ -141,6 +142,7 @@ mod tests {
         assert!(tools.notes.is_empty());
         let server =
             |name: &str, title: &str, script: &str, kind, languages: &[&str]| ServerTools {
+                prepare: None,
                 name: name.into(),
                 title: title.into(),
                 languages: languages.iter().map(|id| id.to_string()).collect(),

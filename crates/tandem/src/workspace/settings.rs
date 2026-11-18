@@ -366,7 +366,7 @@ impl Workspace {
             .when(self.dev.discovering,|d|d.child(note("Inspecting installed tools…")))
             .when(!self.dev.tool_error.is_empty(),|d|d.child(panel_error(note(self.dev.tool_error.clone()), cx)))
             .when_some(self.dev.rust.as_ref(),|d,tools|d.child(note(format!("Installed toolchain: {}",tools.label)))
-                .child(panel_warning(note("Enabling runs rust-analyzer and Cargo metadata with your local user permissions. Open only projects you trust. Build scripts, proc macros, automatic Cargo checks and auto-installation are disabled."), cx))
+                .child(panel_warning(note("Enabling runs rust-analyzer and Cargo with your local user permissions, including the build scripts and proc macros of the project and its dependencies, as cargo build would. Open only projects you trust. Automatic Cargo checks and auto-installation stay off."), cx))
                 .child(path_button(Button::new("enable-rust"), if enabled{"Disable Rust Tools"}else{"Trust Project & Enable Rust"}).disabled(self.loading||self.dev.discovering)
                     .on_click(cx.listener(move|this,_,_,cx|if enabled{this.disable_language(cx)}else{this.authorize_language(cx)}))))
             .when(enabled,|d|d.child(path_button(Button::new("restart-language"), "Restart Language Server").on_click(cx.listener(|this,_,_,cx|{

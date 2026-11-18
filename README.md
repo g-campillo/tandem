@@ -49,11 +49,20 @@ Completion, hover, go to definition, references, symbols, formatting and the Pro
 | Java | jdtls on Java 21 or newer | `brew install jdtls`, `brew install openjdk@21` |
 | Swift | SourceKit-LSP from Xcode or the Command Line Tools; Xcode projects also need xcode-build-server | `xcode-select --install`, `brew install xcode-build-server` |
 | JavaScript, TypeScript, JSX, TSX | the project's TypeScript 7 (tsgo), or typescript-language-server with the project's TypeScript 6 or older; else the global TypeScript | `npm install -g typescript`, `npm install -g typescript-language-server` |
-| Vue | @vue/language-server with typescript-language-server and the project's TypeScript 6 or older | `npm install -g @vue/language-server`, `npm install -g typescript-language-server` |
+| Vue | @vue/language-server with typescript-language-server and the project's TypeScript 6 or older, else a global TypeScript 6 or older | `npm install -g @vue/language-server`, `npm install -g typescript-language-server` |
 | Svelte | svelte-language-server | `npm install -g svelte-language-server` |
 | HTML, CSS, SCSS, Less, JSON | vscode-langservers-extracted | `npm install -g vscode-langservers-extracted` |
 
-Vue files are highlighted with the HTML grammar. Java imports Maven and Gradle projects offline, so build once from the command line first. In an Xcode project, run the `xcode-build-server config` command Settings shows.
+Some projects need generated or downloaded files before their language server sees the whole project. Tandem handles what it can and says what it cannot:
+
+- **Rust:** rust-analyzer runs the build scripts and proc macros of the project and its dependencies, as `cargo build` would, so serde-style derived code is known. It works offline from what Cargo has already downloaded and never edits `Cargo.lock`.
+- **Python:** Pyright also looks for packages in `src/`, as the `pyright` command does.
+- **Java:** jdtls imports Maven and Gradle projects offline, so their libraries resolve only after a build downloaded them. Settings names the Maven dependencies that are missing and the command to fetch them, or asks for one Gradle build. In a folder without Maven or Gradle, Tandem points jdtls at the project's Java files so it finds the source folders.
+- **Swift:** an Xcode project needs a `buildServer.json`. Build once in Xcode, with `xcodebuild` (any `-derivedDataPath` inside the project works) or through XcodeBuildMCP, then enable Swift: Tandem writes `buildServer.json` for the newest build, reads that build's logs for the compiler flags, and hides the file from Git through `.git/info/exclude`. It also finds an Xcode project one folder down, and replaces a `buildServer.json` whose build folder was deleted. A build that compiled nothing leaves no flags; the status line then asks for a build that compiles the app.
+- **Vue and Nuxt:** TypeScript files load Vue's TypeScript plugin, so they can import `.vue` files. In a Nuxt project the Vue tools run `nuxt prepare` when they start and whenever a file is added or removed in an auto-import folder (components, composables, utils, pages, server, shared).
+- **SvelteKit:** the Svelte tools run `svelte-kit sync` when they start and whenever a file is added or removed under `src/routes` or `src/params`, so each route's `./$types` is current.
+
+Vue files are highlighted with the HTML grammar.
 
 ## Look and fonts
 

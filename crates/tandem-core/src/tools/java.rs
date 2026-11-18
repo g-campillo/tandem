@@ -2,14 +2,16 @@
 //! path. Discovery never runs `java`, `/usr/bin/java` or `/usr/libexec/java_home`, which print
 //! "Unable to locate a Java Runtime" or open an install dialog when no JDK is installed.
 use super::read_tool_config;
-use super::servers::{KindTools, Launch, MissingTools, ServerTools, ToolRoots, fingerprint};
+use super::servers::{
+    KindTools, Launch, MissingTools, ServerTools, ToolNote, ToolRoots, fingerprint,
+};
 use crate::ToolKind;
 use std::path::{Component, Path, PathBuf};
 
 /// The oldest Java release jdtls runs on.
 const MINIMUM_MAJOR: u64 = 21;
 
-pub(crate) fn discover(_project: &Path, roots: &ToolRoots) -> Result<KindTools, MissingTools> {
+pub(crate) fn discover(project: &Path, roots: &ToolRoots) -> Result<KindTools, MissingTools> {
     let (launcher, runtime) = match (find_jdtls(roots), find_runtime(roots)) {
         (Some(launcher), Some(runtime)) => (launcher, runtime),
         (launcher, runtime) => {
@@ -51,21 +53,151 @@ pub(crate) fn discover(_project: &Path, roots: &ToolRoots) -> Result<KindTools, 
         kind: ToolKind::Java,
         label,
         servers: vec![ServerTools {
+            prepare: None,
             name: "jdtls".into(),
             title,
             languages: vec!["java".into()],
             launch: Launch::Jdtls {
                 launcher,
                 java_home: runtime.home,
+                trigger_files: plain_java_files(project),
             },
         }],
-        notes: vec![],
+        notes: build_notes(project, &roots.home),
         fingerprint,
     })
 }
 
 /// The first jdtls launcher of each Homebrew prefix's `opt/jdtls`, then Mason's, canonical.
 /// Homebrew does not put jdtls on PATH.
+/// What a project needs before the offline import can resolve it: Maven dependencies missing from
+/// `~/.m2/repository` (those of the root pom.xml with plain versions), or a Gradle build that never
+/// ran (no `.gradle` folder).
+fn build_notes(project: &Path, home: &Path) -> Vec<ToolNote> {
+    let offline = "Tandem imports Java projects offline, so their libraries resolve only once a build has downloaded them.";
+    if let Ok(pom) = read_tool_config(&project.join("pom.xml")) {
+        let repository = home.join(".m2/repository");
+        let missing: Vec<String> = maven_dependencies(&pom)
+            .into_iter()
+            .filter(|(group, artifact, version)| {
+                !repository
+                    .join(group.replace('.', "/"))
+                    .join(artifact)
+                    .join(version)
+                    .is_dir()
+            })
+            .map(|(group, artifact, version)| format!("{group}:{artifact}:{version}"))
+            .collect();
+        if missing.is_empty() {
+            return vec![];
+        }
+        let maven = if project.join("mvnw").is_file() {
+            "./mvnw"
+        } else {
+            "mvn"
+        };
+        return vec![ToolNote {
+            text: format!(
+                "{offline} Not downloaded yet: {}. Run this in the project folder, then choose Restart Java Tools.",
+                missing.join(", ")
+            ),
+            command: Some(format!("{maven} dependency:resolve")),
+        }];
+    }
+    let gradle = [
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ]
+    .iter()
+    .any(|file| project.join(file).is_file());
+    if gradle && !project.join(".gradle").is_dir() {
+        let command = if project.join("gradlew").is_file() {
+            "./gradlew build"
+        } else {
+            "gradle build"
+        };
+        return vec![ToolNote {
+            text: format!(
+                "{offline} This Gradle project has not been built here yet. Run this in the project folder, then choose Restart Java Tools."
+            ),
+            command: Some(command.into()),
+        }];
+    }
+    vec![]
+}
+
+/// Up to 50 Java files of a project with no Maven, Gradle or Eclipse project files, from folders
+/// eight levels deep (skipping hidden, dependency and build output folders). Without them jdtls
+/// takes the project folder for the source folder, and every `package` line looks wrong.
+fn plain_java_files(project: &Path) -> Vec<PathBuf> {
+    const BUILD_FILES: [&str; 6] = [
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        ".project",
+    ];
+    const SKIP: [&str; 5] = ["node_modules", "target", "build", "out", "bin"];
+    if BUILD_FILES.iter().any(|file| project.join(file).exists()) {
+        return vec![];
+    }
+    let mut found = vec![];
+    let mut queue = vec![(project.to_path_buf(), 0)];
+    let mut seen = 0;
+    while let Some((folder, depth)) = queue.pop() {
+        let mut entries: Vec<_> = std::fs::read_dir(&folder)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            seen += 1;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if seen > 5000 || found.len() >= 50 {
+                return found;
+            }
+            if kind.is_file() && name.ends_with(".java") {
+                found.push(entry.path());
+            } else if kind.is_dir() && depth < 8 && !name.starts_with('.') && !SKIP.contains(&name)
+            {
+                queue.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    found
+}
+
+/// (group, artifact, version) of each `<dependency>` in a pom.xml whose three values are written
+/// out, not taken from properties or a parent.
+fn maven_dependencies(pom: &str) -> Vec<(String, String, String)> {
+    let field = |block: &str, name: &str| -> Option<String> {
+        let (_, rest) = block.split_once(&format!("<{name}>"))?;
+        let (value, _) = rest.split_once(&format!("</{name}>"))?;
+        let value = value.trim();
+        (!value.is_empty() && !value.contains("${") && !value.contains('<'))
+            .then(|| value.to_string())
+    };
+    pom.split("<dependency>")
+        .skip(1)
+        .filter_map(|block| {
+            let block = block.split("</dependency>").next()?;
+            Some((
+                field(block, "groupId")?,
+                field(block, "artifactId")?,
+                field(block, "version")?,
+            ))
+        })
+        .collect()
+}
+
 fn find_jdtls(roots: &ToolRoots) -> Option<PathBuf> {
     roots
         .homebrew
@@ -295,6 +427,7 @@ mod tests {
             Launch::Jdtls {
                 launcher,
                 java_home: current,
+                trigger_files: vec![],
             }
         );
         assert!(tools.notes.is_empty());
@@ -416,6 +549,64 @@ mod tests {
             discover(temp.path(), &roots).unwrap().fingerprint,
             fingerprint
         );
+    }
+
+    #[test]
+    fn notes_name_what_a_build_must_download_first() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (home, project) = (home.path(), project.path());
+        write(
+            &project.join("pom.xml"),
+            "<project><dependencies>\n<dependency><groupId>org.jsoup</groupId><artifactId>jsoup</artifactId><version>1.18.3</version></dependency>\n<dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId><version>${guava.version}</version></dependency>\n<dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>2.0.16</version><scope>compile</scope></dependency>\n</dependencies></project>",
+        );
+        std::fs::create_dir_all(home.join(".m2/repository/org/slf4j/slf4j-api/2.0.16")).unwrap();
+        assert_eq!(
+            build_notes(project, home),
+            vec![ToolNote {
+                text: "Tandem imports Java projects offline, so their libraries resolve only once a build has downloaded them. Not downloaded yet: org.jsoup:jsoup:1.18.3. Run this in the project folder, then choose Restart Java Tools.".into(),
+                command: Some("mvn dependency:resolve".into()),
+            }]
+        );
+        write(&project.join("mvnw"), "#!/bin/sh\n");
+        assert_eq!(
+            build_notes(project, home)[0].command.as_deref(),
+            Some("./mvnw dependency:resolve")
+        );
+        std::fs::create_dir_all(home.join(".m2/repository/org/jsoup/jsoup/1.18.3")).unwrap();
+        assert!(build_notes(project, home).is_empty());
+
+        // Gradle: a project never built here has no .gradle folder.
+        let gradle = tempfile::tempdir().unwrap();
+        let gradle = gradle.path();
+        write(&gradle.join("build.gradle.kts"), "plugins { java }");
+        write(&gradle.join("gradlew"), "#!/bin/sh\n");
+        assert_eq!(
+            build_notes(gradle, home)[0].command.as_deref(),
+            Some("./gradlew build")
+        );
+        std::fs::create_dir_all(gradle.join(".gradle")).unwrap();
+        assert!(build_notes(gradle, home).is_empty());
+    }
+
+    #[test]
+    fn plain_folders_name_their_java_files_for_jdtls() {
+        let project = tempfile::tempdir().unwrap();
+        let project = project.path();
+        write(&project.join("src/demo/A.java"), "package demo;");
+        write(&project.join("src/demo/B.java"), "package demo;");
+        write(&project.join("src/demo/notes.txt"), "");
+        write(&project.join("target/classes/demo/Gen.java"), "");
+        write(&project.join(".hidden/C.java"), "");
+        assert_eq!(
+            plain_java_files(project),
+            vec![
+                project.join("src/demo/A.java"),
+                project.join("src/demo/B.java")
+            ]
+        );
+        write(&project.join("pom.xml"), "<project/>");
+        assert!(plain_java_files(project).is_empty());
     }
 
     #[test]

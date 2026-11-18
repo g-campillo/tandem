@@ -13,7 +13,7 @@ use tandem_core::languages::{language_id_for_path, tool_kind};
 pub(super) fn trust_notice(kind: ToolKind) -> &'static str {
     match kind {
         ToolKind::Rust => {
-            "Enabling runs rust-analyzer and Cargo metadata with your local user permissions. Open only projects you trust. Build scripts, proc macros, automatic Cargo checks and auto-installation are disabled."
+            "Enabling runs rust-analyzer and Cargo with your local user permissions, including the build scripts and proc macros of the project and its dependencies, as cargo build would. Open only projects you trust. Automatic Cargo checks and auto-installation stay off."
         }
         ToolKind::Python => {
             "Pyright, Node and the selected interpreter run with your local user permissions. Enable them only for a trusted project/environment."
@@ -22,16 +22,16 @@ pub(super) fn trust_notice(kind: ToolKind) -> &'static str {
             "Enabling runs jdtls on the Java runtime shown above, with your local user permissions. It imports Maven and Gradle builds offline, which runs their build logic, and keeps its workspace in Tandem's state folder, not in the project. Enable it only for projects you trust."
         }
         ToolKind::Swift => {
-            "Enabling runs SourceKit-LSP with your local user permissions. To index the project it builds the package in Tandem's state folder, which runs package plugins and macros and resolves package dependencies as swift build would. Enable it only for projects you trust."
+            "Enabling runs SourceKit-LSP with your local user permissions. To index a package it builds it in Tandem's state folder, which runs package plugins and macros and resolves package dependencies as swift build would. In an Xcode project it runs xcode-build-server, which reads Xcode's build logs for the compiler flags. Enable it only for projects you trust."
         }
         ToolKind::TypeScript => {
             "Enabling runs the TypeScript language server with your local user permissions. It uses the project's own TypeScript in node_modules when there is one, which runs code installed by the project. It never installs type packages. Enable it only for projects you trust."
         }
         ToolKind::Vue => {
-            "Enabling runs the Vue language server and typescript-language-server with the project's TypeScript and Vue's TypeScript plugin, with your local user permissions. Enable it only for projects you trust."
+            "Enabling runs the Vue language server and typescript-language-server with the project's TypeScript and Vue's TypeScript plugin, with your local user permissions. In a Nuxt project it also runs the project's nuxt prepare, which loads nuxt.config and its modules (project code), whenever the server starts or a file is added or removed in an auto-import folder. Enable it only for projects you trust."
         }
         ToolKind::Svelte => {
-            "Enabling runs svelte-language-server with your local user permissions. It loads the project's svelte.config.js, which runs project code. Enable it only for projects you trust."
+            "Enabling runs svelte-language-server with your local user permissions. It loads the project's svelte.config.js, which runs project code, and in a SvelteKit project it runs the project's svelte-kit sync whenever the server starts or a route file is added or removed, so route types stay current. Enable it only for projects you trust."
         }
         ToolKind::Web => {
             "Enabling runs the HTML, CSS and JSON language servers from vscode-langservers-extracted with your local user permissions. They do not download JSON schemas. Enable them only for projects you trust."
