@@ -1,11 +1,9 @@
 //! The window's chrome around the panes: the title bar with its command center, the
-//! activity bar on the window's edge beside the file tree, the breadcrumbs above the
-//! editor and the status bar.
-use super::breadcrumbs::{path_segments, symbol_path};
+//! activity bar on the window's edge beside the file tree and the status bar.
 use super::chat_view::permission_menu_with;
 use super::chrome_logic::{
-    Activity, FileIcon, Shown, activity_selected, cursor_label, file_icon, language_label,
-    problems_label, tooltip,
+    Activity, FileIcon, Shown, activity_selected, cursor_label, language_label, problems_label,
+    tooltip,
 };
 use super::commands::shortcut;
 use super::pane_logic::ACTIVITY_BAR;
@@ -148,7 +146,7 @@ impl Workspace {
             searching: self.sidebar == Sidebar::Search,
             chat: self.chat.visible,
             bottom: self.bottom,
-            settings: self.settings.open,
+            settings: self.settings.window.is_some(),
         }
     }
 
@@ -179,7 +177,7 @@ impl Workspace {
                 cx.notify();
             }
             Activity::Terminal => self.toggle_terminal(cx),
-            Activity::Settings => self.toggle_settings(cx),
+            Activity::Settings => self.open_settings(cx),
         }
     }
 
@@ -221,82 +219,6 @@ impl Workspace {
             .child(div().flex_1())
             .child(button(Activity::Settings))
             .into_any_element()
-    }
-
-    /// The breadcrumbs above the editor: the open file's folders and name and, once the
-    /// language tools have answered for this file, the symbols the cursor is in. They are
-    /// not clickable.
-    pub(super) fn breadcrumbs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let tab = self.active.and_then(|i| self.tabs.get(i))?;
-        let p = palette(cx.theme().mode);
-        let path = &tab.document.path;
-        let segments = path_segments(path);
-        let symbols = if self.dev.outline_instance == tab.instance {
-            symbol_path(
-                &self.dev.outline,
-                tab.editor.read(cx).cursor_position().line,
-            )
-        } else {
-            Vec::new()
-        };
-        let label = segments
-            .iter()
-            .chain(&symbols)
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" › ");
-        let file = segments.len().saturating_sub(1);
-        let parts = segments
-            .into_iter()
-            .enumerate()
-            .map(|(index, name)| {
-                if index == file {
-                    div()
-                        .flex_none()
-                        .h_flex()
-                        .items_center()
-                        .gap_1()
-                        .text_color(p.foreground)
-                        .child(Icon::new(file_icon_image(file_icon(path))).xsmall())
-                        .child(name)
-                } else {
-                    div().flex_none().child(name)
-                }
-            })
-            .chain(
-                symbols
-                    .into_iter()
-                    .map(|name| div().flex_none().child(name)),
-            );
-        let mut row = Vec::new();
-        for (index, part) in parts.enumerate() {
-            if index > 0 {
-                row.push(
-                    Icon::new(IconName::ChevronRight)
-                        .xsmall()
-                        .into_any_element(),
-                );
-            }
-            row.push(part.into_any_element());
-        }
-        Some(
-            div()
-                .id("breadcrumbs")
-                .role(Role::Label)
-                .aria_label(label)
-                .h_flex()
-                .items_center()
-                .gap_1()
-                .h(px(24.))
-                .px_3()
-                .flex_shrink_0()
-                .min_w_0()
-                .overflow_hidden()
-                .text_size(px(12.))
-                .text_color(p.secondary_foreground)
-                .children(row)
-                .into_any_element(),
-        )
     }
 
     /// The status bar: the git branch, the open file's errors and warnings, the status
@@ -370,7 +292,7 @@ impl Workspace {
                 d.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
             })
             .child(status);
-        let editor_shown = self.diff.is_none() && !self.settings.open;
+        let editor_shown = self.diff.is_none();
         let cursor = tab.filter(|_| editor_shown).map(|tab| {
             let position = tab.editor.read(cx).cursor_position();
             status_item(

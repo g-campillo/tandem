@@ -8,6 +8,7 @@ use super::*;
 use crate::appearance::{
     Palette, compact_button, palette, panel_error, path_button, solid_section, wrapping_button,
 };
+use crate::scrolling::VerticalOnly as _;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Textarea;
@@ -174,7 +175,6 @@ impl Workspace {
     }
 
     fn chat_header(&self, state: Option<&ChatState>, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette(cx.theme().mode);
         let task_menu = state.map(|state| self.task_menu(state, cx));
         div()
             // A control, so not in the chat's text font that the panel sets.
@@ -185,8 +185,6 @@ impl Workspace {
             .items_center()
             .gap_2()
             .p_2()
-            .border_b_1()
-            .border_color(p.border)
             .child(
                 div()
                     .h_flex()
@@ -293,7 +291,7 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .overflow_y_scroll()
+                    .vertical_only()
                     .p_3()
                     .gap_3()
                     .children(items)
@@ -623,7 +621,6 @@ impl Workspace {
                         .ghost()
                         .disabled(!can_act)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.settings.open = false;
                             this.open_file(open.clone(), false, None, window, cx)
                         })),
                 )
@@ -761,7 +758,6 @@ impl Workspace {
                 )
                 .ghost()
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.settings.open = false;
                     this.open_file(path.clone(), false, line, window, cx)
                 }))
                 .into_any_element()
@@ -877,7 +873,7 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .overflow_y_scroll()
+                    .vertical_only()
                     .child(body.flex_shrink_0()),
             )
             .child(
@@ -1095,7 +1091,7 @@ impl Workspace {
             .v_flex()
             .min_w_0()
             .min_h_0()
-            .overflow_y_scroll()
+            .vertical_only()
             .gap_2()
             .p_3()
             .border_1()

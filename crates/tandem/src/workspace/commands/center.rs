@@ -224,14 +224,12 @@ impl Workspace {
                         window.close_dialog(cx);
                         let _ = weak.update(cx, |view, cx| match entry {
                             Some(CenterEntry::File(path)) => {
-                                view.settings.open = false;
                                 view.open_file(path, false, None, window, cx);
                             }
                             Some(CenterEntry::Command(index)) => {
                                 view.run_command(index, window, cx)
                             }
                             Some(CenterEntry::Symbol { path, line, .. }) => {
-                                view.settings.open = false;
                                 view.open_file(path, false, Some(line), window, cx);
                             }
                             None => {}
@@ -250,7 +248,9 @@ impl Workspace {
             return;
         };
         if spec.scope == KeyScope::Editor {
-            let editor = (self.diff.is_none() && !self.settings.open)
+            let editor = self
+                .diff
+                .is_none()
                 .then(|| self.active.and_then(|index| self.tabs.get(index)))
                 .flatten()
                 .map(|tab| tab.editor.clone());

@@ -17,6 +17,7 @@ mod provider;
 mod settings;
 mod settings_languages;
 mod settings_look;
+mod settings_window;
 mod tools;
 mod view;
 use chat::ChatUi;
@@ -89,6 +90,11 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
         handler: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
     ) {
         cx.on_action(move |_: &A, cx| {
+            // A shortcut or menu command used while another window (Settings) is in front is
+            // not for this one.
+            if cx.active_window().is_some_and(|active| active != window) {
+                return;
+            }
             let view = view.clone();
             // Dispatch runs while GPUI has borrowed the window. Defer the
             // update until that borrow is released instead of losing the action.
@@ -99,7 +105,7 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
             });
         });
     }
-    route::<Settings>(cx, window, view.clone(), |v, _, cx| v.toggle_settings(cx));
+    route::<Settings>(cx, window, view.clone(), |v, _, cx| v.open_settings(cx));
     route::<OpenProject>(cx, window, view.clone(), |v, w, c| v.choose_project(w, c));
     route::<ShowRecent>(cx, window, view.clone(), |v, _, c| {
         v.show_recent = !v.show_recent;
@@ -123,6 +129,21 @@ pub fn install_actions(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<W
     });
     route::<CloseFile>(cx, window, view.clone(), |v, w, c| {
         v.close_file(false, w, c)
+    });
+    // ⌘W with the Settings window in front closes it. Otherwise the action goes on to
+    // the Close File handler above: GPUI runs the newest app-wide handler of an action
+    // first and stops there unless it propagates.
+    let settings_of = view.clone();
+    cx.on_action(move |_: &CloseFile, cx| {
+        let settings = settings_of
+            .upgrade()
+            .and_then(|view| view.read(cx).settings.window);
+        match settings {
+            Some(settings) if cx.active_window() == Some(settings) => cx.defer(move |cx| {
+                let _ = settings.update(cx, |_, window, _| window.remove_window());
+            }),
+            _ => cx.propagate(),
+        }
     });
     route::<Changes>(cx, window, view.clone(), |v, w, c| v.show_diff(w, c));
     route::<ToggleTerminal>(cx, window, view.clone(), |v, _, c| v.toggle_terminal(c));
@@ -598,7 +619,7 @@ impl Workspace {
             self.select_tab(index, window, cx);
             return;
         }
-        let word_wrap = self.commands.word_wrap;
+        let word_wrap = self.editor_prefs().word_wrap;
         let language = document.language();
         let unit = tandem_core::edit::indent::for_document(language, &document.text);
         let editor = cx.new(|cx| {
@@ -637,7 +658,6 @@ impl Workspace {
         });
         self.attach_ide(&editor, language, unit, window, cx);
         self.active = Some(self.tabs.len() - 1);
-        self.settings.open = false;
         self.diff = None;
         self.close_pending = false;
         self.changed(cx);
@@ -707,7 +727,6 @@ impl Workspace {
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.record_jump(cx);
         self.active = Some(index);
-        self.settings.open = false;
         self.invalidate_language(cx);
         self.diff = None;
         self.close_pending = false;
@@ -902,8 +921,6 @@ impl Workspace {
             cx.notify();
             return;
         }
-        // The comparison takes the editor area, where Settings would cover it.
-        self.settings.open = false;
         self.snapshot_live(cx);
         let Some(project) = self.project.clone() else {
             return;

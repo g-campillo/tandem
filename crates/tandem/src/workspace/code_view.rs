@@ -3,6 +3,7 @@
 use super::chat_logic::hover_after;
 use super::*;
 use crate::appearance::{palette, panel_code};
+use crate::scrolling::side_scroll;
 use gpui_kit::component::highlighter::{
     GrammarConfig, HighlightTheme, LanguageRegistry, SyntaxHighlighter,
 };
@@ -289,15 +290,13 @@ impl Workspace {
             });
         }
         // Shown exactly as given, one line per line, scrolling sideways when it is wide.
-        let panel = panel_code(div().id(("chat-code", id)), cx)
+        let panel = panel_code(side_scroll(("chat-code", id)), cx)
             .font_family(face.family.clone())
             .font_features(face.features.clone())
             .text_size(px(face.size))
             .line_height(px(face.line_height()))
             .p_2()
             .rounded(px(6.))
-            .h_flex()
-            .overflow_x_scroll()
             .child(
                 div()
                     .flex_none()

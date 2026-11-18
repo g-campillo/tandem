@@ -35,7 +35,7 @@ pub struct Development {
     pub problem_counts: ProblemCounts,
     pub navigation: Vec<Navigation>,
     pub navigation_stamp: Option<LanguageStamp>,
-    /// The symbols of the open file, for the breadcrumbs.
+    /// The symbols of the open file, for the Outline section.
     pub outline: Vec<OutlineSymbol>,
     /// The tab instance and text hash `outline` was last asked for.
     pub outline_key: String,
@@ -630,8 +630,8 @@ impl Workspace {
         }
     }
     /// Asks the language server for the open file's symbols when its text has changed
-    /// since the last answer. The breadcrumbs look the cursor's line up in the answer, so
-    /// a cursor move asks for nothing.
+    /// since the last answer. The Outline looks the cursor's line up in the answer, so a
+    /// cursor move asks for nothing.
     fn request_outline(&mut self, cx: &mut Context<Self>) {
         let Some(manager) = self.language_manager().cloned() else {
             return;

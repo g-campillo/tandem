@@ -149,8 +149,6 @@ pub struct CommandsUi {
     palette: Option<Entity<CommandState>>,
     /// Whether the file explorer is shown (⌘B).
     pub(super) explorer_visible: bool,
-    /// Whether code editors wrap long lines (⌥Z).
-    pub(super) word_wrap: bool,
     /// The bottom panel's tab when ⌘J last hid it, so ⌘J reopens that tab.
     last_bottom: BottomTab,
     /// The occurrences ⌘D has selected so far.
@@ -174,8 +172,6 @@ impl Default for CommandsUi {
         Self {
             palette: None,
             explorer_visible: true,
-            // The toolkit's default.
-            word_wrap: true,
             last_bottom: BottomTab::Terminal,
             occurrences: None,
             expansion: None,
@@ -692,6 +688,11 @@ fn route<A: Action>(
 ) {
     let view = view.clone();
     cx.on_action(move |_: &A, cx| {
+        // A shortcut or menu command used while another window (Settings) is in front is
+        // not for the editor's window.
+        if cx.active_window().is_some_and(|active| active != window) {
+            return;
+        }
         let view = view.clone();
         cx.defer(move |cx| {
             let _ = window.update(cx, |_, window, cx| {

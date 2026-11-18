@@ -4,6 +4,7 @@ use super::Workspace;
 use super::complete::{CompletionState, ROW_HEIGHT, VISIBLE_ROWS};
 use super::icons::completion_icon;
 use crate::appearance::{RADIUS_CONTROL, palette};
+use crate::scrolling::VerticalOnly as _;
 use crate::workspace::fonts::Face;
 use gpui_kit::component::input::EditorState;
 use gpui_kit::component::text::{TextView, TextViewStyle};
@@ -204,7 +205,7 @@ fn details(item: &CompletionItem, serial: u64, candidate: usize, cx: &App) -> Op
             .occlude()
             .w(px(DETAILS_WIDTH))
             .max_h(px(DETAILS_MAX_HEIGHT))
-            .overflow_y_scroll()
+            .vertical_only()
             .flex()
             .flex_col()
             .gap_2()

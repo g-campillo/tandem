@@ -1,4 +1,6 @@
-use super::{WorkspaceGeometry, palette, project, project_code_font};
+use super::{
+    PANEL_CORNER_INSET, RADIUS_PANEL_INNER, WorkspaceGeometry, palette, project, project_code_font,
+};
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::{Theme, ThemeConfig, ThemeMode};
 use gpui_kit::{Hsla, Rgba, WindowAppearance, px, rgb};
@@ -29,6 +31,15 @@ fn appearance_workspace_geometry_interpolates_and_clamps_panes() {
 }
 
 #[test]
+fn appearance_corner_inset_keeps_square_content_inside_the_panels_curve() {
+    let needed = RADIUS_PANEL_INNER * (1. - std::f32::consts::FRAC_1_SQRT_2);
+    assert!(
+        PANEL_CORNER_INSET >= needed,
+        "{PANEL_CORNER_INSET} < {needed}"
+    );
+}
+
+#[test]
 fn appearance_workspace_geometry_keeps_terminal_width_inside_content() {
     for width in [-10., 0., 400., 900., 1090., 1280., 1600.] {
         for visible in [false, true] {
@@ -36,10 +47,13 @@ fn appearance_workspace_geometry_keeps_terminal_width_inside_content() {
             assert!(geometry.content >= 0.);
             assert!(geometry.terminal_available_width() >= 0.);
             assert!(geometry.terminal_available_width() <= geometry.content);
+            // The editor column is inset beside the window's edge where the chat is hidden;
+            // the shown file tree's own inset separates it on the other side.
+            let inset = if visible { 0. } else { 6. };
             assert_eq!(
                 geometry.terminal_available_width(),
-                (geometry.content - 30.).max(0.),
-                "terminal columns exclude the panel's inset and border and the 8px padding on each side"
+                (geometry.content - inset - 18.).max(0.),
+                "terminal columns exclude the column's inset, the panel's border and the 8px padding on each side"
             );
         }
     }
@@ -47,9 +61,9 @@ fn appearance_workspace_geometry_keeps_terminal_width_inside_content() {
     let wide = WorkspaceGeometry::for_width(1280., true);
     assert_eq!(
         (narrow.terminal_available_width() / 7.3).max(40.) as u16,
-        46
+        48
     );
-    assert_eq!((wide.terminal_available_width() / 7.3).max(40.) as u16, 83);
+    assert_eq!((wide.terminal_available_width() / 7.3).max(40.) as u16, 85);
 }
 
 fn assert_projection(theme: &Theme, mode: ThemeMode) {

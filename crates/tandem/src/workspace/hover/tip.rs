@@ -6,6 +6,7 @@
 use super::content::{HoverContent, ProblemContent, Tone};
 use super::hit;
 use crate::appearance::{RADIUS_CARD, RADIUS_CONTROL, palette};
+use crate::scrolling::VerticalOnly as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::EditorState;
 use gpui_kit::component::text::{TextView, TextViewStyle};
@@ -358,7 +359,7 @@ impl Render for HoverTip {
                     .flex_shrink_0()
                     .gap_2()
                     .max_h(max_height)
-                    .overflow_y_scroll()
+                    .vertical_only()
                     .children(signature)
                     .children(documentation)
                     .into_any_element()

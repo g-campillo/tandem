@@ -11,7 +11,7 @@ impl Workspace {
         window: &Window,
         cx: &App,
     ) -> Option<(Entity<EditorState>, String)> {
-        if self.diff.is_some() || self.settings.open {
+        if self.diff.is_some() {
             return None;
         }
         let tab = self.active.and_then(|index| self.tabs.get(index))?;

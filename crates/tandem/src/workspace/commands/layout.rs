@@ -38,19 +38,16 @@ impl Workspace {
         }
     }
 
-    /// Turns wrapping of long lines on or off in every code editor (⌥Z).
+    /// Turns wrapping of long lines on or off in every code editor (⌥Z), like the switch
+    /// in Settings → Editor, and saves the choice.
     pub(super) fn toggle_word_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Without this guard the menu's key equivalent would take ⌥Z from the chat, the
         // explorer and the terminal.
         if self.focused_editor(window, cx).is_none() {
             return;
         }
-        let wrap = !self.commands.word_wrap;
-        self.commands.word_wrap = wrap;
-        for tab in &self.tabs {
-            tab.editor
-                .update(cx, |editor, cx| editor.set_soft_wrap(wrap, window, cx));
-        }
+        let wrap = !self.editor_prefs().word_wrap;
+        self.set_word_wrap(wrap, window, cx);
         self.message(
             if wrap {
                 "Word wrap on."

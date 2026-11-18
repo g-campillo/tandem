@@ -5,8 +5,10 @@ use super::commands::shortcut;
 use super::pane_logic::{pane_geometry, row_width, terminal_columns};
 use super::*;
 use crate::appearance::{
-    PANEL_INSET, compact_button, glass_panel, navigation_button, palette, path_button, tree_button,
+    PANEL_CORNER_INSET, PANEL_INSET, RADIUS_PANEL_INNER, compact_button, glass_panel,
+    navigation_button, palette, path_button, tree_button,
 };
+use crate::scrolling::{VerticalOnly as _, side_scroll};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Editor, Input};
@@ -179,7 +181,7 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .vertical_only()
                     .p_1()
                     .when(self.sidebar == Sidebar::Files, |d| d.children(files))
                     .when(self.sidebar == Sidebar::Search, |d| d.children(hits)),
@@ -325,7 +327,7 @@ impl Workspace {
             .items_center()
             .gap_1()
             .flex_none()
-            .px_1()
+            .px_2()
             .child(
                 Button::new("tab-save")
                     .icon(Lucide::Save)
@@ -354,26 +356,36 @@ impl Workspace {
             .h(px(34.))
             .flex_shrink_0()
             .min_w_0()
-            .bg(p.content)
-            .border_b_1()
-            .border_color(p.border)
             .child(
-                div()
-                    .id("tab-list")
-                    .h_flex()
-                    .items_center()
-                    .gap_1()
+                // Full height, so a bar for many tabs runs along the bar's bottom edge.
+                side_scroll("tab-list")
+                    .bar_over_content()
+                    .h_full()
                     .flex_1()
                     .min_w_0()
-                    .overflow_x_scroll()
-                    .px_1()
-                    .children(tabs),
+                    .px_2()
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_1()
+                            .flex_none()
+                            .children(tabs),
+                    ),
             )
             .child(actions)
             .into_any_element()
     }
 
-    fn content_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The editor and the panel below it, each a glass panel. The column keeps an inset on
+    /// a side only where no pane is beside it (`inset_left`, `inset_right`), because a
+    /// shown pane's own inset already separates the two.
+    fn content_view(
+        &self,
+        inset_left: bool,
+        inset_right: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = palette(cx.theme().mode);
         let active = self.active.and_then(|i| self.tabs.get(i));
         let editor = active.map(|t| t.editor.clone());
@@ -414,7 +426,7 @@ impl Workspace {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .overflow_y_scroll()
+            .vertical_only()
             .child(
                 div()
                     .v_flex()
@@ -459,12 +471,7 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .bg(p.content)
             .when(!self.tabs.is_empty(), |d| d.child(self.tab_strip(cx)))
-            .children(
-                self.breadcrumbs(cx)
-                    .filter(|_| self.diff.is_none() && !self.settings.open),
-            )
             .when(conflict || recovered || read_only, |d| {
                 d.child(
                     div()
@@ -534,23 +541,25 @@ impl Workspace {
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
-                    .when(self.settings.open, |d| d.child(self.settings_view(cx)))
-                    .when_some(
-                        self.diff.clone().filter(|_| !self.settings.open),
-                        |d, diff| {
-                            d.child(
-                                Editor::new(&diff)
-                                    .readonly(true)
-                                    .aria_label("Read-only changes preview")
-                                    .h(relative(1.0))
-                                    .size_full()
-                                    .font_family(face.family.clone())
-                                    .font_features(face.features.clone())
-                                    .text_size(px(face.size)),
-                            )
-                        },
-                    )
-                    .when(self.diff.is_none() && !self.settings.open, |d| {
+                    .when_some(self.diff.clone(), |d, diff| {
+                        d.child(
+                            Editor::new(&diff)
+                                .readonly(true)
+                                .bordered(false)
+                                .aria_label("Read-only changes preview")
+                                .h(relative(1.0))
+                                .size_full()
+                                .rounded_none()
+                                .rounded_b(px(RADIUS_PANEL_INNER))
+                                // The gutter is square; keep it clear of the corner.
+                                .pl(px(PANEL_CORNER_INSET))
+                                .pb(px(PANEL_CORNER_INSET))
+                                .font_family(face.family.clone())
+                                .font_features(face.features.clone())
+                                .text_size(px(face.size)),
+                        )
+                    })
+                    .when(self.diff.is_none(), |d| {
                         d.when_some(editor, |d, editor| {
                             let (hovered, tip) = (editor.clone(), self.hover.clone());
                             d.on_mouse_move(move |event, _, cx| {
@@ -559,9 +568,15 @@ impl Workspace {
                             .child(
                                 Editor::new(&editor)
                                     .readonly(self.loading || takeover_running)
+                                    .bordered(false)
                                     .aria_label(format!("Editor: {path}"))
                                     .h(relative(1.0))
                                     .size_full()
+                                    .rounded_none()
+                                    .rounded_b(px(RADIUS_PANEL_INNER))
+                                    // The gutter is square; keep it clear of the corner.
+                                    .pl(px(PANEL_CORNER_INSET))
+                                    .pb(px(PANEL_CORNER_INSET))
                                     .font_family(face.family.clone())
                                     .font_features(face.features.clone())
                                     .text_size(px(face.size)),
@@ -577,12 +592,15 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .child(editor_block)
+            .when(inset_left, |d| d.pl(px(PANEL_INSET)))
+            .when(inset_right, |d| d.pr(px(PANEL_INSET)))
+            .pb(px(PANEL_INSET))
+            .child(glass_panel(cx).flex_1().child(editor_block))
             .children(self.bottom_panel(cx).map(|panel| {
                 div()
                     .flex_shrink_0()
                     .min_w_0()
-                    .p(px(PANEL_INSET))
+                    .pt(px(PANEL_INSET))
                     .child(glass_panel(cx).child(panel))
             }))
             .into_any_element()
@@ -660,7 +678,7 @@ impl Workspace {
                     .id("bottom-problems-content")
                     .min_w_0()
                     .max_h(px(240.))
-                    .overflow_y_scroll()
+                    .vertical_only()
                     .p_3()
                     .child(self.problems_panel(cx))
                     .into_any_element(),
@@ -711,6 +729,7 @@ impl Render for Workspace {
             PaneSide::Left => (activity_bar, files, chat, None),
             PaneSide::Right => (None, chat, files, activity_bar),
         };
+        let content = self.content_view(left.is_none(), right.is_none(), cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -729,7 +748,7 @@ impl Render for Workspace {
                         .min_h_0()
                         .max_h(relative(0.25))
                         .flex_shrink_0()
-                        .overflow_y_scroll()
+                        .vertical_only()
                         .p_2()
                         .gap_1()
                         .border_b_1()
@@ -773,7 +792,7 @@ impl Render for Workspace {
                             .min_h_0()
                             .on_drag_move(cx.listener(Self::resize_pane))
                             .children(left)
-                            .child(self.content_view(cx))
+                            .child(content)
                             .children(right),
                     )
                     .children(bar_right),

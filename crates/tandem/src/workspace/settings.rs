@@ -1,15 +1,15 @@
-//! The Settings view shown in place of the editor: Claude, help levels, language tools,
-//! and app and recovery information.
+//! The Settings view, shown in a window of its own (see `settings_window`): Claude, help
+//! levels, layout, appearance, fonts, the editor, language tools, and app and recovery
+//! information.
 use super::chat_logic::help_languages;
 use super::chat_view::{copy_button, help_level_menu, permission_menu};
-use super::chrome_logic::tooltip;
-use super::commands::shortcut;
 use super::panels::{code_note, note};
 use super::*;
 use crate::appearance::{
     palette, panel_body, panel_error, panel_heading, panel_metadata, panel_warning, path_button,
 };
-use gpui_kit::component::button::{Button, ButtonVariants};
+use crate::scrolling::{VerticalOnly as _, side_scroll};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
@@ -25,7 +25,10 @@ const LIMITS_NOTE: &str = "Local ad hoc macOS build. Not notarized; other Macs a
 
 #[derive(Default)]
 pub(super) struct SettingsUi {
-    pub open: bool,
+    /// The Settings window while it is open.
+    pub window: Option<AnyWindowHandle>,
+    /// Set from asking for the window until it has opened, so it opens once.
+    opening: bool,
     pub busy: bool,
     pub lines: Vec<String>,
     /// The app bundle's `Contents/Resources` folder when the helper is bundled.
@@ -95,19 +98,44 @@ fn release_line(resources: &std::path::Path) -> Option<String> {
 }
 
 impl Workspace {
-    /// Shows Settings from the top, with freshly checked status lines.
+    /// Opens the Settings window, scrolled to the top, or brings it to the front when it
+    /// is open. Either way the status lines are checked again.
     pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings.open = true;
-        self.settings.scroll.set_offset(point(px(0.0), px(0.0)));
         self.refresh_settings(cx);
+        if let Some(handle) = self.settings.window
+            && cx.windows().contains(&handle)
+        {
+            // Fails only while that window is busy handling the click that got here, and
+            // then it is already in front.
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            return;
+        }
+        if self.settings.opening {
+            return;
+        }
+        self.settings.opening = true;
+        self.settings.scroll.set_offset(point(px(0.0), px(0.0)));
+        let workspace = cx.entity();
+        // The new window renders from this view, so it opens once this update is over.
+        cx.defer(move |cx| {
+            let opened = super::settings_window::open(workspace.clone(), cx);
+            workspace.update(cx, |view, cx| {
+                view.settings.opening = false;
+                match opened {
+                    Ok(handle) => view.settings.window = Some(handle),
+                    Err(error) => {
+                        view.message(format!("Could not open Settings: {error:#}"), true, cx)
+                    }
+                }
+                cx.notify();
+            });
+        });
     }
 
-    pub(super) fn toggle_settings(&mut self, cx: &mut Context<Self>) {
-        if self.settings.open {
-            self.settings.open = false;
-            cx.notify();
-        } else {
-            self.open_settings(cx);
+    /// Closes the Settings window when it is open.
+    pub fn close_settings(&mut self, cx: &mut App) {
+        if let Some(handle) = self.settings.window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
     }
 
@@ -144,35 +172,16 @@ impl Workspace {
         div()
             .id("settings-view")
             .track_scroll(&self.settings.scroll)
-            .size_full()
+            .flex_1()
+            .w_full()
             .min_w_0()
             .min_h_0()
-            .overflow_y_scroll()
+            .vertical_only()
             .p_4()
             .bg(p.surface)
             .child(
                 panel_body(cx)
                     .max_w(px(760.))
-                    .child(
-                        div()
-                            .h_flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(panel_heading(note("Settings")).flex_1())
-                            .child(
-                                Button::new("close-settings")
-                                    .icon(IconName::Close)
-                                    .ghost()
-                                    .small()
-                                    .accessibility_label("Close Settings")
-                                    .tooltip(tooltip("Close Settings", shortcut("Settings…")))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings.open = false;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
                     .child(self.claude_settings(cx))
                     .child(self.help_level_settings(cx))
                     .child(self.layout_settings(cx))
@@ -400,11 +409,8 @@ impl Workspace {
                 d.child(note("Checking the Claude helper…"))
             })
             .children(self.settings.lines.iter().enumerate().map(|(i, line)| {
-                div()
-                    .id(("settings-line", i))
+                side_scroll(("settings-line", i))
                     .min_w_0()
-                    .h_flex()
-                    .overflow_x_scroll()
                     .child(div().flex_none().w_auto().min_w_full().child(line.clone()))
             }))
             .child(code_note(
@@ -428,42 +434,32 @@ impl Workspace {
                         ),
                 )
             })
-            .child(
-                div()
-                    .id("settings-rust")
-                    .min_w_0()
-                    .h_flex()
-                    .overflow_x_scroll()
-                    .child(div().flex_none().w_auto().min_w_full().child(note(format!(
-                        "Rust: {}",
-                        self.dev.rust.as_ref().map_or_else(
-                            || if self.dev.tool_error.is_empty() {
-                                "Open a project to inspect installed tools".into()
-                            } else {
-                                self.dev.tool_error.clone()
-                            },
-                            |t| format!("{} · {}", t.label, t.cargo.display())
-                        )
-                    )))),
-            )
-            .child(
-                div()
-                    .id("settings-python")
-                    .min_w_0()
-                    .h_flex()
-                    .overflow_x_scroll()
-                    .child(div().flex_none().w_auto().min_w_full().child(note(format!(
-                        "Python: {}",
-                        self.dev.python.as_ref().map_or_else(
-                            || if self.dev.python_error.is_empty() {
-                                "Open a project to inspect installed tools".into()
-                            } else {
-                                self.dev.python_error.clone()
-                            },
-                            |t| format!("{} · {}", t.label, t.interpreter.display())
-                        )
-                    )))),
-            )
+            .child(side_scroll("settings-rust").min_w_0().child(
+                div().flex_none().w_auto().min_w_full().child(note(format!(
+                    "Rust: {}",
+                    self.dev.rust.as_ref().map_or_else(
+                        || if self.dev.tool_error.is_empty() {
+                            "Open a project to inspect installed tools".into()
+                        } else {
+                            self.dev.tool_error.clone()
+                        },
+                        |t| format!("{} · {}", t.label, t.cargo.display())
+                    )
+                ))),
+            ))
+            .child(side_scroll("settings-python").min_w_0().child(
+                div().flex_none().w_auto().min_w_full().child(note(format!(
+                    "Python: {}",
+                    self.dev.python.as_ref().map_or_else(
+                        || if self.dev.python_error.is_empty() {
+                            "Open a project to inspect installed tools".into()
+                        } else {
+                            self.dev.python_error.clone()
+                        },
+                        |t| format!("{} · {}", t.label, t.interpreter.display())
+                    )
+                ))),
+            ))
             .child(
                 panel_metadata(note(LIMITS_NOTE), cx)
                     .pt_3()

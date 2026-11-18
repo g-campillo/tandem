@@ -451,7 +451,6 @@ impl Workspace {
         };
         let new = !project.root.join(&target.path).exists();
         let open = self.tabs.iter().any(|tab| tab.document.path == target.path);
-        self.settings.open = false;
         self.chat.reveal = Some((target.clone(), Instant::now()));
         self.open_file(target.path, new, None, window, cx);
         if open && !self.loading {

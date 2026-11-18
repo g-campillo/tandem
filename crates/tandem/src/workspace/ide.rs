@@ -500,9 +500,9 @@ impl Workspace {
         self.loading || self.takeover_running()
     }
 
-    /// The active tab when its editor is on screen (no diff, settings closed).
+    /// The active tab when its editor is on screen (no diff).
     fn ide_target(&self) -> Option<IdeTarget> {
-        if self.diff.is_some() || self.settings.open {
+        if self.diff.is_some() {
             return None;
         }
         self.active_ide_target()

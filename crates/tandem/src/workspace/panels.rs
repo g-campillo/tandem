@@ -1,5 +1,6 @@
 use super::*;
 use crate::appearance::{RADIUS_CONTROL, panel_body, panel_code, panel_heading, path_button};
+use crate::scrolling::{SideScroll, side_scroll};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
@@ -90,12 +91,10 @@ pub(super) fn code_note(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
     cx: &App,
-) -> Stateful<Div> {
-    panel_code(div().id(id), cx)
+) -> SideScroll {
+    panel_code(side_scroll(id), cx)
         .p_2()
         .rounded(px(RADIUS_CONTROL))
-        .h_flex()
-        .overflow_x_scroll()
         .child(
             div()
                 .flex_none()

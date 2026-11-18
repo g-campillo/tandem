@@ -1,5 +1,6 @@
 mod appearance;
 mod native_window;
+mod scrolling;
 mod workspace;
 
 use anyhow::{Context as _, Result};
@@ -160,7 +161,15 @@ fn main() -> Result<()> {
                     let closing = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
                         closing
-                            .update(cx, |view, cx| view.flush_for_close(cx))
+                            .update(cx, |view, cx| {
+                                let close = view.flush_for_close(cx);
+                                // Settings belongs to this window, and the app quits
+                                // once no window is left.
+                                if close {
+                                    view.close_settings(cx);
+                                }
+                                close
+                            })
                             .unwrap_or(true)
                     });
                     view

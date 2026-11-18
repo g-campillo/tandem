@@ -4,6 +4,7 @@
 use super::icons::symbol_icon;
 use super::*;
 use crate::appearance::{navigation_button, palette, tree_button};
+use crate::scrolling::VerticalOnly as _;
 use crate::workspace::breadcrumbs::OutlineSymbol;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -150,7 +151,7 @@ impl Workspace {
                 .v_flex()
                 .min_w_0()
                 .min_h_0()
-                .overflow_y_scroll()
+                .vertical_only()
                 .px_1()
                 .pb_1()
                 .children(rows)

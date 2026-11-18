@@ -36,9 +36,14 @@ impl WorkspaceGeometry {
     }
 
     pub fn terminal_available_width(self) -> f32 {
-        // The panel is inset on both sides and has a 1 px border; TerminalView keeps its
-        // own 8 px of padding on either side.
-        (self.content - 2. * PANEL_INSET - 2. - 16.).max(0.)
+        // The panel spans the editor column, which is inset only on a side with no pane
+        // beside it (a shown pane's own inset already separates them). The panel has a 1 px
+        // border; TerminalView keeps its own 8 px of padding on either side.
+        let open_sides = [self.sidebar, self.utility]
+            .into_iter()
+            .filter(|width| *width <= 0.)
+            .count();
+        (self.content - open_sides as f32 * PANEL_INSET - 2. - 16.).max(0.)
     }
 }
 
@@ -241,10 +246,18 @@ pub fn glass_panel(cx: &App) -> Div {
 pub const RADIUS_CONTROL: f32 = 8.;
 /// The corner radius of cards: chat cards, dialogs, the command center's list and menus.
 pub const RADIUS_CARD: f32 = 12.;
-/// The corner radius of the floating glass panels: the file tree, the chat and the panel
-/// below the editor.
+/// The corner radius of the floating glass panels: the file tree, the chat, the editor and
+/// the panel below the editor.
 pub const RADIUS_PANEL: f32 = 14.;
-/// The gap between a glass panel and the window's edge or the editor.
+/// The corner radius of what fills a glass panel's corner and paints its own background,
+/// like the code editor: the panel's radius less its 1 px border, so the curves stay
+/// parallel.
+pub const RADIUS_PANEL_INNER: f32 = RADIUS_PANEL - 1.;
+/// How far square-cornered content must stay from a glass panel's inner edges to clear
+/// the corner's curve, like the code editor's line-number gutter: at least
+/// `RADIUS_PANEL_INNER × (1 − 1/√2)`.
+pub const PANEL_CORNER_INSET: f32 = 4.;
+/// The gap between a glass panel and the window's edge or the next panel.
 pub const PANEL_INSET: f32 = 6.;
 
 #[derive(Clone, Copy, Debug)]

@@ -288,6 +288,22 @@ mod tests {
     }
 
     #[test]
+    fn terminal_width_leaves_an_inset_only_where_no_pane_is_beside_the_editor() {
+        let none = ShownPanes {
+            files: false,
+            chat: false,
+        };
+        for (shown, inset) in [(BOTH, 0.), (FILES_ONLY, 6.), (CHAT_ONLY, 6.), (none, 12.)] {
+            let geometry = pane_geometry(1280., &PaneLayout::default(), shown);
+            assert_eq!(
+                geometry.terminal_available_width(),
+                geometry.content - inset - 18.,
+                "{shown:?}"
+            );
+        }
+    }
+
+    #[test]
     fn drag_pane_measures_a_left_pane_from_the_rows_left_edge() {
         let expected = layout(Some(300.), None);
         assert_eq!(

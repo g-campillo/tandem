@@ -1,6 +1,6 @@
-//! How the editor behaves beyond typing: whether a save formats the document first and
-//! whether the language server's type and parameter-name hints are shown. One preference
-//! for every project, saved in `settings` under `editor`.
+//! How the editor behaves beyond typing: whether a save formats the document first,
+//! whether the language server's type and parameter-name hints are shown, and whether
+//! long lines wrap. One preference for every project, saved in `settings` under `editor`.
 use crate::Store;
 use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
@@ -15,6 +15,8 @@ pub struct EditorPrefs {
     pub type_hints: bool,
     /// Show the parameter names of a call's arguments at the end of the line.
     pub parameter_hints: bool,
+    /// Wrap lines longer than the editor is wide; otherwise they scroll sideways.
+    pub word_wrap: bool,
 }
 
 impl Default for EditorPrefs {
@@ -23,6 +25,7 @@ impl Default for EditorPrefs {
             format_on_save: false,
             type_hints: true,
             parameter_hints: true,
+            word_wrap: false,
         }
     }
 }
@@ -58,11 +61,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_defaults_format_nothing_on_save_and_show_both_hints() {
+    fn the_defaults_format_nothing_on_save_show_both_hints_and_do_not_wrap() {
         let prefs = EditorPrefs::default();
         assert!(!prefs.format_on_save);
         assert!(prefs.type_hints);
         assert!(prefs.parameter_hints);
+        assert!(!prefs.word_wrap);
     }
 
     #[test]
@@ -76,6 +80,7 @@ mod tests {
             format_on_save: true,
             type_hints: false,
             parameter_hints: true,
+            word_wrap: true,
         };
         Store::open(directory.path())
             .unwrap()
@@ -99,6 +104,7 @@ mod tests {
             format_on_save: false,
             type_hints: false,
             parameter_hints: false,
+            word_wrap: false,
         };
         store.save_editor_prefs(&second).unwrap();
         assert_eq!(store.editor_prefs().unwrap(), second);
@@ -123,6 +129,7 @@ mod tests {
                 format_on_save: true,
                 type_hints: true,
                 parameter_hints: true,
+                word_wrap: false,
             }
         );
     }
@@ -144,6 +151,7 @@ mod tests {
                 format_on_save: false,
                 type_hints: false,
                 parameter_hints: true,
+                word_wrap: false,
             }
         );
     }

@@ -5,6 +5,7 @@ use super::*;
 use crate::appearance::{PANEL_INSET, glass_panel};
 use gpui_kit::component::resizable::HandleEdge;
 use gpui_kit::component::*;
+use std::rc::Rc;
 use tandem_core::layout::{Pane, PaneLayout, PaneSide};
 
 actions!(tandem, [SwapPanes]);
@@ -117,7 +118,9 @@ impl Workspace {
 
     /// Sets a pane's content in a glass panel `width` wide, inset from the window's edges and
     /// the editor, with the divider on the edge that faces the editor. Dragging the divider
-    /// resizes the pane; a double click returns it to its default width.
+    /// resizes the pane; a double click returns it to its default width. The divider draws
+    /// no line: the gap between the panels already shows the seam, and a full-height line
+    /// would run past their rounded corners.
     pub(super) fn pane_frame(
         &self,
         pane: Pane,
@@ -153,6 +156,7 @@ impl Workspace {
             .child(
                 resize_handle(id, Axis::Horizontal)
                     .inside(edge)
+                    .with_appearance(Rc::new(|_, _, _| Some(Empty.into_any_element())))
                     .on_drag(PaneResize(pane), |drag, _, _, cx| cx.new(|_| drag.clone()))
                     .on_double_click(
                         cx.listener(move |this, _, _, cx| this.reset_pane_width(pane, cx)),

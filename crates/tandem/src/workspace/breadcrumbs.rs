@@ -1,6 +1,5 @@
-//! Pure decisions behind the breadcrumbs above the editor: the parts of the file's path and
-//! the symbols the cursor is in. The Outline section of the Explorer lists the same
-//! symbols. Kept free of GPUI so they are tested directly.
+//! Pure decisions behind the open file's symbols, which the Outline section of the
+//! Explorer lists. Kept free of GPUI so they are tested directly.
 use serde_json::Value;
 
 /// The most symbols kept of one file's outline.
@@ -21,14 +20,6 @@ pub struct OutlineSymbol {
     /// The first and last line of the whole symbol, 0-based.
     pub start_line: u32,
     pub end_line: u32,
-}
-
-/// The folders and the file name of a project-relative path, in order.
-pub fn path_segments(path: &str) -> Vec<String> {
-    path.split('/')
-        .filter(|part| !part.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 /// The symbols in a `textDocument/documentSymbol` reply: nested `DocumentSymbol`s (with
@@ -87,22 +78,6 @@ pub fn outline(reply: &Value) -> Vec<OutlineSymbol> {
     symbols
 }
 
-/// The names of the symbols that contain `line` (0-based), the outermost first: for a
-/// cursor inside a method, the type or impl block and then the method.
-pub fn symbol_path(outline: &[OutlineSymbol], line: u32) -> Vec<String> {
-    let mut containing: Vec<&OutlineSymbol> = outline
-        .iter()
-        .filter(|symbol| symbol.start_line <= line && line <= symbol.end_line)
-        .collect();
-    // The widest symbol is the outermost; of two with the same lines, the one the server
-    // listed first is the parent.
-    containing.sort_by_key(|symbol| std::cmp::Reverse(symbol.end_line - symbol.start_line));
-    containing
-        .into_iter()
-        .map(|symbol| symbol.name.clone())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,17 +97,6 @@ mod tests {
                 {"name": "help", "kind": 6, "range": range(16, 19), "selectionRange": range(16, 16)}
              ]}
         ])
-    }
-
-    #[test]
-    fn path_segments_splits_a_relative_path() {
-        assert_eq!(
-            path_segments("crates/tandem/src/main.rs"),
-            ["crates", "tandem", "src", "main.rs"]
-        );
-        assert_eq!(path_segments("Cargo.toml"), ["Cargo.toml"]);
-        assert!(path_segments("").is_empty());
-        assert_eq!(path_segments("a//b/"), ["a", "b"]);
     }
 
     #[test]
@@ -247,46 +211,5 @@ mod tests {
             .map(|line| json!({"name": format!("s{line}"), "range": range(line, line)}))
             .collect();
         assert_eq!(outline(&Value::Array(many)).len(), MAX_SYMBOLS);
-    }
-
-    #[test]
-    fn symbol_path_lists_the_enclosing_symbols_outermost_first() {
-        let symbols = outline(&nested());
-        assert_eq!(symbol_path(&symbols, 10), ["impl Args", "parse"]);
-        assert_eq!(symbol_path(&symbols, 5), ["Args", "name"]);
-        assert_eq!(symbol_path(&symbols, 8), ["impl Args"]);
-        assert_eq!(symbol_path(&symbols, 20), ["impl Args"]);
-    }
-
-    #[test]
-    fn symbol_path_is_empty_between_symbols_and_without_an_outline() {
-        let symbols = outline(&nested());
-        assert!(symbol_path(&symbols, 0).is_empty());
-        assert!(symbol_path(&symbols, 7).is_empty());
-        assert!(symbol_path(&symbols, 99).is_empty());
-        assert!(symbol_path(&[], 3).is_empty());
-    }
-
-    #[test]
-    fn symbol_path_keeps_the_servers_order_for_symbols_on_the_same_lines() {
-        let symbols = [
-            OutlineSymbol {
-                name: "outer".into(),
-                kind: 2,
-                depth: 0,
-                line: 1,
-                start_line: 1,
-                end_line: 1,
-            },
-            OutlineSymbol {
-                name: "inner".into(),
-                kind: 12,
-                depth: 1,
-                line: 1,
-                start_line: 1,
-                end_line: 1,
-            },
-        ];
-        assert_eq!(symbol_path(&symbols, 1), ["outer", "inner"]);
     }
 }

@@ -5,6 +5,7 @@
 //! with the card open, until the server says the cursor is in no call.
 use super::*;
 use crate::appearance::{RADIUS_CARD, RADIUS_CONTROL, palette};
+use crate::scrolling::VerticalOnly as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
@@ -571,7 +572,7 @@ pub(super) fn signature_card(
             .gap_2()
             .px(px(2.))
             .max_h(px(DOCUMENTATION_MAX_HEIGHT))
-            .overflow_y_scroll()
+            .vertical_only()
             .children(parts)
     });
     let card = div()

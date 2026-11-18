@@ -96,9 +96,6 @@ impl Workspace {
 
     /// Selects the next (or previous) match of the editor's last search (⌘G, ⇧⌘G).
     pub(super) fn find_match(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if self.settings.open {
-            return;
-        }
         let Some(editor) = self.diff.clone().or_else(|| {
             self.active
                 .and_then(|i| self.tabs.get(i))
@@ -214,7 +211,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let editor = (self.diff.is_none() && !self.settings.open)
+        let editor = self
+            .diff
+            .is_none()
             .then(|| self.active.and_then(|i| self.tabs.get(i)))
             .flatten()
             .map(|tab| tab.editor.clone());
