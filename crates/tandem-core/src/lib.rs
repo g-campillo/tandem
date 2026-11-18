@@ -7,6 +7,8 @@ pub mod chat;
 mod chat_store;
 pub mod edit;
 pub mod git;
+pub mod languages;
+pub use languages::ToolKind;
 pub mod layout;
 pub mod takeover;
 mod tools;
@@ -122,14 +124,7 @@ impl Document {
         }
     }
     pub fn language(&self) -> &'static str {
-        match Path::new(&self.path).extension().and_then(|s| s.to_str()) {
-            Some("rs") => "rust",
-            Some("py" | "pyi") => "python",
-            Some("json") => "json",
-            Some("toml") => "toml",
-            Some("md") => "markdown",
-            _ => "plain_text",
-        }
+        languages::language_id_for_path(&self.path)
     }
 }
 

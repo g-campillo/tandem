@@ -1,28 +1,110 @@
+use crate::companion::{MERGED, merge_replies, relay_request, relay_response};
 use crate::legacy::read_frame;
 use crate::utf16_position;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use lsp_types::{Diagnostic, Position, TextEdit};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
+use tandem_core::languages::language_id_for_path;
 
+/// How to launch one language server and what to tell it. Built by `rust_server`, `python_server`, ...
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
-    pub binary: PathBuf,
-    pub toolchain: PathBuf,
+    /// Shown in health text: "rust-analyzer", "Pyright", ...
+    pub name: String,
+    /// Health detail once the server is ready.
+    pub ready_detail: String,
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    /// Directories put on PATH before /usr/bin:/bin:/usr/sbin:/sbin.
+    pub path: Vec<PathBuf>,
+    /// Set after the HOME/USER/LOGNAME/LANG/LC_ALL/TMPDIR allow-list.
+    pub env: Vec<(String, OsString)>,
     pub project: PathBuf,
+    /// Tandem-owned cache folder, created before start; never inside the project.
     pub cache: PathBuf,
-    pub python: Option<PythonServer>,
+    pub initialization_options: Value,
+    /// Answers workspace/configuration; also sent as didChangeConfiguration after `initialized` when `push_configuration`.
+    pub configuration: Value,
+    pub push_configuration: bool,
+    /// Send every open document again with a new version whenever the workspace sequence changes (Pyright).
+    pub resend_on_change: bool,
+    /// Merged over client_capabilities(), objects key by key (Swift asks for dynamic diagnostic registration).
+    pub capabilities: Value,
+    pub diagnostics: DiagnosticMode,
+    /// How long `initialize` may take before the start fails.
+    pub start_timeout: Duration,
+    /// How long any other request may take before the server is restarted.
+    pub request_timeout: Duration,
+    /// A second server run beside this one as a pair (Vue's TypeScript companion): it receives the
+    /// same documents, answers the tsserver requests this server relays, and its answers are merged
+    /// with this server's. Either exiting restarts both.
+    pub companion: Option<Box<ServerConfig>>,
 }
-#[derive(Clone, Debug)]
-pub struct PythonServer {
-    pub script: PathBuf,
-    pub interpreter: PathBuf,
+impl ServerConfig {
+    /// Defaults: ready_detail "{name} ready", no args/path/env, initialization_options null,
+    /// configuration {}, push_configuration false, resend_on_change false, capabilities {},
+    /// diagnostics Versioned, start and request timeouts 20 s, no companion.
+    pub fn new(
+        name: impl Into<String>,
+        program: impl Into<PathBuf>,
+        project: impl Into<PathBuf>,
+        cache: impl Into<PathBuf>,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            ready_detail: format!("{name} ready"),
+            name,
+            program: program.into(),
+            args: vec![],
+            path: vec![],
+            env: vec![],
+            project: project.into(),
+            cache: cache.into(),
+            initialization_options: Value::Null,
+            configuration: json!({}),
+            push_configuration: false,
+            resend_on_change: false,
+            capabilities: json!({}),
+            diagnostics: DiagnosticMode::Versioned,
+            start_timeout: Duration::from_secs(20),
+            request_timeout: Duration::from_secs(20),
+            companion: None,
+        }
+    }
+}
+
+/// How a session answers `textDocument/diagnostic` for a server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticMode {
+    /// Pull when `diagnosticProvider` is advertised, otherwise only pushes carrying the current
+    /// document version (rust-analyzer, Pyright: today's behaviour).
+    Versioned,
+    /// Pull when advertised or dynamically registered. Otherwise the latest push for the file,
+    /// with or without a version, once the server has been quiet for SETTLE since the file's
+    /// last change and its last push.
+    Settled,
+}
+/// How long a `Settled` server must stay quiet before its latest push counts as its answer.
+const SETTLE: Duration = Duration::from_millis(500);
+
+/// PATH for a server: the configured directories, then the system ones. Never an empty entry,
+/// which would put the project folder (the server's working directory) on PATH.
+fn search_path(directories: &[PathBuf]) -> OsString {
+    let mut path = OsString::new();
+    for directory in directories {
+        path.push(directory);
+        path.push(":");
+    }
+    path.push("/usr/bin:/bin:/usr/sbin:/sbin");
+    path
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,12 +180,7 @@ impl LanguageManager {
             sequence: 0,
             health: LanguageHealth {
                 state: "starting".into(),
-                detail: if config.python.is_some() {
-                    "Starting Pyright"
-                } else {
-                    "Starting rust-analyzer"
-                }
-                .into(),
+                detail: format!("Starting {}", config.name),
                 restarts: 0,
             },
         }));
@@ -238,16 +315,7 @@ fn worker(
                     let sequence = shared.lock().unwrap().sequence;
                     if started.sync_documents(&documents, sequence).is_ok() {
                         session = Some(started);
-                        health(
-                            &shared,
-                            "ready",
-                            if config.python.is_some() {
-                                "Pyright ready · selected local interpreter"
-                            } else {
-                                "rust-analyzer ready · build scripts and proc macros off"
-                            },
-                            retries,
-                        );
+                        health(&shared, "ready", config.ready_detail.as_str(), retries);
                     } else {
                         retries += 1;
                         next_restart = Instant::now() + Duration::from_secs(1);
@@ -308,17 +376,13 @@ fn worker(
                     session.sync_documents(&request.stamp.documents, request.stamp.sequence)?;
                     let mut params = request.params.clone();
                     params["textDocument"] = json!({"uri": file_uri(&request.file)?});
-                    let value = if request.method == "textDocument/diagnostic"
-                        && !session.pull_diagnostics
-                    {
-                        session.versioned_diagnostics(
-                            &request.file,
-                            &request.cancelled,
-                            &stopped,
-                        )?
-                    } else {
-                        session.request(&request.method, params, &request.cancelled, &stopped)?
-                    };
+                    let value = session.answer(
+                        &request.method,
+                        &request.file,
+                        params,
+                        &request.cancelled,
+                        &stopped,
+                    )?;
                     ensure!(
                         shared.lock().unwrap().sequence == request.stamp.sequence,
                         "Language response superseded by edits"
@@ -336,10 +400,22 @@ fn worker(
     health(&shared, "stopped", "Language tools stopped", retries);
 }
 
+/// A request the server did not answer in time; the session is closed and restarts.
+#[derive(Debug)]
+struct TimedOut;
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Language request timed out; restarting server")
+    }
+}
+impl std::error::Error for TimedOut {}
+
 struct OpenDocument {
     text: Arc<str>,
     instance: String,
     version: i32,
+    /// When didOpen or the latest didChange was sent.
+    changed: Instant,
 }
 struct ProjectSession {
     child: Child,
@@ -348,38 +424,48 @@ struct ProjectSession {
     next_id: u64,
     documents: BTreeMap<PathBuf, OpenDocument>,
     pull_diagnostics: bool,
+    /// Whether `initialize` advertised `diagnosticProvider`; restored when a dynamic registration is withdrawn.
+    static_pull: bool,
+    diagnostic_mode: DiagnosticMode,
+    request_timeout: Duration,
     closed: bool,
-    language: &'static str,
+    resend_on_change: bool,
     configuration: Value,
     diagnostic_versions: BTreeMap<PathBuf, (i32, Value)>,
+    /// `Settled` only: the latest usable push for each open document and when it arrived.
+    latest_push: BTreeMap<PathBuf, (Value, Instant)>,
     version_counter: i32,
     synced_sequence: u64,
+    /// The server paired with this one (Vue's TypeScript companion), started and stopped with it.
+    companion: Option<Box<ProjectSession>>,
+    /// On a companion: the main server's tsserver request id for each forwarded request's id.
+    relay: BTreeMap<u64, Value>,
+    /// On a companion: tsserver/response params waiting to be sent to the main server.
+    outbox: Vec<Value>,
 }
 
 impl ProjectSession {
     fn start(config: &ServerConfig, stopped: &AtomicBool) -> Result<Self> {
         std::fs::create_dir_all(&config.cache)?;
-        let mut command = Command::new(&config.binary);
-        if let Some(python) = &config.python {
-            command.arg(&python.script).arg("--stdio");
-        }
+        // The companion is ready before the main server can relay its first tsserver request.
+        let companion = config
+            .companion
+            .as_deref()
+            .map(|companion| Self::start(companion, stopped).map(Box::new))
+            .transpose()?;
+        let mut command = Command::new(&config.program);
+        command.args(&config.args);
         command.env_clear();
         for name in ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR"] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
         }
+        command.env("PATH", search_path(&config.path));
+        for (name, value) in &config.env {
+            command.env(name, value);
+        }
         command
-            .env(
-                "PATH",
-                format!(
-                    "{}:/usr/bin:/bin:/usr/sbin:/sbin",
-                    config.toolchain.join("bin").display()
-                ),
-            )
-            .env("RUSTC", config.toolchain.join("bin/rustc"))
-            .env("RUSTDOC", config.toolchain.join("bin/rustdoc"))
-            .env("CARGO_NET_OFFLINE", "true")
             .current_dir(&config.project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -429,26 +515,54 @@ impl ProjectSession {
             next_id: 1,
             documents: BTreeMap::new(),
             pull_diagnostics: false,
+            static_pull: false,
+            diagnostic_mode: config.diagnostics,
+            request_timeout: config.request_timeout,
             closed: false,
-            language:if config.python.is_some(){"python"}else{"rust"},
-            configuration:config.python.as_ref().map(|p|json!({"python":{"pythonPath":p.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":false}},"pyright":{"disableOrganizeImports":true}})).unwrap_or(json!({})),
-            diagnostic_versions:BTreeMap::new(),version_counter:0,synced_sequence:u64::MAX,
+            resend_on_change: config.resend_on_change,
+            configuration: config.configuration.clone(),
+            diagnostic_versions: BTreeMap::new(),
+            latest_push: BTreeMap::new(),
+            version_counter: 0,
+            synced_sequence: u64::MAX,
+            companion,
+            relay: BTreeMap::new(),
+            outbox: vec![],
         };
-        let init = session.request("initialize", json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
-            "capabilities":client_capabilities(),
-            "initializationOptions":{"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":config.cache},
-                "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":false}},"rustfmt":{"extraArgs":[]}}
-        }), &AtomicBool::new(false), stopped)?;
+        let mut capabilities = client_capabilities();
+        merge_json(&mut capabilities, &config.capabilities);
+        let mut initialize = json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
+            "capabilities":capabilities});
+        if !config.initialization_options.is_null() {
+            initialize["initializationOptions"] = config.initialization_options.clone();
+        }
+        let init = session
+            .request(
+                "initialize",
+                initialize,
+                config.start_timeout,
+                &AtomicBool::new(false),
+                stopped,
+            )
+            .map_err(|error| match error.downcast::<TimedOut>() {
+                Ok(TimedOut) => anyhow!(
+                    "{} did not start within {} s",
+                    config.name,
+                    config.start_timeout.as_secs_f32()
+                ),
+                Err(error) => error,
+            })?;
         ensure!(
             init.pointer("/capabilities/positionEncoding")
                 .is_none_or(|v| v == "utf-16"),
             "Unsupported language-server position encoding"
         );
-        session.pull_diagnostics = init
+        session.static_pull = init
             .pointer("/capabilities/diagnosticProvider")
             .is_some_and(|v| !v.is_null());
+        session.pull_diagnostics = session.static_pull;
         session.notify("initialized", json!({}))?;
-        if config.python.is_some() {
+        if config.push_configuration {
             session.notify(
                 "workspace/didChangeConfiguration",
                 json!({"settings":session.configuration}),
@@ -468,14 +582,16 @@ impl ProjectSession {
         self.send(json!({"jsonrpc":"2.0","method":method,"params":params}))
     }
     fn sync_documents(&mut self, documents: &[LanguageDocument], sequence: u64) -> Result<()> {
+        if let Some(companion) = &mut self.companion {
+            companion.sync_documents(documents, sequence)?;
+        }
         let changed = self.documents.len() != documents.len()
             || documents.iter().any(|d| {
                 self.documents
                     .get(&d.path)
                     .is_none_or(|old| old.text != d.text || old.instance != d.instance)
             });
-        let force_versions =
-            self.language == "python" && (changed || self.synced_sequence != sequence);
+        let force_versions = self.resend_on_change && (changed || self.synced_sequence != sequence);
         if changed || force_versions {
             self.diagnostic_versions.clear();
         }
@@ -492,6 +608,7 @@ impl ProjectSession {
                 json!({"textDocument":{"uri":file_uri(&path)?}}),
             )?;
             self.documents.remove(&path);
+            self.latest_push.remove(&path);
         }
         for document in documents {
             if self
@@ -504,6 +621,7 @@ impl ProjectSession {
                     json!({"textDocument":{"uri":file_uri(&document.path)?}}),
                 )?;
                 self.documents.remove(&document.path);
+                self.latest_push.remove(&document.path);
             }
             match self.documents.get_mut(&document.path) {
                 Some(old) if old.text != document.text || force_versions => {
@@ -513,6 +631,7 @@ impl ProjectSession {
                         .context("Language document version exhausted")?;
                     old.version = self.version_counter;
                     old.text = document.text.clone();
+                    old.changed = Instant::now();
                     let version = old.version;
                     self.notify("textDocument/didChange",json!({"textDocument":{"uri":file_uri(&document.path)?,"version":version},"contentChanges":[{"text":document.text.as_ref()}]}))?;
                 }
@@ -521,13 +640,14 @@ impl ProjectSession {
                         .version_counter
                         .checked_add(1)
                         .context("Language document version exhausted")?;
-                    self.notify("textDocument/didOpen",json!({"textDocument":{"uri":file_uri(&document.path)?,"languageId":self.language,"version":self.version_counter,"text":document.text.as_ref()}}))?;
+                    self.notify("textDocument/didOpen",json!({"textDocument":{"uri":file_uri(&document.path)?,"languageId":language_id_for_path(&document.path.to_string_lossy()),"version":self.version_counter,"text":document.text.as_ref()}}))?;
                     self.documents.insert(
                         document.path.clone(),
                         OpenDocument {
                             text: document.text.clone(),
                             instance: document.instance.clone(),
                             version: self.version_counter,
+                            changed: Instant::now(),
                         },
                     );
                 }
@@ -536,19 +656,42 @@ impl ProjectSession {
         }
         Ok(())
     }
-    fn versioned_diagnostics(
+    /// Answers `textDocument/diagnostic`: the server's pull when it offers one, otherwise
+    /// the pushes the diagnostic mode accepts.
+    fn diagnostics(
         &mut self,
         path: &Path,
+        params: Value,
         cancel: &AtomicBool,
         stop: &AtomicBool,
     ) -> Result<Value> {
-        let version = self.documents.get(path).context("Document closed")?.version;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + self.request_timeout.min(Duration::from_secs(10));
         loop {
+            self.pump_companion()?;
+            // A dynamic registration can arrive while waiting.
+            if self.pull_diagnostics {
+                return self.request(
+                    "textDocument/diagnostic",
+                    params,
+                    self.request_timeout,
+                    cancel,
+                    stop,
+                );
+            }
+            let document = self.documents.get(path).context("Document closed")?;
             if let Some((received, items)) = self.diagnostic_versions.get(path)
-                && *received == version
+                && *received == document.version
             {
                 return Ok(json!({"kind":"full","items":items}));
+            }
+            if self.diagnostic_mode == DiagnosticMode::Settled {
+                let push = self.latest_push.get(path);
+                let quiet_since =
+                    push.map_or(document.changed, |(_, at)| document.changed.max(*at));
+                if quiet_since.elapsed() >= SETTLE {
+                    let items = push.map_or(json!([]), |(items, _)| items.clone());
+                    return Ok(json!({"kind":"full","items":items}));
+                }
             }
             ensure!(
                 !cancel.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed),
@@ -572,17 +715,18 @@ impl ProjectSession {
         &mut self,
         method: &str,
         params: Value,
+        timeout: Duration,
         cancel: &AtomicBool,
         stop: &AtomicBool,
     ) -> Result<Value> {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let id = self.start_request(method, params)?;
+        let deadline = Instant::now() + timeout;
         loop {
+            // The server may be waiting for a tsserver request relayed to the companion.
+            self.pump_companion()?;
             if Instant::now() >= deadline {
                 self.closed = true;
-                bail!("Language request timed out; restarting server");
+                return Err(TimedOut.into());
             }
             if cancel.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
                 let _ = self.notify("$/cancelRequest", json!({"id":id}));
@@ -606,7 +750,6 @@ impl ProjectSession {
                     .context("Language result missing");
             }
             self.handle_message(message)?;
-            // Unversioned push diagnostics never become current findings.
         }
     }
     fn drain(&mut self) -> Result<()> {
@@ -620,35 +763,60 @@ impl ProjectSession {
                 }
             }
         }
-        Ok(())
+        self.pump_companion()
     }
     fn handle_message(&mut self, message: Value) -> Result<()> {
+        if self.relay(&message)? {
+            return Ok(());
+        }
         if message["method"] == "textDocument/publishDiagnostics"
             && let Some(uri) = message["params"]["uri"].as_str()
             && let Ok(path) = uri_path(uri)
-            && let Some(version) = message["params"]["version"].as_i64()
             && let Some(doc) = self.documents.get(&path)
-            && i64::from(doc.version) == version
         {
-            self.diagnostic_versions.insert(
-                path,
-                (doc.version, message["params"]["diagnostics"].clone()),
-            );
+            let version = message["params"]["version"].as_i64();
+            let current = version == Some(i64::from(doc.version));
+            let diagnostics = &message["params"]["diagnostics"];
+            if current {
+                self.diagnostic_versions
+                    .insert(path.clone(), (doc.version, diagnostics.clone()));
+            }
+            if self.diagnostic_mode == DiagnosticMode::Settled && (current || version.is_none()) {
+                self.latest_push
+                    .insert(path, (diagnostics.clone(), Instant::now()));
+            }
         }
         if message.get("method").is_some() && message.get("id").is_some() {
             match message["method"].as_str() {
                     Some("workspace/applyEdit")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"applied":false,"failureReason":"Source edits require an explicit editor action"}}))?,
-                    Some("window/workDoneProgress/create"|"client/registerCapability")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?,
+                    Some("window/workDoneProgress/create")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?,
+                    Some("window/showDocument")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"success":false}}))?,
+                    Some("client/registerCapability")=>{
+                        if self.diagnostic_mode==DiagnosticMode::Settled&&names_diagnostic_pull(&message["params"]["registrations"]){
+                            self.pull_diagnostics=true;
+                        }
+                        self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?;
+                    },
+                    Some("client/unregisterCapability")=>{
+                        // The spec spells it "unregisterations".
+                        if self.diagnostic_mode==DiagnosticMode::Settled&&names_diagnostic_pull(&message["params"]["unregisterations"]){
+                            self.pull_diagnostics=self.static_pull;
+                        }
+                        self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?;
+                    },
                     Some("workspace/configuration")=>{
                         let values=message["params"]["items"].as_array().map(|items|items.iter().map(|item|item["section"].as_str().map(|s|s.split('.').fold(&self.configuration,|value,key|&value[key]).clone()).unwrap_or_else(||self.configuration.clone())).collect::<Vec<_>>()).unwrap_or_default();
                         self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":values}))?;
                     },
-                    _=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32601,"message":"Unsupported client method"}}))?,
+                    _=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?,
                 }
         }
         Ok(())
     }
     fn stop(&mut self) {
+        if let Some(companion) = &mut self.companion {
+            companion.stop();
+        }
         if self.input.take().is_none() {
             return;
         }
@@ -669,11 +837,134 @@ impl Drop for ProjectSession {
     }
 }
 
+/// Answering Tandem's requests, and running a companion beside the main server.
+impl ProjectSession {
+    /// Answers one request from Tandem. With a companion, the methods in MERGED are asked of both
+    /// servers and their answers merged; a companion error leaves the main server's answer alone.
+    fn answer(
+        &mut self,
+        method: &str,
+        file: &Path,
+        params: Value,
+        cancel: &AtomicBool,
+        stop: &AtomicBool,
+    ) -> Result<Value> {
+        if self.companion.is_none() || !MERGED.contains(&method) {
+            return self.answer_alone(method, file, params, cancel, stop);
+        }
+        let main = self.answer_alone(method, file, params.clone(), cancel, stop)?;
+        let companion = self
+            .companion
+            .as_mut()
+            .map(|companion| companion.answer_alone(method, file, params, cancel, stop));
+        // Answers to relayed requests the companion received while answering.
+        self.pump_companion()?;
+        Ok(match companion {
+            Some(Ok(companion)) => merge_replies(method, main, companion),
+            _ => main,
+        })
+    }
+    /// This server's own answer: diagnostics through `diagnostics`, anything else through `request`.
+    fn answer_alone(
+        &mut self,
+        method: &str,
+        file: &Path,
+        params: Value,
+        cancel: &AtomicBool,
+        stop: &AtomicBool,
+    ) -> Result<Value> {
+        if method == "textDocument/diagnostic" {
+            self.diagnostics(file, params, cancel, stop)
+        } else {
+            self.request(method, params, self.request_timeout, cancel, stop)
+        }
+    }
+    /// Sends a request without waiting for its answer and returns its id.
+    fn start_request(&mut self, method: &str, params: Value) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
+        Ok(id)
+    }
+    /// Relays tsserver requests between the main server and its companion; returns whether
+    /// `message` was part of a relay. On the main session, a `tsserver/request` notification is
+    /// forwarded to the companion as typescript-language-server's `typescript.tsserverRequest`
+    /// command, or answered at once with a null body when there is no companion to ask. On the
+    /// companion, the answer to a forwarded request waits in the outbox for `pump_companion`.
+    fn relay(&mut self, message: &Value) -> Result<bool> {
+        if message["method"] == "tsserver/request" && message.get("id").is_none() {
+            let Some((id, command, args)) = relay_request(&message["params"]) else {
+                return Ok(true);
+            };
+            let forwarded = self.companion.as_mut().is_some_and(|companion| {
+                let params = json!({"command":"typescript.tsserverRequest",
+                    "arguments":[command,args,{"isAsync":true,"lowPriority":true}]});
+                companion
+                    .start_request("workspace/executeCommand", params)
+                    .map(|forwarded| companion.relay.insert(forwarded, id.clone()))
+                    .is_ok()
+            });
+            if !forwarded {
+                self.notify("tsserver/response", relay_response(id, Value::Null))?;
+            }
+            return Ok(true);
+        }
+        if message.get("method").is_none()
+            && let Some(id) = message["id"].as_u64().and_then(|id| self.relay.remove(&id))
+        {
+            // An error answer has no result, and so no body.
+            let body = message["result"]["body"].clone();
+            self.outbox.push(relay_response(id, body));
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    /// Handles what the companion sent, without waiting, then sends its answers to relayed
+    /// requests to the main server. A companion that exited or broke closes this session too, so
+    /// the pair restarts together.
+    fn pump_companion(&mut self) -> Result<()> {
+        let Some(companion) = self.companion.as_mut() else {
+            return Ok(());
+        };
+        if companion.drain().is_err() {
+            companion.closed = true;
+        }
+        let exited = companion.closed || companion.child.try_wait().ok().flatten().is_some();
+        let answers = std::mem::take(&mut companion.outbox);
+        if exited {
+            self.closed = true;
+        }
+        for answer in answers {
+            self.notify("tsserver/response", answer)?;
+        }
+        Ok(())
+    }
+}
+
 /// What Tandem tells a language server it supports. Hover text is asked for as Markdown,
 /// so that signatures arrive in fenced code blocks the editor can highlight.
 fn client_capabilities() -> Value {
     json!({"general":{"positionEncodings":["utf-16"]},"workspace":{"configuration":true},
         "textDocument":{"completion":{"completionItem":{"snippetSupport":false}},"definition":{"linkSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"publishDiagnostics":{"versionSupport":true},"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}})
+}
+/// Whether a (un)registration list names pull diagnostics.
+fn names_diagnostic_pull(registrations: &Value) -> bool {
+    registrations.as_array().is_some_and(|registrations| {
+        registrations
+            .iter()
+            .any(|registration| registration["method"] == "textDocument/diagnostic")
+    })
+}
+/// Merges `overlay` into `base`: objects key by key, any other overlay value replaces the base value.
+fn merge_json(base: &mut Value, overlay: &Value) {
+    match (base, overlay) {
+        (Value::Object(base), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                merge_json(base.entry(key.as_str()).or_insert(Value::Null), value);
+            }
+        }
+        (base, overlay) => *base = overlay.clone(),
+    }
 }
 pub fn file_uri(path: &Path) -> Result<String> {
     Ok(url::Url::from_file_path(path)
@@ -778,6 +1069,36 @@ mod tests {
         assert_eq!(
             capabilities.pointer("/textDocument/completion/completionItem/snippetSupport"),
             Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn capability_overlays_merge_objects_and_replace_other_values() {
+        let mut capabilities = json!({"textDocument":{"diagnostic":{},"hover":{"contentFormat":["markdown"]}},"general":true});
+        merge_json(
+            &mut capabilities,
+            &json!({"textDocument":{"diagnostic":{"dynamicRegistration":true},"hover":{"contentFormat":["plaintext"]}},"general":{"a":1},"window":{"showDocument":{"support":false}}}),
+        );
+        assert_eq!(
+            capabilities,
+            json!({"textDocument":{"diagnostic":{"dynamicRegistration":true},"hover":{"contentFormat":["plaintext"]}},"general":{"a":1},"window":{"showDocument":{"support":false}}})
+        );
+        // The default overlay changes nothing.
+        let mut unchanged = client_capabilities();
+        merge_json(&mut unchanged, &json!({}));
+        assert_eq!(unchanged, client_capabilities());
+    }
+
+    #[test]
+    fn search_path_puts_configured_folders_before_the_system_ones() {
+        assert_eq!(
+            search_path(&[PathBuf::from("/a/bin"), PathBuf::from("/b/bin")]),
+            OsString::from("/a/bin:/b/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        );
+        // No leading empty entry, which would mean the server's working directory.
+        assert_eq!(
+            search_path(&[]),
+            OsString::from("/usr/bin:/bin:/usr/sbin:/sbin")
         );
     }
 

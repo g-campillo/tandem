@@ -38,13 +38,7 @@ async fn run() -> Result<()> {
     let lib_text = "pub fn unsaved_name() -> u32 { 2 }\n";
     let main_text = "fn main() { let value = tandem_lsp_fixture::unsaved_name(); let text = String::new(); text.len(); }\n";
     let tools = tandem_core::RustTools::discover(&root)?;
-    let manager = LanguageManager::start(ServerConfig {
-        python: None,
-        binary: tools.rust_analyzer,
-        toolchain: tools.toolchain,
-        project: root.clone(),
-        cache: root.join("target"),
-    });
+    let manager = LanguageManager::start(rust_server(&tools, &root, &root.join("target")));
     let docs = vec![
         LanguageDocument {
             path: lib.clone(),

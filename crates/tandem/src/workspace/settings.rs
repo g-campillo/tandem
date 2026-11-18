@@ -376,6 +376,7 @@ impl Workspace {
                 .child(path_button(Button::new("trust-python"), if self.dev.python_language.is_some(){"Disable Python Tools"}else{"Trust Project & Enable Python"}).disabled(tools.node.is_none()||self.dev.discovering).on_click(cx.listener(|this,_,_,cx|this.authorize_python(cx)))))
             .child(Input::new(&self.dev.python_path).aria_label("Python interpreter path"))
             .child(path_button(Button::new("select-python"), "Select Interpreter (empty = default)").disabled(self.dev.discovering).on_click(cx.listener(|this,_,_,cx|this.select_python(cx))))
+            .child(self.language_tool_rows(cx))
             .into_any_element()
     }
 
