@@ -137,6 +137,7 @@ struct Shared {
     documents: BTreeMap<PathBuf, LanguageDocument>,
     sequence: u64,
     health: LanguageHealth,
+    capabilities: Value,
 }
 struct Request {
     method: String,
@@ -183,6 +184,7 @@ impl LanguageManager {
                 detail: format!("Starting {}", config.name),
                 restarts: 0,
             },
+            capabilities: Value::Null,
         }));
         let stopped = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::sync_channel(32);
@@ -208,6 +210,12 @@ impl LanguageManager {
     }
     pub fn health(&self) -> LanguageHealth {
         self.0.shared.lock().unwrap().health.clone()
+    }
+    /// The running server's capabilities; unknown before it is ready and after it stops.
+    pub fn capabilities(&self) -> crate::features::capabilities::ServerFeatures {
+        crate::features::capabilities::ServerFeatures(
+            self.0.shared.lock().unwrap().capabilities.clone(),
+        )
     }
     pub fn is_current(&self, stamp: &LanguageStamp) -> bool {
         !self.0.stopped.load(Ordering::Relaxed)
@@ -295,6 +303,7 @@ fn worker(
             session = None;
             retries += 1;
             next_restart = Instant::now() + Duration::from_secs(retries.min(3) as u64);
+            shared.lock().unwrap().capabilities = Value::Null;
             health(
                 &shared,
                 "restarting",
@@ -314,6 +323,7 @@ fn worker(
                         .collect::<Vec<_>>();
                     let sequence = shared.lock().unwrap().sequence;
                     if started.sync_documents(&documents, sequence).is_ok() {
+                        shared.lock().unwrap().capabilities = started.capabilities.clone();
                         session = Some(started);
                         health(&shared, "ready", config.ready_detail.as_str(), retries);
                     } else {
@@ -324,6 +334,7 @@ fn worker(
                 Err(error) => {
                     retries += 1;
                     next_restart = Instant::now() + Duration::from_secs(retries as u64);
+                    shared.lock().unwrap().capabilities = Value::Null;
                     health(
                         &shared,
                         if retries < 3 { "restarting" } else { "failed" },
@@ -339,6 +350,7 @@ fn worker(
                 session = None;
                 retries = 0;
                 next_restart = Instant::now();
+                shared.lock().unwrap().capabilities = Value::Null;
                 health(&shared, "starting", "Restarting language tools", 0);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -375,14 +387,31 @@ fn worker(
                         .context("Language server is not ready; retry when connected")?;
                     session.sync_documents(&request.stamp.documents, request.stamp.sequence)?;
                     let mut params = request.params.clone();
-                    params["textDocument"] = json!({"uri": file_uri(&request.file)?});
-                    let value = session.answer(
-                        &request.method,
-                        &request.file,
-                        params,
-                        &request.cancelled,
-                        &stopped,
-                    )?;
+                    if request.method.starts_with("textDocument/") {
+                        params["textDocument"] = json!({"uri": file_uri(&request.file)?});
+                    }
+                    let value = if request.method == "workspace/executeCommand" {
+                        // The command was chosen by the user, so the edits it asks for while
+                        // it runs are collected and returned with its result.
+                        session.collected_edits = Some(Vec::new());
+                        let value = session.answer(
+                            &request.method,
+                            &request.file,
+                            params,
+                            &request.cancelled,
+                            &stopped,
+                        );
+                        let edits = session.collected_edits.take().unwrap_or_default();
+                        json!({"result": value?, "edits": edits})
+                    } else {
+                        session.answer(
+                            &request.method,
+                            &request.file,
+                            params,
+                            &request.cancelled,
+                            &stopped,
+                        )?
+                    };
                     ensure!(
                         shared.lock().unwrap().sequence == request.stamp.sequence,
                         "Language response superseded by edits"
@@ -397,6 +426,7 @@ fn worker(
         }
     }
     drop(session);
+    shared.lock().unwrap().capabilities = Value::Null;
     health(&shared, "stopped", "Language tools stopped", retries);
 }
 
@@ -442,6 +472,10 @@ struct ProjectSession {
     relay: BTreeMap<u64, Value>,
     /// On a companion: tsserver/response params waiting to be sent to the main server.
     outbox: Vec<Value>,
+    capabilities: Value,
+    /// The `workspace/applyEdit` edits received while a `workspace/executeCommand` runs;
+    /// `None` when no command runs, and then such edits are denied.
+    collected_edits: Option<Vec<Value>>,
 }
 
 impl ProjectSession {
@@ -528,10 +562,12 @@ impl ProjectSession {
             companion,
             relay: BTreeMap::new(),
             outbox: vec![],
+            capabilities: Value::Null,
+            collected_edits: None,
         };
         let mut capabilities = client_capabilities();
         merge_json(&mut capabilities, &config.capabilities);
-        let mut initialize = json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,
+        let mut initialize = json!({"processId":std::process::id(),"rootUri":file_uri(&config.project)?,"rootPath":config.project,
             "capabilities":capabilities});
         if !config.initialization_options.is_null() {
             initialize["initializationOptions"] = config.initialization_options.clone();
@@ -552,6 +588,7 @@ impl ProjectSession {
                 ),
                 Err(error) => error,
             })?;
+        session.capabilities = init.get("capabilities").cloned().unwrap_or(Value::Null);
         ensure!(
             init.pointer("/capabilities/positionEncoding")
                 .is_none_or(|v| v == "utf-16"),
@@ -788,7 +825,13 @@ impl ProjectSession {
         }
         if message.get("method").is_some() && message.get("id").is_some() {
             match message["method"].as_str() {
-                    Some("workspace/applyEdit")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"applied":false,"failureReason":"Source edits require an explicit editor action"}}))?,
+                    Some("workspace/applyEdit")=>match &mut self.collected_edits {
+                        Some(list)=>{
+                            list.push(message["params"]["edit"].clone());
+                            self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"applied":true}}))?
+                        }
+                        None=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"applied":false,"failureReason":"Source edits require an explicit editor action"}}))?,
+                    },
                     Some("window/workDoneProgress/create")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}))?,
                     Some("window/showDocument")=>self.send(json!({"jsonrpc":"2.0","id":message["id"],"result":{"success":false}}))?,
                     Some("client/registerCapability")=>{
@@ -944,8 +987,10 @@ impl ProjectSession {
 /// What Tandem tells a language server it supports. Hover text is asked for as Markdown,
 /// so that signatures arrive in fenced code blocks the editor can highlight.
 fn client_capabilities() -> Value {
-    json!({"general":{"positionEncodings":["utf-16"]},"workspace":{"configuration":true},
-        "textDocument":{"completion":{"completionItem":{"snippetSupport":false}},"definition":{"linkSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"publishDiagnostics":{"versionSupport":true},"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}})
+    let mut capabilities = json!({"general":{"positionEncodings":["utf-16"]},"workspace":{"configuration":true},
+        "textDocument":{"completion":{"completionItem":{"snippetSupport":false}},"definition":{"linkSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"publishDiagnostics":{"versionSupport":true},"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}});
+    crate::features::capabilities::extend_client_capabilities(&mut capabilities);
+    capabilities
 }
 /// Whether a (un)registration list names pull diagnostics.
 fn names_diagnostic_pull(registrations: &Value) -> bool {
@@ -1068,7 +1113,7 @@ mod tests {
         );
         assert_eq!(
             capabilities.pointer("/textDocument/completion/completionItem/snippetSupport"),
-            Some(&json!(false))
+            Some(&json!(true))
         );
     }
 

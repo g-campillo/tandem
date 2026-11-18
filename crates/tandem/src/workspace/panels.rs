@@ -65,6 +65,7 @@ impl Workspace {
                     ))
                 }))
             })
+            .children(self.call_hierarchy_section(cx))
             .into_any_element()
     }
 }

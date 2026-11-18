@@ -1,0 +1,55 @@
+{
+	"Script": {
+		"prefix": "script",
+		"body": ["<script lang=\"ts\">", "\t$0", "</script>"],
+		"description": "A TypeScript script block."
+	},
+	"Style": {
+		"prefix": "style",
+		"body": ["<style>", "\t$0", "</style>"],
+		"description": "A style block."
+	},
+	"If block": {
+		"prefix": "if",
+		"body": ["{#if ${1:condition}}", "\t$0", "{/if}"],
+		"description": "Markup shown when a condition holds."
+	},
+	"If else block": {
+		"prefix": "ifelse",
+		"body": ["{#if ${1:condition}}", "\t$2", "{:else}", "\t$0", "{/if}"],
+		"description": "Markup shown when a condition holds, with an else branch."
+	},
+	"Each block": {
+		"prefix": "each",
+		"body": ["{#each ${1:items} as ${2:item}}", "\t$0", "{/each}"],
+		"description": "Markup repeated for each item of a list."
+	},
+	"Await block": {
+		"prefix": "await",
+		"body": [
+			"{#await ${1:promise}}",
+			"\t<p>Loading…</p>",
+			"{:then ${2:value}}",
+			"\t$0",
+			"{:catch ${3:error}}",
+			"\t<p>{$3.message}</p>",
+			"{/await}"
+		],
+		"description": "Markup for each state of a promise."
+	},
+	"Prop": {
+		"prefix": "prop",
+		"body": "export let ${1:name};",
+		"description": "A component prop."
+	},
+	"Reactive statement": {
+		"prefix": "reactive",
+		"body": "$: ${1:name} = ${2:value};",
+		"description": "A reactive declaration."
+	},
+	"onMount": {
+		"prefix": "onMount",
+		"body": ["onMount(() => {", "\t$0", "});"],
+		"description": "Runs code after the component is mounted."
+	}
+}

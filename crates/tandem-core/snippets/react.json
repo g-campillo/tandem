@@ -1,0 +1,54 @@
+{
+	"useState": {
+		"prefix": "useState",
+		"body": "const [${1:value}, set${2:Value}] = useState(${3:initialValue});",
+		"description": "A state variable and its setter."
+	},
+	"useEffect": {
+		"prefix": "useEffect",
+		"body": ["useEffect(() => {", "\t$0", "}, [$1]);"],
+		"description": "An effect that runs when its dependencies change."
+	},
+	"useRef": {
+		"prefix": "useRef",
+		"body": "const ${1:ref} = useRef(${2:null});",
+		"description": "A ref."
+	},
+	"useMemo": {
+		"prefix": "useMemo",
+		"body": "const ${1:value} = useMemo(() => ${2:compute()}, [$3]);",
+		"description": "A memoized value."
+	},
+	"useCallback": {
+		"prefix": "useCallback",
+		"body": ["const ${1:handler} = useCallback(($2) => {", "\t$0", "}, [$3]);"],
+		"description": "A memoized callback."
+	},
+	"useContext": {
+		"prefix": "useContext",
+		"body": "const ${1:value} = useContext(${2:Context});",
+		"description": "Reads a context."
+	},
+	"Function component": {
+		"prefix": "rfc",
+		"body": [
+			"export function ${1:${TM_FILENAME_BASE}}($2) {",
+			"\treturn (",
+			"\t\t<div>$0</div>",
+			"\t);",
+			"}"
+		],
+		"description": "A function component named after the file."
+	},
+	"Arrow function component": {
+		"prefix": "rafc",
+		"body": [
+			"export const ${1:${TM_FILENAME_BASE}} = ($2) => {",
+			"\treturn (",
+			"\t\t<div>$0</div>",
+			"\t);",
+			"};"
+		],
+		"description": "An arrow function component named after the file."
+	}
+}

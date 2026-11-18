@@ -1,0 +1,27 @@
+{
+	"Interface": {
+		"prefix": "interface",
+		"body": ["interface ${1:Name} {", "\t${2:key}: ${3:string};", "}"],
+		"description": "An interface with one property."
+	},
+	"Type alias": {
+		"prefix": "type",
+		"body": "type ${1:Name} = ${2:string};",
+		"description": "A type alias."
+	},
+	"Enum": {
+		"prefix": "enum",
+		"body": ["enum ${1:Name} {", "\t${2:Value},", "}"],
+		"description": "An enum."
+	},
+	"Function": {
+		"prefix": "fn",
+		"body": ["function ${1:name}($2): ${3:void} {", "\t$0", "}"],
+		"description": "A function with a return type."
+	},
+	"Async function": {
+		"prefix": "afn",
+		"body": ["async function ${1:name}($2): Promise<${3:void}> {", "\t$0", "}"],
+		"description": "An async function with a return type."
+	}
+}

@@ -1,0 +1,17 @@
+{
+	"Object": {
+		"prefix": "obj",
+		"body": ["{", "\t\"${1:key}\": ${2:\"value\"}", "}"],
+		"description": "An object with one key."
+	},
+	"Array": {
+		"prefix": "arr",
+		"body": ["[", "\t$0", "]"],
+		"description": "An array."
+	},
+	"Key and value": {
+		"prefix": "kv",
+		"body": "\"${1:key}\": ${2:\"value\"}",
+		"description": "A key and its value."
+	}
+}

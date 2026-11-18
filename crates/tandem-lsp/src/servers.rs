@@ -18,7 +18,7 @@ pub fn rust_server(tools: &tandem_core::RustTools, project: &Path, cache: &Path)
     ];
     config.path = vec![bin];
     config.initialization_options = json!({"checkOnSave":false,"cargo":{"extraArgs":["--locked","--offline"],"buildScripts":{"enable":false},"targetDir":cache},
-        "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":false}},"rustfmt":{"extraArgs":[]}});
+        "procMacro":{"enable":false},"files":{"watcher":"server"},"completion":{"autoimport":{"enable":true}},"rustfmt":{"extraArgs":[]}});
     config
 }
 
@@ -34,7 +34,7 @@ pub fn python_server(
     config.ready_detail = "Pyright ready · selected local interpreter".into();
     config.args = vec![script.into(), "--stdio".into()];
     config.path = vec![tools.prefix.join("bin")];
-    config.configuration = json!({"python":{"pythonPath":tools.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":false}},"pyright":{"disableOrganizeImports":true}});
+    config.configuration = json!({"python":{"pythonPath":tools.interpreter,"analysis":{"diagnosticMode":"openFilesOnly","typeCheckingMode":"basic","autoImportCompletions":true}},"pyright":{"disableOrganizeImports":false}});
     config.push_configuration = true;
     config.resend_on_change = true;
     Some(config)

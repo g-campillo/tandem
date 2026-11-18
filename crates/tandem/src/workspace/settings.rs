@@ -178,6 +178,7 @@ impl Workspace {
                     .child(self.layout_settings(cx))
                     .child(self.appearance_settings(cx))
                     .child(self.font_settings(cx))
+                    .child(self.editor_settings(cx))
                     .child(self.language_settings(cx))
                     .child(self.app_settings(cx)),
             )
@@ -363,7 +364,7 @@ impl Workspace {
                 if let Some(manager)=&this.dev.language{manager.restart();}this.invalidate_language(cx);cx.notify();}))))
             .child(path_button(Button::new("rescan-tools"), "Recheck Installed Tools").disabled(self.dev.discovering).on_click(cx.listener(|this,_,_,cx|this.discover_tools(cx))))
             .child(panel_heading(note("Current file")).mt_3().pt_3().border_t_1().border_color(cx.theme().border))
-            .child(path_button(Button::new("format-file"), "Format Buffer  ⇧⌥F").on_click(cx.listener(|this,_,window,cx|this.language_action("textDocument/formatting",window,cx))))
+            .child(path_button(Button::new("format-file"), "Format Buffer  ⇧⌥F").on_click(cx.listener(|this,_,window,cx|this.format_document(window,cx))))
             .child(note("Formatting changes the buffer only when requested and remains undoable."))
             .child(path_button(Button::new("file-symbols"), "Symbols  ⌘⇧O").on_click(cx.listener(|this,_,window,cx|this.language_action("textDocument/documentSymbol",window,cx))))
             .child(path_button(Button::new("file-references"), "References at Cursor  ⇧F12").on_click(cx.listener(|this,_,window,cx|this.language_action("textDocument/references",window,cx))))

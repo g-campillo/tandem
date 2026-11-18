@@ -3,6 +3,7 @@ mod center;
 mod editing;
 mod files;
 mod history;
+mod language;
 mod layout;
 mod navigation;
 mod selection;
@@ -238,8 +239,11 @@ pub fn commands() -> Vec<CommandSpec> {
         edit(),
         selection(),
         view(),
+        language::view_specs(),
         go(),
+        language::go_specs(),
         code(),
+        language::code_specs(),
         chat(),
     ]
     .into_iter()
@@ -675,6 +679,7 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, view: WeakEntity<Workspace
     route::<CopyFilePath>(cx, window, &view, |v, _, c| v.copy_file_path(false, c));
     route::<CopyRelativeFilePath>(cx, window, &view, |v, _, c| v.copy_file_path(true, c));
     route::<RevealInFinder>(cx, window, &view, |v, _, c| v.reveal_in_finder(c));
+    language::install(cx, window, &view);
 }
 
 /// The pattern of `install_actions`: dispatch runs while GPUI has borrowed the window, so
@@ -1140,6 +1145,55 @@ mod tests {
                 .iter()
                 .all(|menu| !action_names(&menu.items).is_empty())
         );
+    }
+
+    #[test]
+    fn insert_snippet_is_in_the_code_menu_without_a_key() {
+        let spec = commands()
+            .into_iter()
+            .find(|spec| spec.title == "Insert Snippet…")
+            .expect("Insert Snippet… is a registry command");
+        assert_eq!(spec.menu, MenuId::Code);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "");
+        assert!(spec.keys.is_empty());
+        let menus = extend_menus(Vec::new());
+        let code = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Code")
+            .unwrap();
+        assert!(
+            action_names(&code.items)
+                .iter()
+                .any(|name| name == "Insert Snippet…"),
+            "Insert Snippet… is not in Code"
+        );
+    }
+
+    #[test]
+    fn trigger_parameter_hints_is_shift_cmd_space_in_the_editor() {
+        let spec = commands()
+            .into_iter()
+            .find(|spec| spec.title == "Trigger Parameter Hints")
+            .expect("Trigger Parameter Hints is a registry command");
+        assert_eq!(spec.menu, MenuId::Code);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "⇧⌘Space");
+        assert_eq!(spec.keys, ["cmd-shift-space"]);
+        assert_eq!(spec.scope, KeyScope::Editor);
+    }
+
+    #[test]
+    fn rename_symbol_is_f2_in_the_editor() {
+        let spec = commands()
+            .into_iter()
+            .find(|spec| spec.title == "Rename Symbol")
+            .expect("Rename Symbol is a registry command");
+        assert_eq!(spec.menu, MenuId::Code);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "F2");
+        assert_eq!(spec.keys, ["f2"]);
+        assert_eq!(spec.scope, KeyScope::Editor);
     }
 
     #[test]

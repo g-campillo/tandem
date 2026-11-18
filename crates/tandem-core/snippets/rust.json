@@ -1,0 +1,107 @@
+{
+	"Function": {
+		"prefix": "fn",
+		"body": ["fn ${1:name}($2) {", "\t$0", "}"],
+		"description": "A function."
+	},
+	"Public function": {
+		"prefix": "pfn",
+		"body": ["pub fn ${1:name}($2) -> ${3:Type} {", "\t$0", "}"],
+		"description": "A public function with a return type."
+	},
+	"Async function": {
+		"prefix": "afn",
+		"body": ["async fn ${1:name}($2) {", "\t$0", "}"],
+		"description": "An async function."
+	},
+	"Main function": {
+		"prefix": "main",
+		"body": ["fn main() {", "\t$0", "}"],
+		"description": "The program's main function."
+	},
+	"Struct": {
+		"prefix": "struct",
+		"body": ["struct ${1:Name} {", "\t$0", "}"],
+		"description": "A struct with named fields."
+	},
+	"Enum": {
+		"prefix": "enum",
+		"body": ["enum ${1:Name} {", "\t${2:Variant},", "}"],
+		"description": "An enum."
+	},
+	"Impl block": {
+		"prefix": "impl",
+		"body": ["impl ${1:Type} {", "\t$0", "}"],
+		"description": "An impl block for a type."
+	},
+	"Trait impl": {
+		"prefix": "implt",
+		"body": ["impl ${1:Trait} for ${2:Type} {", "\t$0", "}"],
+		"description": "An implementation of a trait for a type."
+	},
+	"Trait": {
+		"prefix": "trait",
+		"body": ["trait ${1:Name} {", "\t$0", "}"],
+		"description": "A trait."
+	},
+	"Match": {
+		"prefix": "match",
+		"body": ["match ${1:value} {", "\t${2:pattern} => ${3:expression},", "}"],
+		"description": "A match expression."
+	},
+	"If let": {
+		"prefix": "iflet",
+		"body": ["if let ${1:Some(value)} = ${2:option} {", "\t$0", "}"],
+		"description": "An if let expression."
+	},
+	"For loop": {
+		"prefix": "for",
+		"body": ["for ${1:item} in ${2:items} {", "\t$0", "}"],
+		"description": "A for loop over an iterator."
+	},
+	"While loop": {
+		"prefix": "while",
+		"body": ["while ${1:condition} {", "\t$0", "}"],
+		"description": "A while loop."
+	},
+	"Loop": {
+		"prefix": "loop",
+		"body": ["loop {", "\t$0", "}"],
+		"description": "An endless loop."
+	},
+	"Test": {
+		"prefix": "test",
+		"body": ["#[test]", "fn ${1:name}() {", "\t$0", "}"],
+		"description": "A test function."
+	},
+	"Test module": {
+		"prefix": "tmod",
+		"body": [
+			"#[cfg(test)]",
+			"mod tests {",
+			"\tuse super::*;",
+			"",
+			"\t#[test]",
+			"\tfn ${1:name}() {",
+			"\t\t$0",
+			"\t}",
+			"}"
+		],
+		"description": "A test module with one test."
+	},
+	"Derive": {
+		"prefix": "derive",
+		"body": "#[derive(${1:Debug, Clone})]",
+		"description": "A derive attribute."
+	},
+	"Print line": {
+		"prefix": "println",
+		"body": "println!(\"$1\");",
+		"description": "Prints a line to standard output."
+	},
+	"Constant": {
+		"prefix": "const",
+		"body": "const ${1:NAME}: ${2:Type} = ${3:value};",
+		"description": "A constant."
+	}
+}

@@ -375,7 +375,6 @@ impl Workspace {
         for tab in &mut self.tabs {
             tab.language_bound = false;
             tab.editor.update(cx, |editor, cx| {
-                editor.lsp_mut().completion_provider = None;
                 editor.lsp_mut().hover_provider = None;
                 editor.lsp_mut().definition_provider = None;
                 editor.lsp_mut().show_document = None;
@@ -498,7 +497,6 @@ impl Workspace {
             let weak = weak.clone();
             let root = project.root.clone();
             tab.editor.update(cx, |editor, _| {
-                editor.lsp_mut().completion_provider = Some(provider.clone());
                 editor.lsp_mut().definition_provider = Some(provider);
                 editor.lsp_mut().hover_provider = Some(hover);
                 editor.lsp_mut().show_document = Some(Rc::new(move |params, window, cx| {

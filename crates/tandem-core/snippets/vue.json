@@ -1,0 +1,66 @@
+{
+	"Single-file component": {
+		"prefix": "vbase",
+		"body": [
+			"<template>",
+			"\t<div>$0</div>",
+			"</template>",
+			"",
+			"<script setup lang=\"ts\">",
+			"</script>",
+			"",
+			"<style scoped>",
+			"</style>"
+		],
+		"description": "A single-file component with a template, a setup script and scoped styles."
+	},
+	"v-for": {
+		"prefix": "vfor",
+		"body": "<${1:div} v-for=\"${2:item} in ${3:items}\" :key=\"${4:item.id}\">$0</$1>",
+		"description": "An element repeated for each item of a list."
+	},
+	"v-if": {
+		"prefix": "vif",
+		"body": "<${1:div} v-if=\"${2:condition}\">$0</$1>",
+		"description": "An element shown when a condition holds."
+	},
+	"v-model": {
+		"prefix": "vmodel",
+		"body": "v-model=\"${1:value}\"",
+		"description": "A two-way binding."
+	},
+	"ref": {
+		"prefix": "ref",
+		"body": "const ${1:name} = ref(${2:initialValue});",
+		"description": "A reactive reference."
+	},
+	"computed": {
+		"prefix": "computed",
+		"body": "const ${1:name} = computed(() => ${2:value});",
+		"description": "A computed value."
+	},
+	"watch": {
+		"prefix": "watch",
+		"body": ["watch(${1:source}, (${2:value}) => {", "\t$0", "});"],
+		"description": "Runs code when a source changes."
+	},
+	"onMounted": {
+		"prefix": "onMounted",
+		"body": ["onMounted(() => {", "\t$0", "});"],
+		"description": "Runs code after the component is mounted."
+	},
+	"defineProps": {
+		"prefix": "props",
+		"body": ["const props = defineProps<{", "\t${1:name}: ${2:string};", "}>();"],
+		"description": "Declares the component's props."
+	},
+	"defineEmits": {
+		"prefix": "emits",
+		"body": [
+			"const emit = defineEmits<{",
+			"\t(e: \"${1:change}\", ${2:value}: ${3:string}): void;",
+			"}>();"
+		],
+		"description": "Declares the component's events."
+	}
+}
