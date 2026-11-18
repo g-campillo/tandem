@@ -5,4 +5,5 @@ pub mod capabilities;
 pub mod completion;
 pub mod edits;
 pub mod highlights;
+pub mod inlay;
 pub mod signature;

@@ -15,6 +15,7 @@ use tandem_lsp::features::completion::{
 };
 use tandem_lsp::features::edits::{command_edits, relative_edits, workspace_edit};
 use tandem_lsp::features::highlights::document_highlights;
+use tandem_lsp::features::inlay::{LineHint, eol_hints, hint_text, inlay_params};
 use tandem_lsp::features::signature::{signature_help, signature_params, signature_view};
 use tandem_lsp::*;
 
@@ -167,6 +168,10 @@ async fn rust_checks(project: &Path, checks: &mut Checks) {
         "rust highlights",
         highlights(&manager, &mut docs, &lib).await,
     );
+    let probe = format!(
+        "{RUST_LIB}\npub fn probe() -> String {{\n    let s = describe(1.0, \"x\");\n    s\n}}\n"
+    );
+    checks.record("rust inlay", inlay(&manager, &mut docs, &lib, &probe).await);
     checks.record(
         "rust rename",
         rename(
@@ -378,6 +383,61 @@ async fn highlights(
             .all(|(range, _)| &RUST_LIB[range.clone()] == "total"),
         "a highlight is not total: {found:?}"
     );
+    Ok(())
+}
+
+/// In `text`, rust-analyzer's hints put `total: f64` after `let mut total = 0.0;`, and the
+/// `let s = describe(1.0, "x");` line shows the names of `describe`'s parameters.
+async fn inlay(
+    manager: &LanguageManager,
+    docs: &mut Vec<LanguageDocument>,
+    file: &Path,
+    text: &str,
+) -> Result<()> {
+    set_text(manager, docs, file, text);
+    let call = text
+        .lines()
+        .position(|line| line.contains("let s = describe"))
+        .context("the probe has no let s line")? as u32;
+    let total = |hints: &[LineHint]| {
+        hints
+            .iter()
+            .any(|hint| hint.labels.iter().any(|label| label == "total: f64"))
+    };
+    let shown = |hints: &[LineHint]| {
+        hints
+            .iter()
+            .find(|hint| hint.line == call)
+            .and_then(|hint| hint_text(hint, true, true))
+    };
+    let complete = |hints: &[LineHint]| {
+        total(hints) && shown(hints).is_some_and(|shown| shown.contains("(side:, label:)"))
+    };
+    let reply = retry(|| async move {
+        let mut reply = manager
+            .request(
+                "textDocument/inlayHint",
+                file,
+                "fixture",
+                text,
+                inlay_params(text),
+            )
+            .await?;
+        // Hints of a project still loading count as no answer, so they are asked again.
+        if !complete(&eol_hints(text, &reply.value)) {
+            reply.value = Value::Null;
+        }
+        Ok(reply)
+    })
+    .await?;
+    let hints = eol_hints(text, &reply.value);
+    ensure!(total(&hints), "no line has the hint total: f64: {hints:?}");
+    let shown = shown(&hints).with_context(|| format!("the let s line has no hints: {hints:?}"))?;
+    ensure!(
+        shown.contains("(side:, label:)"),
+        "the let s line shows {shown:?}"
+    );
+    println!("rust inlay: {shown}");
     Ok(())
 }
 

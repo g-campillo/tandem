@@ -2,15 +2,17 @@
 //! corrections made right after a keystroke (indentation and tag closing), Tandem's own
 //! completion list, the tab stops of inserted snippets, the parameter hints, the
 //! highlights of the symbol under the cursor, Rename Symbol, Quick Fix and Organize
-//! Imports, Format Document and Format on Save, the language server's edits to several
-//! files, and the Editor section of Settings. Every edit this layer makes to a buffer goes
-//! through [`Workspace::ide_replace`], one undo step each.
+//! Imports, Format Document and Format on Save, the type and parameter-name hints at the
+//! end of the line, the language server's edits to several files, and the Editor section
+//! of Settings. Every edit this layer makes to a buffer goes through
+//! [`Workspace::ide_replace`], one undo step each.
 mod actions;
 mod complete;
 mod edits;
 mod format;
 mod highlights;
 mod icons;
+mod inlay;
 mod popup;
 mod rename;
 mod rules;
@@ -71,6 +73,8 @@ pub(super) struct IdeUi {
     acting: Option<Task<()>>,
     /// Format Document waiting for the language server; dropping it cancels it.
     formatting: Option<Task<()>>,
+    /// The type and parameter-name hints of the active tab's editor.
+    inlay: Option<inlay::InlayState>,
     /// The editor settings, read from the store on first use.
     prefs: OnceCell<EditorPrefs>,
     /// What the key listeners may take, kept current with the popups.
@@ -613,9 +617,10 @@ impl Workspace {
             .rename
             .as_ref()
             .filter(|rename| rename.editor_id == editor.entity_id());
-        let overlays = list
-            .and_then(|list| popup::completion_list(list, editor, face, cx))
+        let overlays = self
+            .inlay_overlay(editor, face, cx)
             .into_iter()
+            .chain(list.and_then(|list| popup::completion_list(list, editor, face, cx)))
             .chain(hints.and_then(|hints| signature::signature_card(hints, editor, face, cx)))
             .chain(rename.map(|rename| rename::rename_box(rename, editor, face, cx)))
             .collect();
@@ -628,11 +633,11 @@ impl Workspace {
         }
     }
 
-    /// Follows an edit: any edit clears the highlights of the symbol under the cursor. A
-    /// user edit also keeps the snippet session in step with it, corrects a single
-    /// keystroke (see `typing_correction`) as its own undo step, then keeps the completion
-    /// list and the parameter hints in step with the text; edits made by `ide_replace` skip
-    /// that.
+    /// Follows an edit: any edit clears the highlights of the symbol under the cursor and
+    /// moves the hints at the end of the lines. A user edit also keeps the snippet session
+    /// in step with it, corrects a single keystroke (see `typing_correction`) as its own
+    /// undo step, then keeps the completion list and the parameter hints in step with the
+    /// text; edits made by `ide_replace` skip that.
     fn ide_edits(
         &mut self,
         editor: &Entity<EditorState>,
@@ -641,6 +646,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.highlights_edited(editor, cx);
+        self.inlay_edited(editor, event, cx);
         let Some(tab) = self.ide.tabs.get_mut(&editor.entity_id()) else {
             return;
         };
@@ -695,8 +701,9 @@ impl Workspace {
 
     /// Forgets the tabs whose editor is gone, with their snippet sessions, closes a
     /// completion list whose editor is gone and parameter hints and a rename box whose
-    /// editor is no longer on screen, and refreshes the active tab's completion trigger
-    /// characters from its language server (none while language tools are off).
+    /// editor is no longer on screen, refreshes the active tab's completion trigger
+    /// characters from its language server (none while language tools are off) and asks
+    /// it for the hints at the end of the lines when the text has changed.
     pub(in crate::workspace) fn ide_tick(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ide
             .tabs
@@ -712,6 +719,7 @@ impl Workspace {
         }
         self.signature_tick(cx);
         self.rename_tick(cx);
+        self.inlay_tick(cx);
         let triggers = self
             .language_manager()
             .map(|manager| manager.capabilities().completion_triggers())

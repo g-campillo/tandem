@@ -23,13 +23,15 @@ impl Workspace {
         })
     }
 
-    /// Turns Format on save on or off and saves the editor settings; the change holds for
+    /// Changes the editor settings with `change` and saves them; the change holds for
     /// this session even when it could not be saved, which the status bar then says.
-    fn set_format_on_save(&mut self, on: bool, cx: &mut Context<Self>) {
-        let prefs = EditorPrefs {
-            format_on_save: on,
-            ..self.editor_prefs()
-        };
+    fn change_editor_prefs(
+        &mut self,
+        change: impl FnOnce(&mut EditorPrefs),
+        cx: &mut Context<Self>,
+    ) {
+        let mut prefs = self.editor_prefs();
+        change(&mut prefs);
         self.ide.prefs = OnceCell::from(prefs);
         let saved = self
             .store
@@ -65,26 +67,54 @@ impl Workspace {
         }
     }
 
-    /// The Editor section of Settings: Format on save, and where the user's snippets go.
+    /// The Editor section of Settings: Format on save, the hints at the end of the lines,
+    /// and where the user's snippets go.
     pub(in crate::workspace) fn editor_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let prefs = self.editor_prefs();
         let weak = cx.entity().downgrade();
+        let switch = |id: &'static str,
+                      label: &'static str,
+                      checked: bool,
+                      set: fn(&mut EditorPrefs, bool)| {
+            let weak = weak.clone();
+            Switch::new(id)
+                .label(label)
+                .checked(checked)
+                .on_click(move |checked, _, cx| {
+                    let checked = *checked;
+                    let _ = weak.update(cx, |view, cx| {
+                        view.change_editor_prefs(|prefs| set(prefs, checked), cx)
+                    });
+                })
+        };
         panel_body(cx)
             .mt_3()
             .pt_3()
             .border_t_1()
             .border_color(cx.theme().border)
             .child(panel_heading(note("Editor")))
-            .child(
-                Switch::new("format-on-save")
-                    .label("Format on save")
-                    .checked(prefs.format_on_save)
-                    .on_click(move |checked, _, cx| {
-                        let checked = *checked;
-                        let _ = weak.update(cx, |view, cx| view.set_format_on_save(checked, cx));
-                    }),
-            )
+            .child(switch(
+                "format-on-save",
+                "Format on save",
+                prefs.format_on_save,
+                |prefs, on| prefs.format_on_save = on,
+            ))
             .child(panel_metadata(note(FORMAT_ON_SAVE_NOTE), cx))
+            .child(
+                switch(
+                    "type-hints",
+                    "Type hints at the end of lines",
+                    prefs.type_hints,
+                    |prefs, on| prefs.type_hints = on,
+                )
+                .mt_3(),
+            )
+            .child(switch(
+                "parameter-hints",
+                "Parameter names at the end of lines",
+                prefs.parameter_hints,
+                |prefs, on| prefs.parameter_hints = on,
+            ))
             .child(panel_heading(note("Snippets")).mt_3())
             .child(panel_metadata(note(SNIPPETS_NOTE), cx))
             .child(
