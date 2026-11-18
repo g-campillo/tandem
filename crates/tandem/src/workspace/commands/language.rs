@@ -8,13 +8,20 @@ actions!(
         InsertSnippet,
         TriggerParameterHints,
         RenameSymbol,
-        OrganizeImports
+        OrganizeImports,
+        ShowOutline
     ]
 );
 
 /// The language commands of the View menu, listed after the others there.
 pub(super) fn view_specs() -> Vec<CommandSpec> {
-    Vec::new()
+    vec![spec::<ShowOutline>(
+        "Show Outline",
+        MenuId::View,
+        "",
+        &[],
+        KeyScope::Global,
+    )]
 }
 
 /// The language commands of the Go menu, listed after the others there.
@@ -49,6 +56,7 @@ pub(super) fn install(cx: &mut App, window: AnyWindowHandle, view: &WeakEntity<W
     route::<TriggerParameterHints>(cx, window, view, |v, w, c| v.trigger_signature_help(w, c));
     route::<RenameSymbol>(cx, window, view, |v, w, c| v.rename_symbol(w, c));
     route::<OrganizeImports>(cx, window, view, |v, w, c| v.organize_imports(w, c));
+    route::<ShowOutline>(cx, window, view, |v, w, c| v.show_outline(w, c));
 }
 
 #[cfg(test)]
@@ -74,6 +82,16 @@ mod tests {
         assert_eq!(spec.keys, ["alt-enter"]);
         assert_eq!(spec.scope, KeyScope::Editor);
         assert!(spec.action().partial_eq(&ToggleCodeActions));
+    }
+
+    #[test]
+    fn show_outline_is_a_view_command_without_a_key() {
+        let spec = command("Show Outline");
+        assert_eq!(spec.menu, MenuId::View);
+        assert!(spec.in_menu);
+        assert_eq!(spec.shortcut, "");
+        assert!(spec.keys.is_empty());
+        assert_eq!(spec.scope, KeyScope::Global);
     }
 
     #[test]

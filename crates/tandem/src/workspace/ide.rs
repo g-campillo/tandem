@@ -3,8 +3,9 @@
 //! completion list, the tab stops of inserted snippets, the parameter hints, the
 //! highlights of the symbol under the cursor, Rename Symbol, Quick Fix and Organize
 //! Imports, Format Document and Format on Save, the type and parameter-name hints at the
-//! end of the line, the language server's edits to several files, and the Editor section
-//! of Settings. Every edit this layer makes to a buffer goes through
+//! end of the line, the language server's edits to several files, the Outline section of
+//! the Explorer, and the Editor section of Settings. Every edit this layer makes to a
+//! buffer goes through
 //! [`Workspace::ide_replace`], one undo step each.
 mod actions;
 mod complete;
@@ -13,6 +14,7 @@ mod format;
 mod highlights;
 mod icons;
 mod inlay;
+mod outline;
 mod popup;
 mod rename;
 mod rules;
@@ -75,6 +77,8 @@ pub(super) struct IdeUi {
     formatting: Option<Task<()>>,
     /// The type and parameter-name hints of the active tab's editor.
     inlay: Option<inlay::InlayState>,
+    /// Whether the Outline section of the Explorer is collapsed; it starts expanded.
+    outline_collapsed: bool,
     /// The editor settings, read from the store on first use.
     prefs: OnceCell<EditorPrefs>,
     /// What the key listeners may take, kept current with the popups.

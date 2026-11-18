@@ -184,6 +184,7 @@ impl Workspace {
                     .when(self.sidebar == Sidebar::Files, |d| d.children(files))
                     .when(self.sidebar == Sidebar::Search, |d| d.children(hits)),
             )
+            .children(self.outline_section(cx))
             .child(
                 div()
                     .p_2()
